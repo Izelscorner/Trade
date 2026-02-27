@@ -1,5 +1,6 @@
 /** Macro sentiment display for dashboard */
 
+import { Link } from "react-router-dom";
 import type { MacroSentiment } from "../types";
 import { Globe, TrendingUp, TrendingDown, Minus } from "lucide-react";
 
@@ -29,8 +30,9 @@ function SentimentRow({ sentiment }: { sentiment: MacroSentiment }) {
     sentiment.region === "us" ? "🇺🇸  United States" : "🇬🇧  United Kingdom";
 
   return (
-    <div
-      className={`flex items-center justify-between p-3 rounded-lg ${bgColor} transition-all`}
+    <Link
+      to={`/news?region=${sentiment.region}`}
+      className={`flex items-center justify-between p-3 rounded-lg ${bgColor} transition-all hover:brightness-125 cursor-pointer`}
     >
       <div className="flex items-center gap-2">
         <span className="text-sm">{regionLabel}</span>
@@ -52,7 +54,7 @@ function SentimentRow({ sentiment }: { sentiment: MacroSentiment }) {
           {sentiment.label}
         </span>
       </div>
-    </div>
+    </Link>
   );
 }
 

@@ -14,12 +14,14 @@ router = APIRouter()
 @router.get("", response_model=APIResponse)
 async def list_news(
     category: str | None = None,
+    region: str | None = None,
     instrument_id: str | None = None,
     limit: int = 50,
 ):
     """Get news articles with sentiment scores.
 
-    Filter by category (us_politics, uk_politics, us_finance, uk_finance)
+    Filter by category (us_politics, uk_politics, us_finance, uk_finance),
+    by region (us, uk) to get all categories for that region,
     or by instrument_id for mapped articles.
     """
     params: dict = {"limit": min(limit, 200)}
@@ -36,6 +38,17 @@ async def list_news(
             LIMIT :limit
         """
         params["iid"] = instrument_id
+    elif region:
+        query = """
+            SELECT a.id, a.title, a.link, a.summary, a.source, a.category, a.published_at,
+                   s.positive, s.negative, s.neutral, s.label
+            FROM news_articles a
+            LEFT JOIN sentiment_scores s ON s.article_id = a.id
+            WHERE a.category LIKE :region_prefix
+            ORDER BY a.published_at DESC
+            LIMIT :limit
+        """
+        params["region_prefix"] = f"{region}_%"
     elif category:
         query = """
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category, a.published_at,

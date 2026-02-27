@@ -11,6 +11,7 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY app/ ./app/
+ENV PYTHONUNBUFFERED=1
 
 USER appuser
 

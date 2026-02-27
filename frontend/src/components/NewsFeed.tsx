@@ -50,9 +50,14 @@ export default function NewsFeed({
         <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
           {title}
         </h2>
-        <span className="text-xs text-text-muted ml-auto">
-          {articles.length} articles
-        </span>
+        <div className="ml-auto flex flex-col items-end">
+          <span className="text-xs text-text-muted">
+            {articles.length} articles
+          </span>
+          <span className="text-[10px] text-accent-cyan/60 font-mono">
+            {new Date().toLocaleTimeString()}
+          </span>
+        </div>
       </div>
       <div
         className={`space-y-1 ${isFullHeight ? "" : compact ? "max-h-[800px]" : "max-h-[1200px]"} overflow-y-auto pr-1 flex-1`}

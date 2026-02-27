@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS news_articles (
     title TEXT NOT NULL,
     link TEXT,
     summary TEXT,
+    content TEXT,
     source VARCHAR(100) NOT NULL,
     category VARCHAR(50) NOT NULL CHECK (category IN ('us_politics', 'uk_politics', 'us_finance', 'uk_finance', 'asset_specific')),
     published_at TIMESTAMPTZ,

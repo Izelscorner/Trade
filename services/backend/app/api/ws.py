@@ -76,7 +76,6 @@ async def broadcast_live_prices():
                 for r in rows
             ]
             
-            # Serialize datetime inside model_dump manually or let json handle iso
             msg = json.dumps({
                 "type": "live_prices",
                 "data": prices,
@@ -88,15 +87,219 @@ async def broadcast_live_prices():
         except Exception:
             logger.exception("Error in broadcast_live_prices")
             
-        await asyncio.sleep(5)  # Broadcast every 5 seconds
+        await asyncio.sleep(5)
 
 
-@router.websocket("/ws/prices")
+async def broadcast_latest_news():
+    """Background task to broadcast latest news updates."""
+    while True:
+        try:
+            if not manager.active_connections:
+                await asyncio.sleep(5)
+                continue
+            
+            async with async_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT n.id, n.title, n.link, n.summary, n.source, n.category, n.published_at,
+                               s.positive, s.negative, s.neutral, s.label,
+                               m.instrument_id
+                        FROM news_articles n
+                        LEFT JOIN sentiment_scores s ON n.id = s.article_id
+                        LEFT JOIN news_instrument_map m ON n.id = m.article_id
+                        ORDER BY n.published_at DESC
+                        LIMIT 50
+                    """)
+                )
+                rows = result.fetchall()
+
+            news = [
+                {
+                    "id": str(r.id),
+                    "title": r.title,
+                    "link": r.link,
+                    "summary": r.summary,
+                    "source": r.source,
+                    "category": r.category,
+                    "instrument_id": str(r.instrument_id) if r.instrument_id else None,
+                    "published_at": r.published_at.isoformat() if r.published_at else None,
+                    "sentiment": {
+                        "positive": float(r.positive) if r.positive is not None else 0,
+                        "negative": float(r.negative) if r.negative is not None else 0,
+                        "neutral": float(r.neutral) if r.neutral is not None else 0,
+                        "label": r.label or "neutral"
+                    }
+                }
+                for r in rows
+            ]
+
+            msg = json.dumps({
+                "type": "news_updates",
+                "data": news,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            await manager.broadcast(msg)
+
+        except Exception:
+            logger.exception("Error in broadcast_latest_news")
+        
+        await asyncio.sleep(5)
+
+
+async def broadcast_latest_grades():
+    """Background task to broadcast latest grades. Polls every 5s, only sends on change."""
+    _last_grade_ids: set[str] = set()
+
+    while True:
+        try:
+            if not manager.active_connections:
+                await asyncio.sleep(5)
+                continue
+
+            async with async_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT g.*, i.symbol, i.name
+                        FROM grades g
+                        JOIN instruments i ON i.id = g.instrument_id
+                        WHERE (g.instrument_id, g.term, g.graded_at) IN (
+                            SELECT instrument_id, term, MAX(graded_at)
+                            FROM grades
+                            GROUP BY instrument_id, term
+                        )
+                        ORDER BY g.graded_at DESC
+                        LIMIT 30
+                    """)
+                )
+                rows = result.fetchall()
+
+            grades = [
+                {
+                    "id": str(r.id),
+                    "instrument_id": str(r.instrument_id),
+                    "symbol": r.symbol,
+                    "name": r.name,
+                    "term": r.term,
+                    "overall_grade": r.overall_grade,
+                    "overall_score": float(r.overall_score),
+                    "technical_score": float(r.technical_score),
+                    "sentiment_score": float(r.sentiment_score),
+                    "macro_score": float(r.macro_score),
+                    "graded_at": r.graded_at.isoformat()
+                }
+                for r in rows
+            ]
+
+            # Only broadcast if grades actually changed
+            current_ids = {g["id"] for g in grades}
+            if current_ids != _last_grade_ids:
+                _last_grade_ids = current_ids
+                msg = json.dumps({
+                    "type": "grade_updates",
+                    "data": grades,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                await manager.broadcast(msg)
+
+        except Exception:
+            logger.exception("Error in broadcast_latest_grades")
+
+        await asyncio.sleep(5)
+
+
+async def broadcast_technical_indicators():
+    """Background task to broadcast latest technical indicators."""
+    while True:
+        try:
+            if not manager.active_connections:
+                await asyncio.sleep(5)
+                continue
+
+            async with async_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT t.indicator_name, t.value, t.signal, t.calculated_at, i.symbol, i.id as instrument_id
+                        FROM technical_indicators t
+                        JOIN instruments i ON i.id = t.instrument_id
+                        ORDER BY t.calculated_at DESC
+                        LIMIT 20
+                    """)
+                )
+                rows = result.fetchall()
+
+            indicators = [
+                {
+                    "instrument_id": str(r.instrument_id),
+                    "symbol": r.symbol,
+                    "indicator_name": r.indicator_name,
+                    "value": json.loads(r.value) if isinstance(r.value, str) else r.value,
+                    "signal": r.signal,
+                    "calculated_at": r.calculated_at.isoformat()
+                }
+                for r in rows
+            ]
+
+            msg = json.dumps({
+                "type": "technical_updates",
+                "data": indicators,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            await manager.broadcast(msg)
+
+        except Exception:
+            logger.exception("Error in broadcast_technical_indicators")
+        
+        await asyncio.sleep(20)
+
+
+async def broadcast_macro_sentiment():
+    """Background task to broadcast latest macro sentiment."""
+    while True:
+        try:
+            if not manager.active_connections:
+                await asyncio.sleep(10)
+                continue
+
+            async with async_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT DISTINCT ON (region) *
+                        FROM macro_sentiment
+                        ORDER BY region, calculated_at DESC
+                    """)
+                )
+                rows = result.fetchall()
+
+            sentiment = [
+                {
+                    "region": r.region,
+                    "score": float(r.score),
+                    "label": r.label,
+                    "article_count": r.article_count,
+                    "calculated_at": r.calculated_at.isoformat()
+                }
+                for r in rows
+            ]
+
+            msg = json.dumps({
+                "type": "macro_sentiment_updates",
+                "data": sentiment,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            await manager.broadcast(msg)
+
+        except Exception:
+            logger.exception("Error in broadcast_macro_sentiment")
+        
+        await asyncio.sleep(20)
+
+
+@router.websocket("/ws/updates")
 async def websocket_endpoint(websocket: WebSocket):
+    """Unified WebSocket endpoint for prices, news, grades, and technicals."""
     await manager.connect(websocket)
     try:
         while True:
-            # wait for messages (optional ping/pong handling)
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)

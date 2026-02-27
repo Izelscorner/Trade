@@ -12,8 +12,10 @@ COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY app/ ./app/
 
+RUN mkdir -p /models && chown appuser:appgroup /models
+
 USER appuser
 
-EXPOSE 8001
+EXPOSE 8002
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--timeout-keep-alive", "300"]

@@ -90,10 +90,12 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      TRANSFORMERS_CACHE: /tmp/hf_cache
-      HF_HOME: /tmp/hf_cache
+      TRANSFORMERS_CACHE: /models/hf_cache
+      HF_HOME: /models/hf_cache
     ports:
       - "8002:8002"
+    volumes:
+      - relevance-models:/models
     networks:
       - internal
       - egress
@@ -108,8 +110,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
-          cpus: "1.0"
+          memory: 2G
+          cpus: "2.0"
 
   technical-analysis:
     build:
@@ -240,6 +242,7 @@ services:
 
 volumes:
   postgres-data:
+  relevance-models:
 
 networks:
   internal:

@@ -202,6 +202,22 @@ body {
   }
 }
 
+@keyframes newsSlideIn {
+  0% {
+    opacity: 0;
+    transform: translateX(-12px);
+    background-color: rgba(0, 212, 255, 0.12);
+  }
+  50% {
+    background-color: rgba(0, 212, 255, 0.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    background-color: rgba(0, 212, 255, 0.03);
+  }
+}
+
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out forwards;
 }

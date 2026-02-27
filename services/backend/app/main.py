@@ -14,15 +14,29 @@ from .api.dashboard import router as dashboard_router
 from .api.ai_analysis import router as ai_analysis_router
 
 
-from .api.ws import router as ws_router, broadcast_live_prices
+from .api.ws import (
+    router as ws_router, 
+    broadcast_live_prices,
+    broadcast_latest_news,
+    broadcast_latest_grades,
+    broadcast_technical_indicators,
+    broadcast_macro_sentiment
+)
 import asyncio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start the background task
-    task = asyncio.create_task(broadcast_live_prices())
+    # Start all background tasks
+    tasks = [
+        asyncio.create_task(broadcast_live_prices()),
+        asyncio.create_task(broadcast_latest_news()),
+        asyncio.create_task(broadcast_latest_grades()),
+        asyncio.create_task(broadcast_technical_indicators()),
+        asyncio.create_task(broadcast_macro_sentiment()),
+    ]
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
 
 app = FastAPI(
     title="TradeSignal API",

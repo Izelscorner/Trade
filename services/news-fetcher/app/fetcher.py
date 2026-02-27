@@ -1,13 +1,72 @@
 """Fetches and parses RSS feeds."""
 
 import logging
+import re
 from datetime import datetime, timezone
 
 import aiohttp
 import feedparser
+from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
 
 logger = logging.getLogger(__name__)
+
+# Tags that typically contain article body text
+_ARTICLE_TAGS = ["article", "main", "[role='main']", ".article-body", ".story-body", ".post-content"]
+
+
+async def fetch_article_content(url: str, session: aiohttp.ClientSession) -> str | None:
+    """Scrape article body text from a URL. Returns plain text or None on failure."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; TradeSignal/1.0)",
+            "Accept": "text/html",
+        }
+        async with session.get(url, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text(errors="replace")
+    except Exception:
+        return None
+
+    try:
+        soup = BeautifulSoup(html, "lxml")
+
+        # Remove script, style, nav, footer, aside elements
+        for tag in soup.find_all(["script", "style", "nav", "footer", "aside", "header", "form", "noscript"]):
+            tag.decompose()
+
+        # Try to find the article body using common selectors
+        body = None
+        for selector in _ARTICLE_TAGS:
+            if selector.startswith(".") or selector.startswith("["):
+                body = soup.select_one(selector)
+            else:
+                body = soup.find(selector)
+            if body:
+                break
+
+        # Fallback to body tag
+        if not body:
+            body = soup.find("body")
+
+        if not body:
+            return None
+
+        # Extract text from paragraphs for cleaner output
+        paragraphs = body.find_all("p")
+        if paragraphs:
+            text = " ".join(p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20)
+        else:
+            text = body.get_text(separator=" ", strip=True)
+
+        # Clean up whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Return first 5000 chars (enough for sentiment, not too much to store)
+        return text[:5000] if len(text) > 50 else None
+    except Exception:
+        return None
 
 def is_spam(title: str, summary: str, link: str, category: str = "") -> bool:
     """Filter out obvious ad/spam listings and enforce relevance."""
@@ -92,7 +151,7 @@ async def fetch_feed(url: str, source: str, category: str, instrument_id: str | 
         title = entry.get("title", "").strip()
         link = entry.get("link", "")
         summary = entry.get("summary", entry.get("description", ""))
-        
+
         if summary:
             # Strip out some HTML tags if needed, or just truncate
             summary = summary[:2000]
@@ -133,6 +192,32 @@ async def fetch_feed(url: str, source: str, category: str, instrument_id: str | 
             "instrument_id": instrument_id,
             "asset_name": asset_name,
         })
+
+    # Scrape full article content in parallel for sentiment analysis
+    if articles:
+        import asyncio as _asyncio
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                tasks = []
+                task_indices = []
+                for i, a in enumerate(articles):
+                    if a.get("link"):
+                        tasks.append(fetch_article_content(a["link"], session))
+                        task_indices.append(i)
+                    else:
+                        a["content"] = None
+
+                contents = await _asyncio.gather(*tasks, return_exceptions=True)
+                for idx, content in zip(task_indices, contents):
+                    if isinstance(content, str) and content:
+                        articles[idx]["content"] = content
+                    else:
+                        articles[idx]["content"] = None
+        except Exception:
+            logger.warning("Failed to scrape article content, continuing without it")
+        for a in articles:
+            a.setdefault("content", None)
 
     logger.info("Fetched %d articles from %s", len(articles), source)
     return articles

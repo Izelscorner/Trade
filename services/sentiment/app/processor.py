@@ -15,11 +15,11 @@ PROCESS_INTERVAL = 30  # 30 seconds - fast scoring for near-real-time sentiment
 
 
 async def get_unscored_articles(limit: int = 50) -> list[dict]:
-    """Get articles that haven't been scored yet."""
+    """Get articles that haven't been scored yet, including content for better analysis."""
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT a.id, a.title, a.summary, a.category
+                SELECT a.id, a.title, a.summary, a.content, a.category
                 FROM news_articles a
                 LEFT JOIN sentiment_scores s ON s.article_id = a.id
                 WHERE s.id IS NULL
@@ -29,7 +29,13 @@ async def get_unscored_articles(limit: int = 50) -> list[dict]:
             {"limit": limit},
         )
         return [
-            {"id": str(r.id), "title": r.title, "summary": r.summary, "category": r.category}
+            {
+                "id": str(r.id),
+                "title": r.title,
+                "summary": r.summary,
+                "content": getattr(r, "content", None),
+                "category": r.category,
+            }
             for r in result.fetchall()
         ]
 
@@ -39,23 +45,26 @@ async def store_scores(article_scores: list[tuple[str, dict]]) -> None:
     async with async_session() as session:
         for article_id, score in article_scores:
             try:
-                await session.execute(
-                    text("""
-                        INSERT INTO sentiment_scores (article_id, positive, negative, neutral, label)
-                        VALUES (:aid, :positive, :negative, :neutral, :label)
-                        ON CONFLICT (article_id) DO NOTHING
-                    """),
-                    {
-                        "aid": article_id,
-                        "positive": score["positive"],
-                        "negative": score["negative"],
-                        "neutral": score["neutral"],
-                        "label": score["label"],
-                    },
-                )
-            except Exception:
-                logger.exception("Failed to store score for article %s", article_id)
-                await session.rollback()
+                # Use a nested transaction (savepoint) so one failure doesn't kill the batch
+                async with session.begin_nested():
+                    await session.execute(
+                        text("""
+                            INSERT INTO sentiment_scores (article_id, positive, negative, neutral, label)
+                            VALUES (:aid, :positive, :negative, :neutral, :label)
+                            ON CONFLICT (article_id) DO NOTHING
+                        """),
+                        {
+                            "aid": article_id,
+                            "positive": score["positive"],
+                            "negative": score["negative"],
+                            "neutral": score["neutral"],
+                            "label": score["label"],
+                        },
+                    )
+            except Exception as e:
+                # If it's a foreign key violation, it likely means the article was deleted
+                # between fetching and scoring. We can safely ignore this.
+                logger.warning("Could not store score for article %s (possibly deleted): %s", article_id, str(e))
                 continue
         await session.commit()
 
@@ -130,20 +139,52 @@ async def update_macro_sentiment() -> None:
     logger.info("Macro sentiment updated (politics + finance)")
 
 
+def _build_analysis_text(article: dict) -> str:
+    """Build text for sentiment analysis using title, summary, and content.
+
+    Prioritizes content (full article body) when available for more accurate
+    sentiment scoring. Falls back to title + summary.
+    """
+    title = article.get("title") or ""
+    summary = article.get("summary") or ""
+    content = article.get("content") or ""
+
+    if content:
+        # Use title + content (content is the full article, much richer than summary)
+        return f"{title}. {content}"
+    elif summary:
+        return f"{title}. {summary}"
+    return title
+
+
+async def clear_content(article_ids: list[str]) -> None:
+    """NULL out article content after sentiment scoring to save storage."""
+    if not article_ids:
+        return
+    async with async_session() as session:
+        for aid in article_ids:
+            await session.execute(
+                text("UPDATE news_articles SET content = NULL WHERE id = :id"),
+                {"id": aid},
+            )
+        await session.commit()
+
+
 async def process_loop() -> None:
     """Main processing loop."""
     while True:
         try:
             articles = await get_unscored_articles(limit=50)
             if articles:
-                texts = [
-                    f"{a['title']}. {a['summary']}" if a["summary"] else a["title"]
-                    for a in articles
-                ]
+                texts = [_build_analysis_text(a) for a in articles]
                 scores = analyze_batch(texts)
                 pairs = [(a["id"], s) for a, s in zip(articles, scores)]
                 await store_scores(pairs)
                 logger.info("Scored %d articles", len(pairs))
+
+                # Clear content from DB after scoring (temporary storage only)
+                scored_ids = [a["id"] for a in articles if a.get("content")]
+                await clear_content(scored_ids)
 
             await update_macro_sentiment()
 

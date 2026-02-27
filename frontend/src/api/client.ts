@@ -62,11 +62,13 @@ export const fetchGradeHistory = (
 // News
 export const fetchNews = (opts?: {
   category?: string;
+  region?: string;
   instrumentId?: string;
   limit?: number;
 }) => {
   const params = new URLSearchParams();
   if (opts?.category) params.set("category", opts.category);
+  if (opts?.region) params.set("region", opts.region);
   if (opts?.instrumentId) params.set("instrument_id", opts.instrumentId);
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
