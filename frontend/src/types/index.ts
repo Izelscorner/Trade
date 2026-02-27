@@ -56,11 +56,17 @@ export interface Sentiment {
   positive: number;
   negative: number;
   neutral: number;
-  label: "positive" | "negative" | "neutral";
+  label:
+    | "very positive"
+    | "positive"
+    | "neutral"
+    | "negative"
+    | "very negative";
 }
 
 export interface NewsArticle {
   id: string;
+  instrument_id?: string;
   title: string;
   link: string | null;
   summary: string | null;
@@ -93,6 +99,7 @@ export interface HistoricalPrice {
 
 export interface TechnicalIndicator {
   indicator_name: string;
+  instrument_id?: string;
   value: Record<string, number>;
   signal: string;
   date: string;

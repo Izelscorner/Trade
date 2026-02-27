@@ -10,7 +10,7 @@ interface PriceChangeProps {
   size?: "sm" | "md" | "lg";
 }
 
-export function formatPrice(price: number, symbol?: string) {
+function formatPrice(price: number, symbol?: string) {
   if (symbol === "IITU" || symbol === "IITU.L") {
     // GBp to GBP
     return `£${(price / 100).toLocaleString("en-GB", {

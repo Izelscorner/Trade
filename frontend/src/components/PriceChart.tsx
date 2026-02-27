@@ -16,12 +16,26 @@ interface PriceChartProps {
   data: HistoricalPrice[];
   title?: string;
   symbol?: string;
+  days?: number;
+  onDaysChange?: (days: number) => void;
 }
+
+const TIMEFRAMES = [
+  { label: "1D", days: 1 },
+  { label: "1W", days: 7 },
+  { label: "1M", days: 30 },
+  { label: "6M", days: 180 },
+  { label: "1Y", days: 365 },
+  { label: "2Y", days: 730 },
+  { label: "ALL", days: 36500 },
+];
 
 export default function PriceChart({
   data,
   title = "Price History",
   symbol,
+  days = 365,
+  onDaysChange,
 }: PriceChartProps) {
   if (data.length === 0) {
     return (
@@ -40,22 +54,55 @@ export default function PriceChart({
   const strokeColor = isUp ? "#10b981" : "#f43f5e";
   const gradientId = `priceGradient-${isUp ? "up" : "down"}`;
 
-  const chartData = data.map((d) => ({
-    ...d,
-    date: new Date(d.date).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    }),
-    rawDate: d.date,
-  }));
+  const chartData = data.map((d) => {
+    let formattedDate = "";
+    if (days === 1) {
+      formattedDate = new Date(d.date).toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: false,
+      });
+    } else {
+      formattedDate = new Date(d.date).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        ...(days > 365 ? { year: "numeric" } : {}),
+      });
+    }
+    return {
+      ...d,
+      date: formattedDate,
+      rawDate: d.date,
+    };
+  });
 
   return (
     <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <ChartIcon size={18} className="text-accent-blue" />
-        <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
-          {title}
-        </h2>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+        <div className="flex items-center gap-2">
+          <ChartIcon size={18} className="text-accent-blue" />
+          <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
+            {title}
+          </h2>
+        </div>
+
+        {onDaysChange && (
+          <div className="flex items-center gap-1 bg-surface-2 p-1 rounded-lg border border-border-subtle overflow-x-auto no-scrollbar">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf.label}
+                onClick={() => onDaysChange(tf.days)}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                  days === tf.days
+                    ? "bg-accent-blue text-white shadow-sm"
+                    : "text-text-secondary hover:text-text-primary hover:bg-surface-3"
+                }`}
+              >
+                {tf.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <ResponsiveContainer width="100%" height={280}>
         <AreaChart

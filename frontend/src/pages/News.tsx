@@ -3,23 +3,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Newspaper, ExternalLink, Clock, Filter, Search, X } from "lucide-react";
+import {
+  Newspaper,
+  ExternalLink,
+  Clock,
+  Filter,
+  Search,
+  X,
+} from "lucide-react";
 import Fuse from "fuse.js";
 import { fetchNews } from "../api/client";
 import type { NewsArticle } from "../types";
 
 const sentimentColors: Record<string, string> = {
+  "very positive":
+    "text-accent-emerald bg-accent-emerald/20 border border-accent-emerald/30",
   positive: "text-accent-emerald bg-accent-emerald/10",
   negative: "text-accent-rose bg-accent-rose/10",
+  "very negative":
+    "text-accent-rose bg-accent-rose/20 border border-accent-rose/30",
   neutral: "text-text-muted bg-surface-3",
 };
 
-const categoryBadgeStyles: Record<string, { label: string; className: string }> = {
-  us_politics: { label: "Politics", className: "text-accent-violet bg-accent-violet/10" },
-  uk_politics: { label: "Politics", className: "text-accent-violet bg-accent-violet/10" },
-  us_finance: { label: "Finance", className: "text-accent-amber bg-accent-amber/10" },
-  uk_finance: { label: "Finance", className: "text-accent-amber bg-accent-amber/10" },
-  asset_specific: { label: "Asset", className: "text-accent-blue bg-accent-blue/10" },
+const categoryBadgeStyles: Record<
+  string,
+  { label: string; className: string }
+> = {
+  us_politics: {
+    label: "Politics",
+    className: "text-accent-violet bg-accent-violet/10",
+  },
+  uk_politics: {
+    label: "Politics",
+    className: "text-accent-violet bg-accent-violet/10",
+  },
+  us_finance: {
+    label: "Finance",
+    className: "text-accent-amber bg-accent-amber/10",
+  },
+  uk_finance: {
+    label: "Finance",
+    className: "text-accent-amber bg-accent-amber/10",
+  },
+  asset_specific: {
+    label: "Asset",
+    className: "text-accent-blue bg-accent-blue/10",
+  },
 };
 
 const regionOptions = [
@@ -104,7 +133,7 @@ export default function News() {
         if (!prevIdsRef.current.has(id)) fresh.add(id);
       });
       if (fresh.size > 0) {
-        setNewIds(fresh);
+        setTimeout(() => setNewIds(fresh), 0);
         const timer = setTimeout(() => setNewIds(new Set()), 2000);
         return () => clearTimeout(timer);
       }
@@ -272,7 +301,11 @@ export default function News() {
                         </span>
                       )}
                       <span className="text-[10px] text-text-muted uppercase tracking-wider">
-                        {article.category.startsWith("us") ? "🇺🇸" : article.category.startsWith("uk") ? "🇬🇧" : ""}{" "}
+                        {article.category.startsWith("us")
+                          ? "🇺🇸"
+                          : article.category.startsWith("uk")
+                            ? "🇬🇧"
+                            : ""}{" "}
                         {categoryLabel(article.category)}
                       </span>
                       <span className="text-[10px] text-text-muted/50">

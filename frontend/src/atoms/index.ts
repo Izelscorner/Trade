@@ -71,10 +71,10 @@ export const latestNewsAtom = atomWithQuery<NewsArticle[]>(() => ({
 }));
 
 // --- Instrument Detail Atoms (parameterized) ---
-export const instrumentHistoricalAtom = (instrumentId: string) =>
+export const instrumentHistoricalAtom = (instrumentId: string, days = 365) =>
   atomWithQuery<HistoricalPrice[]>(() => ({
-    queryKey: ["historical", instrumentId],
-    queryFn: () => fetchHistoricalPrices(instrumentId),
+    queryKey: ["historical", instrumentId, days],
+    queryFn: () => fetchHistoricalPrices(instrumentId, days),
     enabled: !!instrumentId,
   }));
 

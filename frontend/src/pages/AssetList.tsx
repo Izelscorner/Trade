@@ -55,7 +55,7 @@ export default function AssetList() {
     });
   }, [instruments, category, sortKey, sortDir]);
 
-  const toggleSort = (key: SortKey) => {
+  const handleSort = (key: SortKey) => {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -63,26 +63,6 @@ export default function AssetList() {
       setSortDir(key === "symbol" ? "asc" : "desc");
     }
   };
-
-  const SortHeader = ({
-    label,
-    sortId,
-  }: {
-    label: string;
-    sortId: SortKey;
-  }) => (
-    <button
-      onClick={() => toggleSort(sortId)}
-      className={`flex items-center gap-1 text-xs uppercase tracking-wider font-semibold transition-colors ${
-        sortKey === sortId
-          ? "text-accent-cyan"
-          : "text-text-muted hover:text-text-secondary"
-      }`}
-    >
-      {label}
-      <ArrowUpDown size={10} />
-    </button>
-  );
 
   return (
     <div className="max-w-[1400px] mx-auto px-6 py-8 space-y-6">
@@ -103,14 +83,39 @@ export default function AssetList() {
       <div className="rounded-xl bg-surface-1 border border-border-subtle overflow-hidden animate-slide-up">
         {/* Table Header */}
         <div className="grid grid-cols-[1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
-          <SortHeader label="Symbol" sortId="symbol" />
+          <SortHeader
+            label="Symbol"
+            sortId="symbol"
+            currentSortKey={sortKey}
+            onSort={handleSort}
+          />
           <span className="text-xs uppercase tracking-wider font-semibold text-text-muted">
             Name
           </span>
-          <SortHeader label="Price" sortId="price" />
-          <SortHeader label="Change" sortId="change" />
-          <SortHeader label="Short" sortId="short_grade" />
-          <SortHeader label="Long" sortId="long_grade" />
+          <SortHeader
+            label="Price"
+            sortId="price"
+            currentSortKey={sortKey}
+            onSort={handleSort}
+          />
+          <SortHeader
+            label="Change"
+            sortId="change"
+            currentSortKey={sortKey}
+            onSort={handleSort}
+          />
+          <SortHeader
+            label="Short"
+            sortId="short_grade"
+            currentSortKey={sortKey}
+            onSort={handleSort}
+          />
+          <SortHeader
+            label="Long"
+            sortId="long_grade"
+            currentSortKey={sortKey}
+            onSort={handleSort}
+          />
         </div>
 
         {/* Rows */}
@@ -203,5 +208,31 @@ function InstrumentRow({
         />
       </div>
     </Link>
+  );
+}
+
+function SortHeader({
+  label,
+  sortId,
+  currentSortKey,
+  onSort,
+}: {
+  label: string;
+  sortId: SortKey;
+  currentSortKey: SortKey;
+  onSort: (key: SortKey) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSort(sortId)}
+      className={`flex items-center gap-1 text-xs uppercase tracking-wider font-semibold transition-colors ${
+        currentSortKey === sortId
+          ? "text-accent-cyan"
+          : "text-text-muted hover:text-text-secondary"
+      }`}
+    >
+      {label}
+      <ArrowUpDown size={10} />
+    </button>
   );
 }

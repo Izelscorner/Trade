@@ -5,6 +5,13 @@ import { createRoot } from "react-dom/client";
 import { Provider as JotaiProvider } from "jotai";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import type {
+  DashboardInstrument,
+  LivePrice,
+  NewsArticle,
+  Grade,
+  TechnicalIndicator,
+} from "./types";
 import "./index.css";
 
 const queryClient = new QueryClient({
@@ -38,28 +45,40 @@ function connectWS() {
         case "live_prices":
           queryClient.setQueryData(["live-prices"], data);
           // Also update dashboard if entries exist
-          queryClient.setQueryData(["dashboard"], (old: any) => {
-            if (!old) return old;
-            return old.map((inst: any) => {
-              const update = data.find((d: any) => d.instrument_id === inst.id);
-              if (update) {
-                return {
-                  ...inst,
-                  price: update.price,
-                  change_amount: update.change_amount,
-                  change_percent: update.change_percent,
-                  market_status: update.market_status,
-                };
-              }
-              return inst;
-            });
-          });
+          queryClient.setQueryData(
+            ["dashboard"],
+            (old: DashboardInstrument[] | undefined) => {
+              if (!old) return old;
+              return old.map((inst: DashboardInstrument) => {
+                const update = data.find(
+                  (d: LivePrice) => d.instrument_id === inst.id,
+                );
+                if (update) {
+                  return {
+                    ...inst,
+                    price: update.price,
+                    change_amount: update.change_amount,
+                    change_percent: update.change_percent,
+                    market_status: update.market_status,
+                  };
+                }
+                return inst;
+              });
+            },
+          );
           break;
 
         case "news_updates": {
           // Helper to merge and deduplicate news arrays
-          const mergeNews = (incoming: any[], existing: any[], limit: number) => {
-            const merged = [...incoming, ...(Array.isArray(existing) ? existing : [])];
+          const mergeNews = (
+            incoming: NewsArticle[],
+            existing: NewsArticle[],
+            limit: number,
+          ) => {
+            const merged = [
+              ...incoming,
+              ...(Array.isArray(existing) ? existing : []),
+            ];
             const unique = Array.from(
               new Map(merged.map((a) => [a.id, a])).values(),
             );
@@ -73,10 +92,13 @@ function connectWS() {
           };
 
           // Update global news latest feed
-          queryClient.setQueryData(["news-latest"], (old: any) => {
-            if (!old) return data;
-            return mergeNews(data, old, 50);
-          });
+          queryClient.setQueryData(
+            ["news-latest"],
+            (old: NewsArticle[] | undefined) => {
+              if (!old) return data;
+              return mergeNews(data, old, 50);
+            },
+          );
 
           // Update macro-news feed (only if categories match)
           const macroCategories = [
@@ -85,14 +107,17 @@ function connectWS() {
             "us_finance",
             "uk_finance",
           ];
-          const macroOnly = data.filter((a: any) =>
+          const macroOnly = data.filter((a: NewsArticle) =>
             macroCategories.includes(a.category),
           );
           if (macroOnly.length > 0) {
-            queryClient.setQueryData(["macro-news"], (old: any) => {
-              if (!old) return macroOnly;
-              return mergeNews(macroOnly, old, 20);
-            });
+            queryClient.setQueryData(
+              ["macro-news"],
+              (old: NewsArticle[] | undefined) => {
+                if (!old) return macroOnly;
+                return mergeNews(macroOnly, old, 20);
+              },
+            );
           }
 
           // Update all news-page queries (News page real-time updates)
@@ -103,8 +128,13 @@ function connectWS() {
             .forEach((query) => {
               const [, qRegion, qCatType] = query.queryKey as string[];
               // Filter incoming articles to match the query's filters
-              const filtered = data.filter((a: any) => {
-                if (qRegion && qRegion !== "all" && !a.category.startsWith(`${qRegion}_`)) return false;
+              const filtered = data.filter((a: NewsArticle) => {
+                if (
+                  qRegion &&
+                  qRegion !== "all" &&
+                  !a.category.startsWith(`${qRegion}_`)
+                )
+                  return false;
                 if (qCatType && qCatType !== "all") {
                   if (qCatType === "macro") {
                     if (!macroCategories.includes(a.category)) return false;
@@ -121,18 +151,21 @@ function connectWS() {
                 return true;
               });
               if (filtered.length === 0) return;
-              queryClient.setQueryData(query.queryKey, (old: any) => {
-                if (!old) return old;
-                return mergeNews(filtered, old, 200);
-              });
+              queryClient.setQueryData(
+                query.queryKey,
+                (old: NewsArticle[] | undefined) => {
+                  if (!old) return old;
+                  return mergeNews(filtered, old, 200);
+                },
+              );
             });
 
           // Update specific instrument news if applicable
-          data.forEach((article: any) => {
+          data.forEach((article: NewsArticle) => {
             if (article.instrument_id) {
               queryClient.setQueryData(
                 ["news", article.instrument_id],
-                (old: any) => {
+                (old: NewsArticle[] | undefined) => {
                   if (!old) return [article];
                   return mergeNews([article], old, 30);
                 },
@@ -145,36 +178,41 @@ function connectWS() {
         case "grade_updates":
           queryClient.setQueryData(["grades"], data);
           // Update dashboard grades
-          queryClient.setQueryData(["dashboard"], (old: any) => {
-            if (!old) return old;
-            return old.map((inst: any) => {
-              const updates = data.filter(
-                (d: any) => d.instrument_id === inst.id,
-              );
-              if (updates.length > 0) {
-                const short = updates.find((u: any) => u.term === "short");
-                const long = updates.find((u: any) => u.term === "long");
-                return {
-                  ...inst,
-                  short_term_grade:
-                    short?.overall_grade || inst.short_term_grade,
-                  short_term_score:
-                    short?.overall_score || inst.short_term_score,
-                  long_term_grade: long?.overall_grade || inst.long_term_grade,
-                  long_term_score: long?.overall_score || inst.long_term_score,
-                  graded_at: updates[0].graded_at,
-                };
-              }
-              return inst;
-            });
-          });
+          queryClient.setQueryData(
+            ["dashboard"],
+            (old: DashboardInstrument[] | undefined) => {
+              if (!old) return old;
+              return old.map((inst: DashboardInstrument) => {
+                const updates = data.filter(
+                  (d: Grade) => d.instrument_id === inst.id,
+                );
+                if (updates.length > 0) {
+                  const short = updates.find((u: Grade) => u.term === "short");
+                  const long = updates.find((u: Grade) => u.term === "long");
+                  return {
+                    ...inst,
+                    short_term_grade:
+                      short?.overall_grade || inst.short_term_grade,
+                    short_term_score:
+                      short?.overall_score || inst.short_term_score,
+                    long_term_grade:
+                      long?.overall_grade || inst.long_term_grade,
+                    long_term_score:
+                      long?.overall_score || inst.long_term_score,
+                    graded_at: updates[0].graded_at,
+                  };
+                }
+                return inst;
+              });
+            },
+          );
           // Update specific instrument grades if open
-          data.forEach((grade: any) => {
+          data.forEach((grade: Grade) => {
             queryClient.setQueryData(
               ["grades", grade.instrument_id],
-              (old: any) => {
+              (old: Grade[] | undefined) => {
                 if (!old) return old;
-                const others = old.filter((g: any) => g.term !== grade.term);
+                const others = old.filter((g: Grade) => g.term !== grade.term);
                 return [...others, grade];
               },
             );
@@ -183,14 +221,15 @@ function connectWS() {
 
         case "technical_updates":
           // Update specific technical queries for open instruments
-          data.forEach((tech: any) => {
+          data.forEach((tech: TechnicalIndicator) => {
             queryClient.setQueryData(
               ["technical", tech.instrument_id],
-              (old: any) => {
+              (old: TechnicalIndicator[] | undefined) => {
                 if (!old) return old;
                 // Add new indicator or update existing one
                 const others = old.filter(
-                  (t: any) => t.indicator_name !== tech.indicator_name,
+                  (t: TechnicalIndicator) =>
+                    t.indicator_name !== tech.indicator_name,
                 );
                 return [tech, ...others].slice(0, 20); // Keep latest
               },

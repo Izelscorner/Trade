@@ -36,7 +36,7 @@ function formatGradedAt(dateStr: string) {
       hour: "numeric",
       minute: "numeric",
     }).format(d);
-  } catch (e) {
+  } catch {
     return "";
   }
 }

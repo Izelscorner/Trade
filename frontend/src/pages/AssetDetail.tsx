@@ -36,10 +36,12 @@ export default function AssetDetail() {
   const [livePrice, setLivePrice] = useState<LivePrice | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [chartDays, setChartDays] = useState(365);
+
   // Parameterized atoms
   const historicalAtom = useMemo(
-    () => instrumentHistoricalAtom(id || ""),
-    [id],
+    () => instrumentHistoricalAtom(id || "", chartDays),
+    [id, chartDays],
   );
   const technicalAtom = useMemo(() => instrumentTechnicalAtom(id || ""), [id]);
   const newsAtom = useMemo(() => instrumentNewsAtom(id || ""), [id]);
@@ -70,15 +72,28 @@ export default function AssetDetail() {
 
   useEffect(() => {
     if (!id) return;
-    setLoading(true);
-    Promise.all([
-      fetchInstrument(id).catch(() => null),
-      fetchLivePrice(id).catch(() => null),
-    ]).then(([inst, price]) => {
-      setInstrument(inst);
-      setLivePrice(price);
-      setLoading(false);
+    let isMounted = true;
+
+    const fetchData = async () => {
+      const [inst, price] = await Promise.all([
+        fetchInstrument(id).catch(() => null),
+        fetchLivePrice(id).catch(() => null),
+      ]);
+      if (isMounted) {
+        setInstrument(inst);
+        setLivePrice(price);
+        setLoading(false);
+      }
+    };
+
+    queueMicrotask(() => {
+      if (isMounted) setLoading(true);
     });
+    fetchData();
+
+    return () => {
+      isMounted = false;
+    };
   }, [id]);
 
   if (loading || !instrument) return <PageSkeleton />;
@@ -179,7 +194,12 @@ export default function AssetDetail() {
         className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-slide-up"
         style={{ animationDelay: "200ms" }}
       >
-        <PriceChart data={historical || []} symbol={instrument.symbol} />
+        <PriceChart
+          data={historical || []}
+          symbol={instrument.symbol}
+          days={chartDays}
+          onDaysChange={setChartDays}
+        />
         <TechnicalPanel indicators={technical || []} />
       </div>
 

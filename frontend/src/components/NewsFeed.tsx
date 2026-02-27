@@ -13,8 +13,12 @@ interface NewsFeedProps {
 }
 
 const sentimentColors: Record<string, string> = {
+  "very positive":
+    "text-accent-emerald bg-accent-emerald/20 border border-accent-emerald/30",
   positive: "text-accent-emerald bg-accent-emerald/10",
   negative: "text-accent-rose bg-accent-rose/10",
+  "very negative":
+    "text-accent-rose bg-accent-rose/20 border border-accent-rose/30",
   neutral: "text-text-muted bg-surface-3",
 };
 
