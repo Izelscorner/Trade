@@ -61,6 +61,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       TRANSFORMERS_CACHE: /tmp/hf_cache
       HF_HOME: /tmp/hf_cache
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy

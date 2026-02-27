@@ -26,7 +26,17 @@ def calc_sma(df: pd.DataFrame, period: int = 50) -> dict:
     if pd.isna(current):
         return {"indicator_name": f"SMA_{period}", "value": {}, "signal": "neutral"}
 
-    signal = "buy" if price > current else "sell"
+    deviation = ((price - current) / current) * 100
+    if deviation > 2.0:
+        signal = "strong_buy"
+    elif deviation > 0.0:
+        signal = "buy"
+    elif deviation < -2.0:
+        signal = "strong_sell"
+    elif deviation < 0.0:
+        signal = "sell"
+    else:
+        signal = "neutral"
 
     return {
         "indicator_name": f"SMA_{period}",
@@ -44,7 +54,17 @@ def calc_ema(df: pd.DataFrame, period: int = 20) -> dict:
     if pd.isna(current):
         return {"indicator_name": f"EMA_{period}", "value": {}, "signal": "neutral"}
 
-    signal = "buy" if price > current else "sell"
+    deviation = ((price - current) / current) * 100
+    if deviation > 2.0:
+        signal = "strong_buy"
+    elif deviation > 0.0:
+        signal = "buy"
+    elif deviation < -2.0:
+        signal = "strong_sell"
+    elif deviation < 0.0:
+        signal = "sell"
+    else:
+        signal = "neutral"
 
     return {
         "indicator_name": f"EMA_{period}",
@@ -250,9 +270,13 @@ def calc_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> 
         return {"indicator_name": "STOCHASTIC", "value": {}, "signal": "neutral"}
 
     if current_k >= 80:
-        signal = "sell"  # Overbought
+        signal = "strong_sell"  # Extreme overbought
+    elif current_k >= 60:
+        signal = "sell"
     elif current_k <= 20:
-        signal = "buy"  # Oversold
+        signal = "strong_buy"  # Extreme oversold
+    elif current_k <= 40:
+        signal = "buy"
     elif current_k > current_d:
         signal = "buy"
     elif current_k < current_d:
@@ -283,8 +307,12 @@ def calc_williams_r(df: pd.DataFrame, period: int = 14) -> dict:
         return {"indicator_name": "WILLIAMS_R", "value": {}, "signal": "neutral"}
 
     if current >= -20:
+        signal = "strong_sell"  # Extreme overbought
+    elif current >= -40:
         signal = "sell"  # Overbought
     elif current <= -80:
+        signal = "strong_buy"  # Extreme oversold
+    elif current <= -60:
         signal = "buy"  # Oversold
     else:
         signal = "neutral"
@@ -355,8 +383,12 @@ def calc_mfi(df: pd.DataFrame, period: int = 14) -> dict:
         return {"indicator_name": "MFI", "value": {}, "signal": "neutral"}
 
     if current >= 80:
+        signal = "strong_sell"  # Extreme overbought
+    elif current >= 60:
         signal = "sell"  # Overbought
     elif current <= 20:
+        signal = "strong_buy"  # Extreme oversold
+    elif current <= 40:
         signal = "buy"  # Oversold
     else:
         signal = "neutral"
@@ -390,8 +422,12 @@ def calc_bollinger(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> 
 
     band_width = (current_upper - current_lower) / current_sma if current_sma != 0 else 0
 
-    if current_price >= current_upper:
+    if current_price >= current_upper * 1.02:
+        signal = "strong_sell"  # Far above upper band
+    elif current_price >= current_upper:
         signal = "sell"  # At upper band — overbought
+    elif current_price <= current_lower * 0.98:
+        signal = "strong_buy"  # Far below lower band
     elif current_price <= current_lower:
         signal = "buy"  # At lower band — oversold
     else:
@@ -538,11 +574,17 @@ def calc_obv(df: pd.DataFrame) -> dict:
     current_obv = obv.iloc[-1]
     current_sma = obv_sma.iloc[-1]
 
-    if pd.isna(current_sma):
+    obv_std = obv.rolling(window=20).std().iloc[-1]
+
+    if pd.isna(current_sma) or pd.isna(obv_std):
         return {"indicator_name": "OBV", "value": {}, "signal": "neutral"}
 
-    if current_obv > current_sma:
+    if current_obv > current_sma + obv_std:
+        signal = "strong_buy"
+    elif current_obv > current_sma:
         signal = "buy"
+    elif current_obv < current_sma - obv_std:
+        signal = "strong_sell"
     elif current_obv < current_sma:
         signal = "sell"
     else:
@@ -578,11 +620,11 @@ def calc_vwap(df: pd.DataFrame) -> dict:
     deviation = ((price - current_vwap) / current_vwap) * 100
 
     if deviation > 2.0:
-        signal = "sell"  # Far above VWAP — overextended
+        signal = "strong_sell"  # Far above VWAP — overextended
     elif deviation > 0:
         signal = "buy"  # Above VWAP — buyers in control
     elif deviation < -2.0:
-        signal = "buy"  # Far below VWAP — potential bounce
+        signal = "strong_buy"  # Far below VWAP — potential bounce
     elif deviation < 0:
         signal = "sell"  # Below VWAP — sellers in control
     else:
@@ -618,9 +660,13 @@ def calc_support_resistance(df: pd.DataFrame, window: int = 20) -> dict:
     else:
         position = (price - support) / range_total
 
-    if position >= 0.9:
+    if position >= 0.95:
+        signal = "strong_sell"  # At resistance
+    elif position >= 0.8:
         signal = "sell"  # Near resistance
-    elif position <= 0.1:
+    elif position <= 0.05:
+        signal = "strong_buy"  # At support
+    elif position <= 0.2:
         signal = "buy"  # Near support
     else:
         signal = "neutral"

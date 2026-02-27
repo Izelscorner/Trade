@@ -4,4 +4,5 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 transformers==4.47.1
 torch==2.5.1
+google-generativeai==0.8.3
 --extra-index-url https://download.pytorch.org/whl/cpu

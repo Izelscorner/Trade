@@ -19,6 +19,15 @@ SIGNAL_SCORES = {
     "strong_sell": -1.0,
 }
 
+# Sentiment label to multiplier mapping
+SENTIMENT_MULTIPLIERS = {
+    "very positive": 1.0,
+    "positive": 0.5,
+    "neutral": 0.0,
+    "negative": -0.5,
+    "very negative": -1.0,
+}
+
 # Score to letter grade mapping
 def score_to_grade(score: float) -> str:
     """Convert a -1.0 to 1.0 score to a letter grade."""
@@ -78,37 +87,57 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
         # Direct instrument-mapped articles
         result = await session.execute(
             text("""
-                SELECT AVG(s.positive) as avg_pos, AVG(s.negative) as avg_neg, COUNT(*) as cnt
+                SELECT s.label, COUNT(*) as cnt
                 FROM sentiment_scores s
                 JOIN news_instrument_map m ON m.article_id = s.article_id
                 JOIN news_articles a ON a.id = m.article_id
                 WHERE m.instrument_id = :iid
                 AND a.published_at >= :cutoff
+                GROUP BY s.label
             """),
             {"iid": instrument_id, "cutoff": cutoff},
         )
-        row = result.fetchone()
+        rows = result.fetchall()
 
-        if row and row.cnt and row.cnt > 0:
-            net = float(row.avg_pos) - float(row.avg_neg)
-            return round(net, 4), {"articles": int(row.cnt), "avg_positive": float(row.avg_pos), "avg_negative": float(row.avg_neg)}
+        if rows:
+            total_score = 0.0
+            total_cnt = 0
+            label_details = {}
+            for r in rows:
+                cnt = int(r.cnt)
+                label_details[r.label] = cnt
+                total_cnt += cnt
+                total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
+            
+            if total_cnt > 0:
+                net = total_score / total_cnt
+                return round(net, 4), {"articles": total_cnt, "labels": label_details}
 
         # Fallback: use general finance news sentiment
         result = await session.execute(
             text("""
-                SELECT AVG(s.positive) as avg_pos, AVG(s.negative) as avg_neg, COUNT(*) as cnt
+                SELECT s.label, COUNT(*) as cnt
                 FROM sentiment_scores s
                 JOIN news_articles a ON a.id = s.article_id
                 WHERE a.category IN ('us_finance', 'uk_finance')
                 AND a.published_at >= :cutoff
+                GROUP BY s.label
             """),
             {"cutoff": cutoff},
         )
-        row = result.fetchone()
+        rows = result.fetchall()
 
-        if row and row.cnt and row.cnt > 0:
-            net = float(row.avg_pos) - float(row.avg_neg)
-            return round(net, 4), {"articles": int(row.cnt), "source": "general_finance"}
+        if rows:
+            total_score = 0.0
+            total_cnt = 0
+            for r in rows:
+                cnt = int(r.cnt)
+                total_cnt += cnt
+                total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
+            
+            if total_cnt > 0:
+                net = total_score / total_cnt
+                return round(net, 4), {"articles": total_cnt, "source": "general_finance"}
 
     return 0.0, {}
 

@@ -85,27 +85,55 @@ async def live_price_for_instrument(instrument_id: str):
 async def historical_prices(instrument_id: str, days: int = 365):
     """Get historical price data for an instrument."""
     async with async_session() as session:
-        result = await session.execute(
-            text("""
-                SELECT date, open, high, low, close, volume
-                FROM historical_prices
-                WHERE instrument_id = :iid
-                AND date >= CURRENT_DATE - :days * INTERVAL '1 day'
-                ORDER BY date ASC
-            """),
-            {"iid": instrument_id, "days": days},
-        )
-        rows = result.fetchall()
+        if days == 1:
+            # Query live prices for the last 24 hours (1D chart)
+            result = await session.execute(
+                text("""
+                    SELECT fetched_at as date, price as open, price as high, price as low, price as close, 0 as volume
+                    FROM live_prices
+                    WHERE instrument_id = :iid
+                    AND fetched_at >= NOW() - INTERVAL '1 day'
+                    ORDER BY fetched_at ASC
+                """),
+                {"iid": instrument_id},
+            )
+            rows = result.fetchall()
+            prices = [
+                HistoricalPriceSchema(
+                    date=r.date.isoformat(),
+                    open=float(r.open),
+                    high=float(r.high),
+                    low=float(r.low),
+                    close=float(r.close),
+                    volume=int(r.volume),
+                )
+                for r in rows
+            ]
+            return APIResponse(data=[p.model_dump() for p in prices], timestamp=datetime.now(timezone.utc))
 
-    prices = [
-        HistoricalPriceSchema(
-            date=str(r.date),
-            open=float(r.open),
-            high=float(r.high),
-            low=float(r.low),
-            close=float(r.close),
-            volume=int(r.volume),
-        )
-        for r in rows
-    ]
-    return APIResponse(data=[p.model_dump() for p in prices], timestamp=datetime.now(timezone.utc))
+        else:
+            # Standard historical daily data
+            result = await session.execute(
+                text("""
+                    SELECT date, open, high, low, close, volume
+                    FROM historical_prices
+                    WHERE instrument_id = :iid
+                    AND date >= CURRENT_DATE - :days * INTERVAL '1 day'
+                    ORDER BY date ASC
+                """),
+                {"iid": instrument_id, "days": days},
+            )
+            rows = result.fetchall()
+
+            prices = [
+                HistoricalPriceSchema(
+                    date=str(r.date),
+                    open=float(r.open),
+                    high=float(r.high),
+                    low=float(r.low),
+                    close=float(r.close),
+                    volume=int(r.volume),
+                )
+                for r in rows
+            ]
+            return APIResponse(data=[p.model_dump() for p in prices], timestamp=datetime.now(timezone.utc))

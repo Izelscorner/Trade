@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     positive NUMERIC(7, 6) NOT NULL,
     negative NUMERIC(7, 6) NOT NULL,
     neutral NUMERIC(7, 6) NOT NULL,
-    label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
+    label VARCHAR(30) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral', 'very positive', 'very negative')),
     analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (article_id)
 );

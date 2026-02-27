@@ -55,6 +55,7 @@ async def fetch_and_store_live(instrument: dict) -> bool:
             if last_price == live["price"] and seconds_ago < 30:
                 return True  # Same price, too recent — skip insert
 
+        # Update live prices
         await session.execute(
             text("""
                 INSERT INTO live_prices (instrument_id, price, change_amount, change_percent, market_status, fetched_at)
@@ -69,6 +70,25 @@ async def fetch_and_store_live(instrument: dict) -> bool:
                 "fetched_at": now,
             },
         )
+
+        # Update historical price for 'today'
+        today = now.date()
+        await session.execute(
+            text("""
+                INSERT INTO historical_prices (instrument_id, date, open, high, low, close, volume)
+                VALUES (:iid, :date, :price, :price, :price, :price, 0)
+                ON CONFLICT (instrument_id, date) DO UPDATE 
+                SET close = EXCLUDED.close,
+                    high = GREATEST(historical_prices.high, EXCLUDED.high),
+                    low = LEAST(historical_prices.low, EXCLUDED.low)
+            """),
+            {
+                "iid": instrument_id,
+                "date": today,
+                "price": live["price"],
+            },
+        )
+        
         await session.commit()
 
     logger.info(

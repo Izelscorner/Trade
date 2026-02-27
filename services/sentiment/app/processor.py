@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from .db import async_session
-from .model import analyze_batch
+from .model import analyze_batch, analyze_asset_specific_batch
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +19,11 @@ async def get_unscored_articles(limit: int = 50) -> list[dict]:
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT a.id, a.title, a.summary, a.content, a.category
+                SELECT a.id, a.title, a.summary, a.content, a.category, i.name as asset_name
                 FROM news_articles a
                 LEFT JOIN sentiment_scores s ON s.article_id = a.id
+                LEFT JOIN news_instrument_map m ON m.article_id = a.id
+                LEFT JOIN instruments i ON m.instrument_id = i.id
                 WHERE s.id IS NULL
                 ORDER BY a.published_at DESC
                 LIMIT :limit
@@ -35,6 +37,7 @@ async def get_unscored_articles(limit: int = 50) -> list[dict]:
                 "summary": r.summary,
                 "content": getattr(r, "content", None),
                 "category": r.category,
+                "asset_name": getattr(r, "asset_name", None),
             }
             for r in result.fetchall()
         ]
@@ -176,9 +179,22 @@ async def process_loop() -> None:
         try:
             articles = await get_unscored_articles(limit=50)
             if articles:
-                texts = [_build_analysis_text(a) for a in articles]
-                scores = analyze_batch(texts)
-                pairs = [(a["id"], s) for a, s in zip(articles, scores)]
+                asset_specific = [a for a in articles if a["category"] == "asset_specific" and a.get("asset_name")]
+                others = [a for a in articles if not (a["category"] == "asset_specific" and a.get("asset_name"))]
+                
+                pairs = []
+                
+                if others:
+                    texts = [_build_analysis_text(a) for a in others]
+                    scores = analyze_batch(texts)
+                    pairs.extend([(a["id"], s) for a, s in zip(others, scores)])
+                
+                if asset_specific:
+                    texts = [_build_analysis_text(a) for a in asset_specific]
+                    asset_names = [a["asset_name"] for a in asset_specific]
+                    scores = analyze_asset_specific_batch(texts, asset_names)
+                    pairs.extend([(a["id"], s) for a, s in zip(asset_specific, scores)])
+                
                 await store_scores(pairs)
                 logger.info("Scored %d articles", len(pairs))
 
