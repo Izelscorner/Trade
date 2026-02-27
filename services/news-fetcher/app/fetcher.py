@@ -9,13 +9,73 @@ from dateutil import parser as dateparser
 
 logger = logging.getLogger(__name__)
 
+def is_spam(title: str, summary: str, link: str, category: str = "") -> bool:
+    """Filter out obvious ad/spam listings and enforce relevance."""
+    content = f"{title} {summary}".lower()
+    
+    # Very aggressive negative keywords for lifestyle, entertainment, viral junk
+    spam_keywords = [
+        "sponsored", "advertisement", "promotional", "promo code", "buy now", 
+        "discount", "ad by", "unsubscribe", "deals of the day",
+        "viral", "celebrity", "pajamas", "flight", "tiktok", "instagram", "post sparks debate",
+        "kardashian", "taylor swift", "movie", "netflix show", "hollywood", "outfit",
+        "red carpet", "recipe", "diet", "weight loss", "fitness routine", "horoscope",
+        "zodiac", "skincare", "best places to live", "vacation", "tourist", "game review"
+    ]
+    if any(k in content for k in spam_keywords):
+        return True
+    
+    # Avoid completely empty info
+    if not title or len(title) < 10:
+        return True
+        
+    # Enforce some finance/political/market terminology
+    # If a news piece contains none of these, it's probably just noise
+    relevance_keywords = {
+        # Finance / Market
+        "stock", "share", "market", "price", "invest", "trade", "fund", "etf", "bank", 
+        "economy", "economic", "rate", "inflation", "tax", "earnings", "revenue", "profit", 
+        "loss", "dividend", "yield", "ceo", "business", "company", "firm", "acquisition", "merger",
+        "debt", "bond", "futures", "commodity", "oil", "gas", "gold", "crypto", "bitcoin", "percent",
+        "growth", "sale", "retail", "consumer", "job", "employment", "wage", "gdp", "cpi", "fed",
+        "central bank", "interest", "wealth", "asset", "capital", "equity", "investment", "portfolio",
+        "wall street", "index", "dow", "nasdaq", "s&p", "ftse", "nikkei", "bull", "bear", "rally", "plunge", "soar",
+        
+        # Politics / Macro
+        "policy", "government", "election", "vote", "voter", "campaign", "senate", "congress", 
+        "parliament", "minister", "president", "biden", "trump", "harris", "starmer", "sunak", 
+        "democrat", "republican", "tory", "labor", "labour", "court", "judge", "law", "bill", 
+        "act", "strike", "union", "tariff", "sanction", "trade war", "eu", "nato", "un",
+        "war", "military", "defense", "border", "immigration"
+    }
 
-async def fetch_feed(url: str, source: str, category: str) -> list[dict]:
+    # Tokenize content loosely to check if any relevant word is present
+    # We use a simple word-boundary or substring check
+    content_words = set(content.replace("-", " ").replace(".", " ").replace(",", " ").split())
+    has_relevant = False
+    for word in content_words:
+        if word in relevance_keywords:
+            has_relevant = True
+            break
+            
+    # For exact phrase matches inside content
+    if not has_relevant:
+        for phrase in relevance_keywords:
+            if " " in phrase and phrase in content:
+                has_relevant = True
+                break
+
+    if not has_relevant:
+        return True # It doesn't seem to be macro/finance related
+    
+    return False
+
+async def fetch_feed(url: str, source: str, category: str, instrument_id: str | None = None, asset_name: str | None = None) -> list[dict]:
     """Fetch a single RSS feed and return parsed articles."""
     try:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            headers = {"User-Agent": "TradeSignal-NewsFetcher/1.0"}
+            headers = {"User-Agent": "TradeSignal-NewsFetcher/1.0", "Accept": "application/rss+xml"}
             async with session.get(url, headers=headers, ssl=False) as resp:
                 if resp.status != 200:
                     logger.warning("Feed %s returned status %d", source, resp.status)
@@ -30,13 +90,15 @@ async def fetch_feed(url: str, source: str, category: str) -> list[dict]:
 
     for entry in feed.entries:
         title = entry.get("title", "").strip()
-        if not title:
-            continue
-
         link = entry.get("link", "")
         summary = entry.get("summary", entry.get("description", ""))
+        
         if summary:
+            # Strip out some HTML tags if needed, or just truncate
             summary = summary[:2000]
+
+        if is_spam(title, summary, link, category):
+            continue
 
         published_at = None
         for date_field in ("published_parsed", "updated_parsed"):
@@ -68,6 +130,8 @@ async def fetch_feed(url: str, source: str, category: str) -> list[dict]:
             "source": source,
             "category": category,
             "published_at": published_at,
+            "instrument_id": instrument_id,
+            "asset_name": asset_name,
         })
 
     logger.info("Fetched %d articles from %s", len(articles), source)

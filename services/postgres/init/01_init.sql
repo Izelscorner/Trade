@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS news_articles (
     link TEXT,
     summary TEXT,
     source VARCHAR(100) NOT NULL,
-    category VARCHAR(50) NOT NULL CHECK (category IN ('us_politics', 'uk_politics', 'us_finance', 'uk_finance')),
+    category VARCHAR(50) NOT NULL CHECK (category IN ('us_politics', 'uk_politics', 'us_finance', 'uk_finance', 'asset_specific')),
     published_at TIMESTAMPTZ,
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (title, source)
@@ -82,16 +82,16 @@ CREATE TABLE IF NOT EXISTS technical_indicators (
     UNIQUE (instrument_id, date, indicator_name)
 );
 
--- Investment grades
+-- Investment grades (NUMERIC(7,4) preserves full precision from scorer)
 CREATE TABLE IF NOT EXISTS grades (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
     term VARCHAR(10) NOT NULL CHECK (term IN ('short', 'long')),
     overall_grade VARCHAR(2) NOT NULL,
-    overall_score NUMERIC(5, 2) NOT NULL,
-    technical_score NUMERIC(5, 2) NOT NULL,
-    sentiment_score NUMERIC(5, 2) NOT NULL,
-    macro_score NUMERIC(5, 2) NOT NULL,
+    overall_score NUMERIC(7, 4) NOT NULL,
+    technical_score NUMERIC(7, 4) NOT NULL,
+    sentiment_score NUMERIC(7, 4) NOT NULL,
+    macro_score NUMERIC(7, 4) NOT NULL,
     details JSONB,
     graded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -114,6 +114,8 @@ CREATE INDEX idx_news_articles_fetched ON news_articles(fetched_at DESC);
 CREATE INDEX idx_sentiment_scores_article ON sentiment_scores(article_id);
 CREATE INDEX idx_technical_indicators_instrument_date ON technical_indicators(instrument_id, date DESC);
 CREATE INDEX idx_grades_instrument_term ON grades(instrument_id, term, graded_at DESC);
+CREATE INDEX idx_macro_sentiment_region_calc ON macro_sentiment(region, calculated_at DESC);
+CREATE INDEX idx_news_instrument_map_instrument ON news_instrument_map(instrument_id);
 
 -- Seed instruments
 INSERT INTO instruments (symbol, name, category, yfinance_symbol) VALUES
@@ -121,7 +123,7 @@ INSERT INTO instruments (symbol, name, category, yfinance_symbol) VALUES
     ('NVDA', 'NVIDIA Corporation', 'stock', 'NVDA'),
     ('GOOGL', 'Alphabet Inc.', 'stock', 'GOOGL'),
     ('AAPL', 'Apple Inc.', 'stock', 'AAPL'),
-    ('IITU', 'iShares US Technology ETF', 'etf', 'IITU'),
+    ('IITU', 'iShares US Technology ETF', 'etf', 'IITU.L'),
     ('GOLD', 'Gold Futures', 'commodity', 'GC=F'),
     ('OIL', 'Crude Oil Futures', 'commodity', 'CL=F')
 ON CONFLICT (symbol) DO NOTHING;

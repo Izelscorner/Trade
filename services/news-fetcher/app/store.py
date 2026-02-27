@@ -11,32 +11,166 @@ logger = logging.getLogger(__name__)
 
 
 async def upsert_articles(articles: list[dict]) -> int:
-    """Insert articles, skipping duplicates. Returns count of newly inserted."""
+    """Insert articles, skipping duplicates, and map to an instrument if provided."""
     if not articles:
         return 0
 
     inserted = 0
+    import aiohttp
+    
+    # Check relevance via the new local AI service before inserting
+    relevant_articles = []
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as http_sess:
+            payload = {
+                "articles": [
+                    {
+                        "title": a["title"],
+                        "summary": a["summary"],
+                        "category": a["category"],
+                        "asset_name": a.get("asset_name")
+                    } for a in articles
+                ]
+            }
+            async with http_sess.post("http://relevance:8002/check/batch", json=payload) as resp:
+                if resp.status == 200:
+                    results = await resp.json()
+                    for article, res in zip(articles, results):
+                        if res.get("is_relevant"):
+                            relevant_articles.append(article)
+                        else:
+                            logger.info("Filtered irrelevant article: '%s' (Reason: %s, Score: %.2f)", 
+                                        article["title"][:50], res.get("reason"), res.get("score", 0))
+                else:
+                    logger.error("Relevance service returned %d", resp.status)
+                    relevant_articles = articles # Fallback pass
+    except Exception:
+        logger.exception("Failed to connect to relevance service")
+        relevant_articles = articles # Fallback pass
+        
+    articles = relevant_articles
+    if not articles:
+        return 0
+
     async with async_session() as session:
+        # Load recent articles to avoid fuzzy duplicates efficiently
+        cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+        recent_res = await session.execute(
+            text("SELECT id, title, summary FROM news_articles WHERE published_at >= :cutoff ORDER BY id DESC LIMIT 1500"),
+            {"cutoff": cutoff}
+        )
+        recent_db_articles = [(r[0], (r[1] or "").lower(), (r[2] or "").lower()) for r in recent_res.fetchall()]
+
+        seen_in_batch = []
+
         for article in articles:
             try:
-                result = await session.execute(
-                    text("""
-                        INSERT INTO news_articles (title, link, summary, source, category, published_at)
-                        VALUES (:title, :link, :summary, :source, :category, :published_at)
-                        ON CONFLICT (title, source) DO NOTHING
-                        RETURNING id
-                    """),
-                    article,
-                )
-                if result.fetchone():
-                    inserted += 1
+                title_lower = (article["title"] or "").lower()
+                summary_lower = (article["summary"] or "").lower()
+
+                # Fuzzy duplicate detection
+                matched_id = None
+
+                # Check against already inserted in this batch + recent from DB
+                all_to_check = seen_in_batch + recent_db_articles
+
+                for rid, rtitle, rsummary in all_to_check:
+                    # Match by exact title
+                    if title_lower == rtitle:
+                        matched_id = rid
+                        break
+
+                    # Skip fuzzy matching on very short titles (too many false positives)
+                    if len(title_lower) < 20 or len(rtitle) < 20:
+                        continue
+
+                    try:
+                        from rapidfuzz import fuzz
+
+                        title_ratio = fuzz.ratio(title_lower, rtitle)
+
+                        # High full-match threshold catches same story from different sources
+                        if title_ratio > 88:
+                            matched_id = rid
+                            break
+
+                        # Partial ratio only for substantial titles to avoid
+                        # "AAPL earnings beat" matching "NVDA earnings beat"
+                        if len(title_lower) > 40 and len(rtitle) > 40:
+                            if fuzz.partial_ratio(title_lower, rtitle) > 92:
+                                matched_id = rid
+                                break
+
+                        # Summary dedup: same article republished with different headline
+                        if summary_lower and rsummary and len(summary_lower) > 100 and len(rsummary) > 100:
+                            if fuzz.ratio(summary_lower[:500], rsummary[:500]) > 88:
+                                matched_id = rid
+                                break
+                    except ImportError:
+                        # Fallback to simple matching if rapidfuzz not available
+                        if (len(title_lower) > 30 and len(rtitle) > 30) and (title_lower in rtitle or rtitle in title_lower):
+                            matched_id = rid
+                            break
+
+                        t1_words = set(title_lower.split())
+                        t2_words = set(rtitle.split())
+                        if len(t1_words) > 5 and len(t2_words) > 5:
+                            overlap = len(t1_words.intersection(t2_words))
+                            if overlap / max(len(t1_words), len(t2_words)) > 0.75:
+                                matched_id = rid
+                                break
+
+                        if summary_lower and rsummary and len(summary_lower) > 100 and len(rsummary) > 100:
+                            if summary_lower == rsummary:
+                                matched_id = rid
+                                break
+
+                if matched_id:
+                    row = [matched_id]
+                else:
+                    # Insert new article
+                    result = await session.execute(
+                        text("""
+                            INSERT INTO news_articles (title, link, summary, source, category, published_at)
+                            VALUES (:title, :link, :summary, :source, :category, :published_at)
+                            ON CONFLICT (title, source) DO NOTHING
+                            RETURNING id
+                        """),
+                        {
+                            "title": article["title"],
+                            "link": article["link"],
+                            "summary": article["summary"],
+                            "source": article["source"],
+                            "category": article["category"],
+                            "published_at": article["published_at"],
+                        }
+                    )
+                    row = result.fetchone()
+                    if row:
+                        inserted += 1
+                        seen_in_batch.append((row[0], title_lower, summary_lower))
+                
+                # 2. Map to instrument if it has one
+                if row and article.get("instrument_id"):
+                    await session.execute(
+                        text("""
+                            INSERT INTO news_instrument_map (article_id, instrument_id)
+                            VALUES (:aid, :iid)
+                            ON CONFLICT DO NOTHING
+                        """),
+                        {"aid": row[0], "iid": article["instrument_id"]}
+                    )
+                    
             except Exception:
                 logger.exception("Failed to insert article: %s", article["title"][:80])
                 await session.rollback()
                 continue
+                
         await session.commit()
 
-    logger.info("Inserted %d new articles out of %d fetched", inserted, len(articles))
+    if inserted > 0:
+        logger.info("Inserted %d new articles out of %d fetched", inserted, len(articles))
     return inserted
 
 
@@ -80,7 +214,7 @@ async def cleanup_old_finance_news() -> int:
                 DELETE FROM sentiment_scores
                 WHERE article_id IN (
                     SELECT id FROM news_articles
-                    WHERE category IN ('us_finance', 'uk_finance')
+                    WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
                     AND published_at < :cutoff
                 )
             """),
@@ -91,7 +225,7 @@ async def cleanup_old_finance_news() -> int:
                 DELETE FROM news_instrument_map
                 WHERE article_id IN (
                     SELECT id FROM news_articles
-                    WHERE category IN ('us_finance', 'uk_finance')
+                    WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
                     AND published_at < :cutoff
                 )
             """),
@@ -100,7 +234,7 @@ async def cleanup_old_finance_news() -> int:
         result = await session.execute(
             text("""
                 DELETE FROM news_articles
-                WHERE category IN ('us_finance', 'uk_finance')
+                WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
                 AND published_at < :cutoff
             """),
             {"cutoff": cutoff},
@@ -108,5 +242,5 @@ async def cleanup_old_finance_news() -> int:
         await session.commit()
         count = result.rowcount
         if count:
-            logger.info("Cleaned up %d old financial news articles", count)
+            logger.info("Cleaned up %d old financial/asset news articles", count)
         return count

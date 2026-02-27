@@ -13,8 +13,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("price-fetcher")
 
-LIVE_INTERVAL = 60           # 1 minute
+LIVE_INTERVAL = 60           # 1 minute - faster updates for live trading signals
 HISTORICAL_INTERVAL = 3600   # 1 hour
+DELAY_BETWEEN_SYMBOLS = 2    # 2 seconds between each symbol
 
 
 async def historical_loop() -> None:
@@ -24,23 +25,23 @@ async def historical_loop() -> None:
             instruments = await get_instruments()
             for inst in instruments:
                 await fetch_and_store_historical(inst)
-                await asyncio.sleep(2)  # Rate limit
+                await asyncio.sleep(DELAY_BETWEEN_SYMBOLS)
         except Exception:
             logger.exception("Error in historical fetch loop")
         await asyncio.sleep(HISTORICAL_INTERVAL)
 
 
 async def live_loop() -> None:
-    """Fetch live prices every minute."""
-    # Wait for initial historical fetch to finish first cycle
-    await asyncio.sleep(10)
+    """Fetch live prices every 60 seconds for near-real-time updates."""
+    # Wait for initial historical fetch to get a head start
+    await asyncio.sleep(45)
 
     while True:
         try:
             instruments = await get_instruments()
             for inst in instruments:
                 await fetch_and_store_live(inst)
-                await asyncio.sleep(1)  # Rate limit
+                await asyncio.sleep(DELAY_BETWEEN_SYMBOLS)
         except Exception:
             logger.exception("Error in live fetch loop")
         await asyncio.sleep(LIVE_INTERVAL)

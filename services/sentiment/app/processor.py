@@ -11,7 +11,7 @@ from .model import analyze_batch
 
 logger = logging.getLogger(__name__)
 
-PROCESS_INTERVAL = 120  # 2 minutes
+PROCESS_INTERVAL = 30  # 30 seconds - fast scoring for near-real-time sentiment
 
 
 async def get_unscored_articles(limit: int = 50) -> list[dict]:
@@ -61,11 +61,21 @@ async def store_scores(article_scores: list[tuple[str, dict]]) -> None:
 
 
 async def update_macro_sentiment() -> None:
-    """Calculate aggregate macro sentiment from recent political news."""
+    """Calculate aggregate macro sentiment from political AND financial news.
+
+    Macro sentiment combines both political climate and economic/financial news
+    to provide a holistic view of the macro environment affecting markets.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
+    # Each region uses BOTH politics AND finance news for a true macro view
+    region_categories = [
+        ("us", ("us_politics", "us_finance")),
+        ("uk", ("uk_politics", "uk_finance")),
+    ]
+
     async with async_session() as session:
-        for region, categories in [("us", ("us_politics",)), ("uk", ("uk_politics",))]:
+        for region, categories in region_categories:
             placeholders = ", ".join(f":cat{i}" for i in range(len(categories)))
             params = {f"cat{i}": c for i, c in enumerate(categories)}
             params["cutoff"] = cutoff
@@ -93,18 +103,31 @@ async def update_macro_sentiment() -> None:
             avg_neg = float(row.avg_negative)
             scores = {"positive": avg_pos, "negative": avg_neg, "neutral": float(row.avg_neutral)}
             label = max(scores, key=scores.get)
-            # Net score: positive - negative, range [-1, 1]
             net_score = avg_pos - avg_neg
 
             await session.execute(
                 text("""
-                    INSERT INTO macro_sentiment (region, score, label, article_count)
-                    VALUES (:region, :score, :label, :count)
+                    INSERT INTO macro_sentiment (region, score, label, article_count, calculated_at)
+                    VALUES (:region, :score, :label, :count, NOW())
                 """),
                 {"region": region, "score": net_score, "label": label, "count": row.cnt},
             )
+
+        # Cleanup: keep only last 100 entries per region to prevent table bloat
+        await session.execute(
+            text("""
+                DELETE FROM macro_sentiment
+                WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY region ORDER BY calculated_at DESC) as rn
+                        FROM macro_sentiment
+                    ) ranked WHERE rn <= 100
+                )
+            """)
+        )
+
         await session.commit()
-    logger.info("Macro sentiment updated")
+    logger.info("Macro sentiment updated (politics + finance)")
 
 
 async def process_loop() -> None:
@@ -123,6 +146,11 @@ async def process_loop() -> None:
                 logger.info("Scored %d articles", len(pairs))
 
             await update_macro_sentiment()
+
+            # If we fetched a full batch, process the next batch immediately to drain backlog
+            if articles and len(articles) == 50:
+                await asyncio.sleep(1)
+                continue
 
         except Exception:
             logger.exception("Error in sentiment processing loop")

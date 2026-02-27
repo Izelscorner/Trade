@@ -3,10 +3,10 @@
 import logging
 from datetime import date, timedelta
 
-import yfinance as yf
 from sqlalchemy import text
 
 from .db import async_session
+from .yahoo import fetch_chart, parse_historical
 
 logger = logging.getLogger(__name__)
 
@@ -22,44 +22,65 @@ async def get_last_stored_date(instrument_id: str) -> date | None:
         return row[0] if row and row[0] else None
 
 
+def compute_period(last_date: date | None) -> str:
+    """Compute yfinance-compatible period string based on last stored date."""
+    if last_date is None:
+        return "5y"  # Fetch 5 years on first run
+
+    days_diff = (date.today() - last_date).days
+    if days_diff <= 5:
+        return "5d"
+    elif days_diff <= 30:
+        return "1mo"
+    elif days_diff <= 90:
+        return "3mo"
+    elif days_diff <= 180:
+        return "6mo"
+    elif days_diff <= 365:
+        return "1y"
+    elif days_diff <= 730:
+        return "2y"
+    else:
+        return "5y"
+
+
 async def fetch_and_store_historical(instrument: dict) -> int:
-    """Fetch historical data from yfinance. Only fetches data newer than what's stored."""
+    """Fetch historical data from Yahoo Finance. Only stores new data."""
     yf_symbol = instrument["yfinance_symbol"]
     instrument_id = instrument["id"]
 
     last_date = await get_last_stored_date(instrument_id)
 
     if last_date:
-        start_date = last_date + timedelta(days=1)
-        if start_date >= date.today():
+        if last_date >= date.today() - timedelta(days=1):
             logger.info("[%s] Historical data already up to date", instrument["symbol"])
             return 0
-        start_str = start_date.isoformat()
-    else:
-        start_str = "2020-01-01"
 
-    logger.info("[%s] Fetching historical data from %s", instrument["symbol"], start_str)
+    period = compute_period(last_date)
+    logger.info("[%s] Fetching historical data (period=%s, last=%s)",
+                instrument["symbol"], period, last_date)
 
-    try:
-        ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(start=start_str, end=date.today().isoformat(), auto_adjust=True)
-    except Exception:
-        logger.exception("[%s] Failed to fetch historical data", instrument["symbol"])
+    chart_data = fetch_chart(yf_symbol, period=period, interval="1d")
+    if chart_data is None:
+        logger.warning("[%s] No chart data returned", instrument["symbol"])
         return 0
 
-    if df.empty:
-        logger.info("[%s] No new historical data available", instrument["symbol"])
+    rows = parse_historical(chart_data)
+    if not rows:
+        logger.warning("[%s] No historical rows parsed", instrument["symbol"])
         return 0
 
-    df = df.reset_index()
+    # Filter to only new dates
+    if last_date:
+        rows = [r for r in rows if r["date"] > last_date]
+
+    if not rows:
+        logger.info("[%s] No new historical rows to insert", instrument["symbol"])
+        return 0
+
     inserted = 0
-
     async with async_session() as session:
-        for _, row in df.iterrows():
-            row_date = row["Date"]
-            if hasattr(row_date, "date"):
-                row_date = row_date.date()
-
+        for row in rows:
             try:
                 result = await session.execute(
                     text("""
@@ -70,18 +91,18 @@ async def fetch_and_store_historical(instrument: dict) -> int:
                     """),
                     {
                         "iid": instrument_id,
-                        "date": row_date,
-                        "open": float(row["Open"]),
-                        "high": float(row["High"]),
-                        "low": float(row["Low"]),
-                        "close": float(row["Close"]),
-                        "volume": int(row.get("Volume", 0)),
+                        "date": row["date"],
+                        "open": row["open"],
+                        "high": row["high"],
+                        "low": row["low"],
+                        "close": row["close"],
+                        "volume": row["volume"],
                     },
                 )
                 if result.fetchone():
                     inserted += 1
             except Exception:
-                logger.exception("[%s] Failed to insert row for %s", instrument["symbol"], row_date)
+                logger.exception("[%s] Failed to insert for %s", instrument["symbol"], row["date"])
                 await session.rollback()
                 continue
         await session.commit()

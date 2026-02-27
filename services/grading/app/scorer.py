@@ -71,8 +71,8 @@ async def get_technical_score(instrument_id: str, lookback_days: int = 5) -> tup
 
 
 async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
-    """Get instrument-specific sentiment score from financial news."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    """Get instrument-specific sentiment score from financial news (last 3 days)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
 
     async with async_session() as session:
         # Direct instrument-mapped articles
@@ -81,9 +81,11 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
                 SELECT AVG(s.positive) as avg_pos, AVG(s.negative) as avg_neg, COUNT(*) as cnt
                 FROM sentiment_scores s
                 JOIN news_instrument_map m ON m.article_id = s.article_id
+                JOIN news_articles a ON a.id = m.article_id
                 WHERE m.instrument_id = :iid
+                AND a.published_at >= :cutoff
             """),
-            {"iid": instrument_id},
+            {"iid": instrument_id, "cutoff": cutoff},
         )
         row = result.fetchone()
 
@@ -112,15 +114,18 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
 
 
 async def get_macro_score() -> tuple[float, dict]:
-    """Get latest macro sentiment score."""
+    """Get latest macro sentiment score (from politics + finance news).
+
+    Uses DISTINCT ON to get the latest entry per region, ensuring we always
+    have the freshest macro sentiment.
+    """
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT region, score, label, article_count, calculated_at
+                SELECT DISTINCT ON (region) region, score, label, article_count, calculated_at
                 FROM macro_sentiment
-                WHERE calculated_at >= NOW() - INTERVAL '2 hours'
-                ORDER BY calculated_at DESC
-                LIMIT 2
+                WHERE calculated_at >= NOW() - INTERVAL '4 hours'
+                ORDER BY region, calculated_at DESC
             """)
         )
         rows = result.fetchall()
@@ -142,10 +147,33 @@ async def get_macro_score() -> tuple[float, dict]:
     return round(avg, 4), details
 
 
-async def grade_instrument(instrument_id: str, symbol: str, term: str = "short") -> dict | None:
+# Category-specific weight profiles for institutional-grade grading.
+# Commodities are more macro-driven (geopolitics, central bank policy).
+# Stocks are more sentiment/news-driven in the short term.
+# ETFs blend characteristics of their underlying assets.
+WEIGHT_PROFILES = {
+    "stock": {
+        "short": {"technical": 0.45, "sentiment": 0.35, "macro": 0.20},
+        "long":  {"technical": 0.35, "sentiment": 0.30, "macro": 0.35},
+    },
+    "etf": {
+        "short": {"technical": 0.45, "sentiment": 0.30, "macro": 0.25},
+        "long":  {"technical": 0.30, "sentiment": 0.30, "macro": 0.40},
+    },
+    "commodity": {
+        "short": {"technical": 0.40, "sentiment": 0.20, "macro": 0.40},
+        "long":  {"technical": 0.25, "sentiment": 0.25, "macro": 0.50},
+    },
+}
+
+
+async def grade_instrument(
+    instrument_id: str, symbol: str, term: str = "short", category: str = "stock",
+) -> dict | None:
     """Compute a full grade for an instrument.
 
     term: 'short' uses recent 5-day TA, 'long' uses 30-day TA.
+    category: 'stock', 'etf', or 'commodity' — affects weight profile.
     """
     lookback = 5 if term == "short" else 30
 
@@ -153,13 +181,9 @@ async def grade_instrument(instrument_id: str, symbol: str, term: str = "short")
     sentiment_score, sent_details = await get_sentiment_score(instrument_id)
     macro_score, macro_details = await get_macro_score()
 
-    # Weighted combination:
-    # Short-term: heavier on technicals and sentiment
-    # Long-term: more balanced, macro matters more
-    if term == "short":
-        weights = {"technical": 0.50, "sentiment": 0.30, "macro": 0.20}
-    else:
-        weights = {"technical": 0.35, "sentiment": 0.30, "macro": 0.35}
+    # Use category-specific weights for optimal signal weighting
+    profile = WEIGHT_PROFILES.get(category, WEIGHT_PROFILES["stock"])
+    weights = profile.get(term, profile["short"])
 
     overall = (
         technical_score * weights["technical"]
@@ -198,7 +222,7 @@ async def store_grade(grade: dict) -> None:
                 INSERT INTO grades (instrument_id, term, overall_grade, overall_score,
                     technical_score, sentiment_score, macro_score, details, graded_at)
                 VALUES (:instrument_id, :term, :overall_grade, :overall_score,
-                    :technical_score, :sentiment_score, :macro_score, :details::jsonb, :graded_at)
+                    :technical_score, :sentiment_score, :macro_score, CAST(:details AS jsonb), :graded_at)
             """),
             grade,
         )

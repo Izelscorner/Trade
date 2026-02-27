@@ -59,6 +59,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      TRANSFORMERS_CACHE: /tmp/hf_cache
+      HF_HOME: /tmp/hf_cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,6 +68,7 @@ services:
       - "8001:8001"
     networks:
       - internal
+      - egress
     read_only: true
     tmpfs:
       - /tmp
@@ -79,6 +82,34 @@ services:
         limits:
           memory: 2G
           cpus: "2.0"
+
+  relevance:
+    build:
+      context: ./services/relevance
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      TRANSFORMERS_CACHE: /tmp/hf_cache
+      HF_HOME: /tmp/hf_cache
+    ports:
+      - "8002:8002"
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/appuser/.cache
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
 
   technical-analysis:
     build:
@@ -112,6 +143,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,6 +196,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -170,6 +204,7 @@ services:
       - "8000:8000"
     networks:
       - internal
+      - egress
     read_only: true
     tmpfs:
       - /tmp
@@ -194,11 +229,7 @@ services:
       - backend
     networks:
       - internal
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
+      - egress
     security_opt:
       - no-new-privileges:true
     deploy:

@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("grading")
 
-GRADING_INTERVAL = 1800  # 30 minutes
+GRADING_INTERVAL = 60  # 1 minute
 
 
 async def get_instruments() -> list[dict]:
@@ -36,7 +36,7 @@ async def grading_loop() -> None:
             for inst in instruments:
                 for term in ("short", "long"):
                     try:
-                        grade = await grade_instrument(inst["id"], inst["symbol"], term)
+                        grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
                         if grade:
                             await store_grade(grade)
                             logger.info(
