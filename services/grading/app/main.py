@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger("grading")
 
 POLL_INTERVAL = 10  # Check for changes every 10 seconds
-FULL_REGRADE_INTERVAL = 300  # Full regrade every 5 minutes regardless
+FULL_REGRADE_INTERVAL = 60  # Full regrade every 60 seconds per spec
 
 
 async def get_instruments() -> list[dict]:

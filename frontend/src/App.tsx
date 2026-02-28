@@ -6,6 +6,7 @@ import Dashboard from "./pages/Dashboard";
 import AssetList from "./pages/AssetList";
 import AssetDetail from "./pages/AssetDetail";
 import News from "./pages/News";
+import Portfolio from "./pages/Portfolio";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/assets" element={<AssetList />} />
+            <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/news" element={<News />} />
             <Route path="/asset/:id" element={<AssetDetail />} />
           </Routes>

@@ -113,3 +113,8 @@ class MacroSentimentSchema(BaseModel):
     label: str
     article_count: int
     calculated_at: datetime
+
+
+# --- Add Instruments ---
+class CreateInstrumentsRequest(BaseModel):
+    symbols: str

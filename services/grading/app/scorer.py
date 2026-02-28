@@ -28,22 +28,33 @@ SENTIMENT_MULTIPLIERS = {
     "very negative": -1.0,
 }
 
-# Score to letter grade mapping
+# Score to letter grade mapping — symmetric thresholds
 def score_to_grade(score: float) -> str:
-    """Convert a -1.0 to 1.0 score to a letter grade."""
-    if score >= 0.7:
+    """Convert a -1.0 to 1.0 score to a letter grade.
+
+    Symmetric distribution with wider neutral zone:
+        A+ : [0.75, 1.0]   — strong bullish
+        A  : [0.50, 0.75)  — bullish
+        B+ : [0.25, 0.50)  — moderately bullish
+        B  : [0.10, 0.25)  — slightly bullish
+        C  : [-0.10, 0.10) — neutral
+        D  : [-0.25, -0.10) — slightly bearish
+        D- : [-0.50, -0.25) — moderately bearish
+        F  : [-1.0, -0.50)  — bearish
+    """
+    if score >= 0.75:
         return "A+"
-    elif score >= 0.5:
+    elif score >= 0.50:
         return "A"
-    elif score >= 0.3:
+    elif score >= 0.25:
         return "B+"
-    elif score >= 0.1:
+    elif score >= 0.10:
         return "B"
-    elif score >= -0.1:
+    elif score >= -0.10:
         return "C"
-    elif score >= -0.3:
+    elif score >= -0.25:
         return "D"
-    elif score >= -0.5:
+    elif score >= -0.50:
         return "D-"
     else:
         return "F"
@@ -75,7 +86,7 @@ async def get_technical_score(instrument_id: str, lookback_days: int = 5) -> tup
         total += score
         details[row.indicator_name] = {"signal": row.signal, "score": score}
 
-    avg = total / len(rows)
+    avg = max(-1.0, min(1.0, total / len(rows)))
     return round(avg, 4), details
 
 
@@ -110,7 +121,7 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
                 total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
             
             if total_cnt > 0:
-                net = total_score / total_cnt
+                net = max(-1.0, min(1.0, total_score / total_cnt))
                 return round(net, 4), {"articles": total_cnt, "labels": label_details}
 
         # Fallback: use general finance news sentiment
@@ -134,9 +145,9 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
                 cnt = int(r.cnt)
                 total_cnt += cnt
                 total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
-            
+
             if total_cnt > 0:
-                net = total_score / total_cnt
+                net = max(-1.0, min(1.0, total_score / total_cnt))
                 return round(net, 4), {"articles": total_cnt, "source": "general_finance"}
 
     return 0.0, {}
@@ -165,33 +176,30 @@ async def get_macro_score() -> tuple[float, dict]:
     total_score = 0.0
     details = {}
     for row in rows:
-        total_score += float(row.score)
+        s = max(-1.0, min(1.0, float(row.score)))
+        total_score += s
         details[row.region] = {
-            "score": float(row.score),
+            "score": s,
             "label": row.label,
             "articles": row.article_count,
         }
 
-    avg = total_score / len(rows)
+    avg = max(-1.0, min(1.0, total_score / len(rows)))
     return round(avg, 4), details
 
 
-# Category-specific weight profiles for institutional-grade grading.
-# Commodities are more macro-driven (geopolitics, central bank policy).
-# Stocks are more sentiment/news-driven in the short term.
-# ETFs blend characteristics of their underlying assets.
 WEIGHT_PROFILES = {
     "stock": {
-        "short": {"technical": 0.45, "sentiment": 0.35, "macro": 0.20},
+        "short": {"technical": 0.50, "sentiment": 0.30, "macro": 0.20},
         "long":  {"technical": 0.35, "sentiment": 0.30, "macro": 0.35},
     },
     "etf": {
-        "short": {"technical": 0.45, "sentiment": 0.30, "macro": 0.25},
-        "long":  {"technical": 0.30, "sentiment": 0.30, "macro": 0.40},
+        "short": {"technical": 0.45, "sentiment": 0.25, "macro": 0.30},
+        "long":  {"technical": 0.30, "sentiment": 0.25, "macro": 0.45},
     },
     "commodity": {
-        "short": {"technical": 0.40, "sentiment": 0.20, "macro": 0.40},
-        "long":  {"technical": 0.25, "sentiment": 0.25, "macro": 0.50},
+        "short": {"technical": 0.45, "sentiment": 0.30, "macro": 0.25},
+        "long":  {"technical": 0.30, "sentiment": 0.30, "macro": 0.40},
     },
 }
 
@@ -219,7 +227,7 @@ async def grade_instrument(
         + sentiment_score * weights["sentiment"]
         + macro_score * weights["macro"]
     )
-    overall = round(overall, 4)
+    overall = round(max(-1.0, min(1.0, overall)), 4)
     grade = score_to_grade(overall)
 
     now = datetime.now(timezone.utc)

@@ -1,4 +1,9 @@
-"""Technical Analysis Service - computes indicators from historical price data."""
+"""Technical Analysis Service - computes indicators from historical price data.
+
+On startup, immediately runs analysis on all instruments with available data.
+A fast-check loop runs every 2 minutes to pick up newly added instruments
+that have acquired enough historical data (26+ days).
+"""
 
 import asyncio
 import json
@@ -18,6 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger("technical-analysis")
 
 ANALYSIS_INTERVAL = 900  # 15 minutes
+NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
 
 
 async def get_instruments() -> list[dict]:
@@ -81,33 +87,35 @@ async def store_indicators(instrument_id: str, indicators: list[dict], analysis_
         await session.commit()
 
 
-async def analyze_instrument(instrument: dict) -> None:
-    """Run full technical analysis on a single instrument."""
+async def analyze_instrument(instrument: dict) -> bool:
+    """Run full technical analysis on a single instrument. Returns True if analysis was performed."""
     df = await get_price_data(instrument["id"])
     if df.empty:
         logger.warning("[%s] No price data available, skipping", instrument["symbol"])
-        return
+        return False
 
     indicators = run_all_indicators(df)
     if not indicators:
-        logger.warning("[%s] Not enough data for analysis (need 50+ days)", instrument["symbol"])
-        return
+        logger.warning("[%s] Not enough data for analysis (need 26+ days)", instrument["symbol"])
+        return False
 
     analysis_date = df["date"].iloc[-1].date() if hasattr(df["date"].iloc[-1], "date") else df["date"].iloc[-1]
     await store_indicators(instrument["id"], indicators, analysis_date)
 
     signals = {ind["indicator_name"]: ind["signal"] for ind in indicators}
     logger.info("[%s] Analysis complete: %s", instrument["symbol"], signals)
+    return True
 
 
 async def analysis_loop() -> None:
     """Main loop: run TA on all instruments periodically."""
-    # Wait for price data to be available
-    await asyncio.sleep(30)
+    # Short wait for price data to start populating
+    await asyncio.sleep(15)
 
     while True:
         try:
             instruments = await get_instruments()
+            logger.info("Running technical analysis for %d instruments", len(instruments))
             for inst in instruments:
                 await analyze_instrument(inst)
         except Exception:
@@ -115,9 +123,37 @@ async def analysis_loop() -> None:
         await asyncio.sleep(ANALYSIS_INTERVAL)
 
 
+async def new_asset_analysis_loop() -> None:
+    """Fast loop: checks every 2 min for instruments without technical indicators."""
+    await asyncio.sleep(60)
+
+    while True:
+        try:
+            instruments = await get_instruments()
+            async with async_session() as session:
+                for inst in instruments:
+                    result = await session.execute(
+                        text("""
+                            SELECT COUNT(*) as cnt FROM technical_indicators
+                            WHERE instrument_id = :iid
+                        """),
+                        {"iid": inst["id"]},
+                    )
+                    row = result.fetchone()
+                    if row and row.cnt == 0:
+                        logger.info("New asset %s has no technical indicators — analyzing now", inst["symbol"])
+                        await analyze_instrument(inst)
+        except Exception:
+            logger.exception("Error in new asset analysis check")
+        await asyncio.sleep(NEW_ASSET_CHECK_INTERVAL)
+
+
 async def main() -> None:
     logger.info("Technical Analysis Service starting...")
-    await analysis_loop()
+    await asyncio.gather(
+        analysis_loop(),
+        new_asset_analysis_loop(),
+    )
 
 
 if __name__ == "__main__":

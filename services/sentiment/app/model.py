@@ -25,9 +25,9 @@ def map_to_5_scale(pos: float, neg: float) -> str:
         return "very positive"
     elif score >= 0.1:
         return "positive"
-    elif score > -0.1:
+    elif score >= -0.1:
         return "neutral"
-    elif score > -0.5:
+    elif score >= -0.5:
         return "negative"
     else:
         return "very negative"
@@ -128,11 +128,23 @@ JSON array:"""
             text = text.split("```")[1].split("```")[0]
             
         data = json.loads(text.strip())
+        if len(data) != len(texts):
+            logger.warning("Gemini returned %d results for %d texts, falling back to FinBERT", len(data), len(texts))
+            return analyze_batch(texts)
         for item in data:
+            p = float(item["positive_prob"])
+            n = float(item["negative_prob"])
+            u = float(item["neutral_prob"])
+            # Normalize probabilities to sum to 1.0
+            total = p + n + u
+            if total > 0:
+                p, n, u = p / total, n / total, u / total
+            else:
+                p, n, u = 0.0, 0.0, 1.0
             results.append({
-                "positive": float(item["positive_prob"]),
-                "negative": float(item["negative_prob"]),
-                "neutral": float(item["neutral_prob"]),
+                "positive": round(p, 6),
+                "negative": round(n, 6),
+                "neutral": round(u, 6),
                 "label": item["label"]
             })
     except Exception as e:

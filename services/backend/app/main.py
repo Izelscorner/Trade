@@ -12,6 +12,7 @@ from .api.prices import router as prices_router
 from .api.technical import router as technical_router
 from .api.dashboard import router as dashboard_router
 from .api.ai_analysis import router as ai_analysis_router
+from .api.portfolio import router as portfolio_router
 
 
 from .api.ws import (
@@ -24,8 +25,42 @@ from .api.ws import (
 )
 import asyncio
 
+async def _ensure_extra_tables():
+    """Create tables that may not exist in older DBs (migration for existing DBs)."""
+    from .core.db import async_session as _session
+    from sqlalchemy import text as _text
+    async with _session() as session:
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS portfolio (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+                added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(instrument_id)
+            )
+        """))
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS intraday_prices (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+                timestamp TIMESTAMPTZ NOT NULL,
+                open NUMERIC(20, 6) NOT NULL,
+                high NUMERIC(20, 6) NOT NULL,
+                low NUMERIC(20, 6) NOT NULL,
+                close NUMERIC(20, 6) NOT NULL,
+                volume BIGINT NOT NULL DEFAULT 0,
+                UNIQUE (instrument_id, timestamp)
+            )
+        """))
+        await session.execute(_text("""
+            CREATE INDEX IF NOT EXISTS idx_intraday_prices_instrument_ts
+            ON intraday_prices(instrument_id, timestamp DESC)
+        """))
+        await session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await _ensure_extra_tables()
     # Start all background tasks
     tasks = [
         asyncio.create_task(broadcast_live_prices()),
@@ -37,6 +72,7 @@ async def lifespan(app: FastAPI):
     yield
     for task in tasks:
         task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(
     title="TradeSignal API",
@@ -59,6 +95,7 @@ app.include_router(news_router, prefix="/api/v1/news", tags=["news"])
 app.include_router(prices_router, prefix="/api/v1/prices", tags=["prices"])
 app.include_router(technical_router, prefix="/api/v1/technical", tags=["technical"])
 app.include_router(ai_analysis_router, prefix="/api/v1/ai-analysis", tags=["ai-analysis"])
+app.include_router(portfolio_router, prefix="/api/v1/portfolio", tags=["portfolio"])
 app.include_router(ws_router, prefix="/api/v1")
 
 

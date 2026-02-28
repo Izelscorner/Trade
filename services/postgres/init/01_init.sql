@@ -107,6 +107,27 @@ CREATE TABLE IF NOT EXISTS macro_sentiment (
     calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Intraday prices (5-minute candles for 1D chart)
+CREATE TABLE IF NOT EXISTS intraday_prices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    timestamp TIMESTAMPTZ NOT NULL,
+    open NUMERIC(20, 6) NOT NULL,
+    high NUMERIC(20, 6) NOT NULL,
+    low NUMERIC(20, 6) NOT NULL,
+    close NUMERIC(20, 6) NOT NULL,
+    volume BIGINT NOT NULL DEFAULT 0,
+    UNIQUE (instrument_id, timestamp)
+);
+
+-- Portfolio (user watchlist)
+CREATE TABLE IF NOT EXISTS portfolio (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(instrument_id)
+);
+
 -- Indexes
 CREATE INDEX idx_historical_prices_instrument_date ON historical_prices(instrument_id, date DESC);
 CREATE INDEX idx_live_prices_instrument_fetched ON live_prices(instrument_id, fetched_at DESC);
@@ -117,6 +138,7 @@ CREATE INDEX idx_technical_indicators_instrument_date ON technical_indicators(in
 CREATE INDEX idx_grades_instrument_term ON grades(instrument_id, term, graded_at DESC);
 CREATE INDEX idx_macro_sentiment_region_calc ON macro_sentiment(region, calculated_at DESC);
 CREATE INDEX idx_news_instrument_map_instrument ON news_instrument_map(instrument_id);
+CREATE INDEX idx_intraday_prices_instrument_ts ON intraday_prices(instrument_id, timestamp DESC);
 
 -- Seed instruments
 INSERT INTO instruments (symbol, name, category, yfinance_symbol) VALUES

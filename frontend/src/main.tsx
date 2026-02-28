@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Provider as JotaiProvider } from "jotai";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { _setWs, _resendSubscription } from "./ws";
 import type {
   DashboardInstrument,
   LivePrice,
@@ -24,17 +25,22 @@ const queryClient = new QueryClient({
   },
 });
 
-// Setup WebSocket for live streaming
-let ws: WebSocket;
+// --- WebSocket connection ---
+
 function connectWS() {
   const wsUrl =
     window.location.protocol === "https:"
       ? `wss://${window.location.host}/api/v1/ws/updates`
       : `ws://${window.location.host}/api/v1/ws/updates`;
 
-  ws = new WebSocket(wsUrl);
+  const socket = new WebSocket(wsUrl);
+  _setWs(socket);
 
-  ws.onmessage = (event) => {
+  socket.onopen = () => {
+    _resendSubscription();
+  };
+
+  socket.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
       const { type, data } = payload;
@@ -44,7 +50,7 @@ function connectWS() {
       switch (type) {
         case "live_prices":
           queryClient.setQueryData(["live-prices"], data);
-          // Also update dashboard if entries exist
+          // Update dashboard instrument prices
           queryClient.setQueryData(
             ["dashboard"],
             (old: DashboardInstrument[] | undefined) => {
@@ -66,10 +72,16 @@ function connectWS() {
               });
             },
           );
+          // Update individual instrument live-price cache (for AssetDetail)
+          data.forEach((price: LivePrice) => {
+            queryClient.setQueryData(
+              ["live-price", price.instrument_id],
+              price,
+            );
+          });
           break;
 
         case "news_updates": {
-          // Helper to merge and deduplicate news arrays
           const mergeNews = (
             incoming: NewsArticle[],
             existing: NewsArticle[],
@@ -100,7 +112,7 @@ function connectWS() {
             },
           );
 
-          // Update macro-news feed (only if categories match)
+          // Update macro-news feed
           const macroCategories = [
             "us_politics",
             "uk_politics",
@@ -120,14 +132,12 @@ function connectWS() {
             );
           }
 
-          // Update all news-page queries (News page real-time updates)
-          // Query key format: ["news-page", region, categoryType]
+          // Update news-page queries
           queryClient
             .getQueryCache()
             .findAll({ queryKey: ["news-page"] })
             .forEach((query) => {
               const [, qRegion, qCatType] = query.queryKey as string[];
-              // Filter incoming articles to match the query's filters
               const filtered = data.filter((a: NewsArticle) => {
                 if (
                   qRegion &&
@@ -139,8 +149,6 @@ function connectWS() {
                   if (qCatType === "macro") {
                     if (!macroCategories.includes(a.category)) return false;
                   } else {
-                    // For specific region+type combo, the queryFn uses exact category
-                    // For "all" region + type, we filter by suffix
                     if (qRegion && qRegion !== "all") {
                       if (a.category !== `${qRegion}_${qCatType}`) return false;
                     } else {
@@ -154,13 +162,13 @@ function connectWS() {
               queryClient.setQueryData(
                 query.queryKey,
                 (old: NewsArticle[] | undefined) => {
-                  if (!old) return old;
+                  if (!old) return filtered;
                   return mergeNews(filtered, old, 200);
                 },
               );
             });
 
-          // Update specific instrument news if applicable
+          // Update specific instrument news
           data.forEach((article: NewsArticle) => {
             if (article.instrument_id) {
               queryClient.setQueryData(
@@ -187,18 +195,20 @@ function connectWS() {
                   (d: Grade) => d.instrument_id === inst.id,
                 );
                 if (updates.length > 0) {
-                  const short = updates.find((u: Grade) => u.term === "short");
+                  const short = updates.find(
+                    (u: Grade) => u.term === "short",
+                  );
                   const long = updates.find((u: Grade) => u.term === "long");
                   return {
                     ...inst,
                     short_term_grade:
-                      short?.overall_grade || inst.short_term_grade,
+                      short?.overall_grade ?? inst.short_term_grade,
                     short_term_score:
-                      short?.overall_score || inst.short_term_score,
+                      short?.overall_score ?? inst.short_term_score,
                     long_term_grade:
-                      long?.overall_grade || inst.long_term_grade,
+                      long?.overall_grade ?? inst.long_term_grade,
                     long_term_score:
-                      long?.overall_score || inst.long_term_score,
+                      long?.overall_score ?? inst.long_term_score,
                     graded_at: updates[0].graded_at,
                   };
                 }
@@ -206,13 +216,15 @@ function connectWS() {
               });
             },
           );
-          // Update specific instrument grades if open
+          // Update specific instrument grades
           data.forEach((grade: Grade) => {
             queryClient.setQueryData(
               ["grades", grade.instrument_id],
               (old: Grade[] | undefined) => {
-                if (!old) return old;
-                const others = old.filter((g: Grade) => g.term !== grade.term);
+                if (!old) return [grade];
+                const others = old.filter(
+                  (g: Grade) => g.term !== grade.term,
+                );
                 return [...others, grade];
               },
             );
@@ -220,18 +232,16 @@ function connectWS() {
           break;
 
         case "technical_updates":
-          // Update specific technical queries for open instruments
           data.forEach((tech: TechnicalIndicator) => {
             queryClient.setQueryData(
               ["technical", tech.instrument_id],
               (old: TechnicalIndicator[] | undefined) => {
-                if (!old) return old;
-                // Add new indicator or update existing one
+                if (!old) return [tech];
                 const others = old.filter(
                   (t: TechnicalIndicator) =>
                     t.indicator_name !== tech.indicator_name,
                 );
-                return [tech, ...others].slice(0, 20); // Keep latest
+                return [tech, ...others];
               },
             );
           });
@@ -246,7 +256,8 @@ function connectWS() {
     }
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    _setWs(null);
     setTimeout(connectWS, 5000);
   };
 }

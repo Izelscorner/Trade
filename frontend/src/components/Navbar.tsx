@@ -1,11 +1,12 @@
 /** Navigation header */
 
 import { Link, useLocation } from "react-router-dom";
-import { BarChart3, LayoutDashboard, List, Newspaper } from "lucide-react";
+import { BarChart3, Briefcase, LayoutDashboard, List, Newspaper } from "lucide-react";
 
 const navItems = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/assets", label: "Assets", icon: List },
+  { path: "/portfolio", label: "Portfolio", icon: Briefcase },
   { path: "/news", label: "News", icon: Newspaper },
 ];
 

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import Fuse from "fuse.js";
 import { fetchNews } from "../api/client";
+import { wsSubscribe } from "../ws";
 import type { NewsArticle } from "../types";
 
 const sentimentColors: Record<string, string> = {
@@ -94,6 +95,15 @@ export default function News() {
 
   const region = searchParams.get("region") || "all";
   const categoryType = searchParams.get("type") || "all";
+
+  // Subscribe WS to news with current filters
+  useEffect(() => {
+    wsSubscribe({
+      page: "news",
+      region: region !== "all" ? region : undefined,
+      category: categoryType !== "all" ? categoryType : undefined,
+    });
+  }, [region, categoryType]);
 
   const { data: rawArticles = [], isLoading } = useQuery<NewsArticle[]>({
     queryKey: ["news-page", region, categoryType],

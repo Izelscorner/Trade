@@ -1,18 +1,33 @@
-/** Asset List page - all assets with category filtering */
+/** Asset List page - all assets with category filtering, search, pagination, add asset, portfolio */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useAtom } from "jotai";
+import { useQueryClient } from "@tanstack/react-query";
 import { dashboardAtom } from "../atoms";
+import { wsSubscribe } from "../ws";
+import { addInstruments } from "../api/client";
+import { usePortfolio } from "../hooks/usePortfolio";
 import CategoryFilter from "../components/CategoryFilter";
 import GradeBadge from "../components/GradeBadge";
 import PriceChange from "../components/PriceChange";
 import { TableRowSkeleton } from "../components/Skeletons";
 import type { Category, DashboardInstrument } from "../types";
-import { ArrowUpDown } from "lucide-react";
+import {
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Plus,
+  Search,
+  Star,
+  X,
+} from "lucide-react";
 
 type SortKey = "symbol" | "price" | "change" | "short_grade" | "long_grade";
 type SortDir = "asc" | "desc";
+
+const ITEMS_PER_PAGE = 20;
 
 const marketStatusColors: Record<string, string> = {
   active: "text-accent-emerald",
@@ -23,14 +38,36 @@ const marketStatusColors: Record<string, string> = {
 
 export default function AssetList() {
   const [{ data: instruments, isLoading }] = useAtom(dashboardAtom);
+  const queryClient = useQueryClient();
+  const { isInPortfolio, togglePortfolio } = usePortfolio();
   const [category, setCategory] = useState<Category | "all">("all");
   const [sortKey, setSortKey] = useState<SortKey>("symbol");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [showAddModal, setShowAddModal] = useState(false);
+
+  useEffect(() => {
+    wsSubscribe({ page: "asset_list" });
+  }, []);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [category, search]);
 
   const filtered = useMemo(() => {
     let list = instruments || [];
     if (category !== "all") {
       list = list.filter((i) => i.category === category);
+    }
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(
+        (i) =>
+          i.symbol.toLowerCase().includes(q) ||
+          i.name.toLowerCase().includes(q),
+      );
     }
     return [...list].sort((a, b) => {
       let cmp = 0;
@@ -53,7 +90,13 @@ export default function AssetList() {
       }
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [instruments, category, sortKey, sortDir]);
+  }, [instruments, category, sortKey, sortDir, search]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
+  const paginated = filtered.slice(
+    (page - 1) * ITEMS_PER_PAGE,
+    page * ITEMS_PER_PAGE,
+  );
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -76,13 +119,37 @@ export default function AssetList() {
             All tracked instruments with investment grades
           </p>
         </div>
-        <CategoryFilter selected={category} onChange={setCategory} />
+        <div className="flex items-center gap-3">
+          {/* Search */}
+          <div className="relative">
+            <Search
+              size={14}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
+            />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search assets..."
+              className="pl-8 pr-3 py-2 text-sm rounded-lg bg-surface-2 border border-border-subtle text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan/50 w-48"
+            />
+          </div>
+          <CategoryFilter selected={category} onChange={setCategory} />
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 text-accent-cyan text-sm font-medium hover:bg-accent-cyan/20 transition-colors"
+          >
+            <Plus size={16} />
+            Add Asset
+          </button>
+        </div>
       </div>
 
       {/* Table */}
       <div className="rounded-xl bg-surface-1 border border-border-subtle overflow-hidden animate-slide-up">
         {/* Table Header */}
-        <div className="grid grid-cols-[1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
+        <div className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
+          <span />
           <SortHeader
             label="Symbol"
             sortId="symbol"
@@ -121,9 +188,15 @@ export default function AssetList() {
         {/* Rows */}
         {isLoading ? (
           Array.from({ length: 7 }).map((_, i) => <TableRowSkeleton key={i} />)
-        ) : filtered.length > 0 ? (
-          filtered.map((inst, index) => (
-            <InstrumentRow key={inst.id} instrument={inst} index={index} />
+        ) : paginated.length > 0 ? (
+          paginated.map((inst, index) => (
+            <InstrumentRow
+              key={inst.id}
+              instrument={inst}
+              index={index}
+              starred={isInPortfolio(inst.id)}
+              onToggleStar={() => togglePortfolio(inst.id)}
+            />
           ))
         ) : (
           <div className="px-5 py-12 text-center text-text-muted text-sm">
@@ -131,6 +204,42 @@ export default function AssetList() {
           </div>
         )}
       </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 text-sm">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-surface-2 border border-border-subtle text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeft size={14} />
+            Prev
+          </button>
+          <span className="text-text-muted">
+            Page {page} of {totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page === totalPages}
+            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-surface-2 border border-border-subtle text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Next
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
+
+      {/* Add Asset Modal */}
+      {showAddModal && (
+        <AddAssetModal
+          onClose={() => setShowAddModal(false)}
+          onSuccess={() => {
+            queryClient.refetchQueries({ queryKey: ["dashboard"] });
+            setShowAddModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -138,42 +247,69 @@ export default function AssetList() {
 function InstrumentRow({
   instrument,
   index,
+  starred,
+  onToggleStar,
 }: {
   instrument: DashboardInstrument;
   index: number;
+  starred: boolean;
+  onToggleStar: () => void;
 }) {
   const statusColor = marketStatusColors[instrument.market_status || "closed"];
 
   return (
-    <Link
-      to={`/asset/${instrument.id}`}
-      id={`asset-row-${instrument.symbol}`}
-      className="grid grid-cols-[1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
+    <div
+      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
       style={{ animationDelay: `${index * 30}ms` }}
     >
-      <div className="flex items-center gap-2">
-        <div className={`w-1.5 h-1.5 rounded-full ${statusColor} bg-current`} />
+      <button
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onToggleStar();
+        }}
+        className="flex items-center justify-center"
+      >
+        <Star
+          size={16}
+          className={`transition-colors ${
+            starred
+              ? "text-accent-amber fill-accent-amber"
+              : "text-text-muted hover:text-accent-amber"
+          }`}
+        />
+      </button>
+
+      <Link
+        to={`/asset/${instrument.id}`}
+        className="flex items-center gap-2"
+      >
+        <div
+          className={`w-1.5 h-1.5 rounded-full ${statusColor} bg-current`}
+        />
         <span className="font-semibold text-text-primary group-hover:text-accent-cyan transition-colors font-mono">
           {instrument.symbol}
         </span>
-      </div>
+      </Link>
 
-      <div>
+      <Link to={`/asset/${instrument.id}`}>
         <span className="text-sm text-text-secondary">{instrument.name}</span>
         <span className="text-[10px] text-text-muted ml-2 uppercase tracking-wider px-1.5 py-0.5 rounded bg-surface-3">
           {instrument.category}
         </span>
-      </div>
+      </Link>
 
-      <PriceChange
-        symbol={instrument.symbol}
-        price={instrument.price}
-        changeAmount={null}
-        changePercent={null}
-        size="sm"
-      />
+      <Link to={`/asset/${instrument.id}`}>
+        <PriceChange
+          symbol={instrument.symbol}
+          price={instrument.price}
+          changeAmount={null}
+          changePercent={null}
+          size="sm"
+        />
+      </Link>
 
-      <div>
+      <Link to={`/asset/${instrument.id}`}>
         {instrument.change_percent !== null ? (
           <span
             className={`font-mono text-sm font-medium ${
@@ -190,24 +326,128 @@ function InstrumentRow({
         ) : (
           <span className="text-text-muted text-sm">—</span>
         )}
-      </div>
+      </Link>
 
-      <div className="flex justify-center">
+      <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
           grade={instrument.short_term_grade}
           size="sm"
           gradedAt={instrument.graded_at}
         />
-      </div>
+      </Link>
 
-      <div className="flex justify-center">
+      <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
           grade={instrument.long_term_grade}
           size="sm"
           gradedAt={instrument.graded_at}
         />
+      </Link>
+    </div>
+  );
+}
+
+function AddAssetModal({
+  onClose,
+  onSuccess,
+}: {
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [symbols, setSymbols] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{
+    created: { symbol: string; name: string }[];
+    skipped: string[];
+  } | null>(null);
+
+  const handleSubmit = async () => {
+    if (!symbols.trim()) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const data = await addInstruments(symbols.trim());
+      setResult(data);
+      if (data.created.length > 0) {
+        setTimeout(onSuccess, 2000);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add instruments");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in">
+      <div className="bg-surface-1 border border-border-subtle rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-text-primary">
+            Add Assets
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-text-muted hover:text-text-primary transition-colors"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        <input
+          type="text"
+          value={symbols}
+          onChange={(e) => setSymbols(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+          placeholder="TSLA, MSFT, META..."
+          className="w-full px-4 py-3 rounded-lg bg-surface-2 border border-border-subtle text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan/50 text-sm font-mono"
+          autoFocus
+          disabled={loading}
+        />
+        <p className="text-xs text-text-muted mt-2">
+          Enter one or more ticker symbols separated by commas
+        </p>
+
+        {error && (
+          <div className="mt-3 p-3 rounded-lg bg-accent-rose/10 border border-accent-rose/30 text-accent-rose text-sm">
+            {error}
+          </div>
+        )}
+
+        {result && (
+          <div className="mt-3 space-y-2">
+            {result.created.length > 0 && (
+              <div className="p-3 rounded-lg bg-accent-emerald/10 border border-accent-emerald/30 text-accent-emerald text-sm">
+                Added: {result.created.map((c) => `${c.symbol} (${c.name})`).join(", ")}
+              </div>
+            )}
+            {result.skipped.length > 0 && (
+              <div className="p-3 rounded-lg bg-accent-amber/10 border border-accent-amber/30 text-accent-amber text-sm">
+                Already exist: {result.skipped.join(", ")}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-3 mt-5">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg text-sm text-text-secondary hover:text-text-primary transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={loading || !symbols.trim()}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-cyan/20 border border-accent-cyan/30 text-accent-cyan text-sm font-medium hover:bg-accent-cyan/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {loading && <Loader2 size={14} className="animate-spin" />}
+            {loading ? "Resolving..." : "Add"}
+          </button>
+        </div>
       </div>
-    </Link>
+    </div>
   );
 }
 

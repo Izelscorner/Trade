@@ -233,8 +233,16 @@ def calc_rsi(df: pd.DataFrame, period: int = 14) -> dict:
 
     current = rsi.iloc[-1]
 
+    # When avg_loss is 0 (pure uptrend), RSI → 100
     if pd.isna(current):
-        return {"indicator_name": "RSI", "value": {}, "signal": "neutral"}
+        last_avg_gain = avg_gain.iloc[-1]
+        last_avg_loss = avg_loss.iloc[-1]
+        if not pd.isna(last_avg_gain) and (pd.isna(last_avg_loss) or last_avg_loss == 0) and last_avg_gain > 0:
+            current = 100.0
+        elif not pd.isna(last_avg_loss) and (pd.isna(last_avg_gain) or last_avg_gain == 0) and last_avg_loss > 0:
+            current = 0.0
+        else:
+            return {"indicator_name": "RSI", "value": {}, "signal": "neutral"}
 
     if current >= 70:
         signal = "strong_sell"  # Overbought
@@ -472,14 +480,18 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> dict:
 
     atr_pct = (current_atr / price) * 100
 
-    # ATR itself doesn't give buy/sell — it measures volatility magnitude
-    # High volatility (>3%) = uncertain, Low volatility (<1%) = consolidation
-    if atr_pct > 3.0:
-        signal = "neutral"  # High volatility — be cautious
+    # ATR contextualises volatility: extreme volatility = risk-off (sell),
+    # low volatility = stability (buy), moderate = neutral
+    if atr_pct > 4.0:
+        signal = "strong_sell"  # Extreme volatility — high risk
+    elif atr_pct > 3.0:
+        signal = "sell"  # High volatility — elevated risk
+    elif atr_pct < 0.5:
+        signal = "buy"  # Very low volatility — stable / consolidation
     elif atr_pct < 1.0:
-        signal = "neutral"  # Low volatility — potential breakout incoming
+        signal = "neutral"  # Low volatility — calm market
     else:
-        signal = "neutral"
+        signal = "neutral"  # Normal volatility
 
     return {
         "indicator_name": "ATR",
@@ -746,7 +758,7 @@ def run_all_indicators(df: pd.DataFrame) -> list[dict]:
     Institutional-grade suite: 18 indicators covering trend, momentum,
     volatility, volume, and key price levels.
     """
-    if len(df) < 52:
+    if len(df) < 26:
         return []
 
     results = []

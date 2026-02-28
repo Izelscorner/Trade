@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useAtom } from "jotai";
+import { useQuery } from "@tanstack/react-query";
 import {
   instrumentHistoricalAtom,
   instrumentTechnicalAtom,
@@ -12,6 +13,7 @@ import {
   instrumentIndependentAIAnalysisAtom,
 } from "../atoms";
 import { fetchInstrument, fetchLivePrice } from "../api/client";
+import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
 import TechnicalPanel from "../components/TechnicalPanel";
@@ -36,7 +38,7 @@ export default function AssetDetail() {
   const [livePrice, setLivePrice] = useState<LivePrice | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [chartDays, setChartDays] = useState(365);
+  const [chartDays, setChartDays] = useState(1);
 
   // Parameterized atoms
   const historicalAtom = useMemo(
@@ -70,15 +72,27 @@ export default function AssetDetail() {
     "integrated" | "independent" | null
   >(null);
 
+  // Subscribe WS to this specific instrument
+  useEffect(() => {
+    if (id) {
+      wsSubscribe({ page: "asset_detail", instrument_ids: [id] });
+    }
+  }, [id]);
+
+  // Live price from WS-updated query cache
+  const { data: wsLivePrice } = useQuery<LivePrice>({
+    queryKey: ["live-price", id],
+    queryFn: () => fetchLivePrice(id!),
+    enabled: !!id,
+  });
+
   useEffect(() => {
     if (!id) return;
     let isMounted = true;
 
     const fetchData = async () => {
-      const [inst, price] = await Promise.all([
-        fetchInstrument(id).catch(() => null),
-        fetchLivePrice(id).catch(() => null),
-      ]);
+      const inst = await fetchInstrument(id).catch(() => null);
+      const price = await fetchLivePrice(id).catch(() => null);
       if (isMounted) {
         setInstrument(inst);
         setLivePrice(price);
@@ -100,7 +114,9 @@ export default function AssetDetail() {
 
   const shortGrade = grades?.find((g: Grade) => g.term === "short") || null;
   const longGrade = grades?.find((g: Grade) => g.term === "long") || null;
-  const statusConfig = marketStatusConfig[livePrice?.market_status || "closed"];
+  // Prefer WS-updated price, fall back to initial fetch
+  const currentPrice = wsLivePrice || livePrice;
+  const statusConfig = marketStatusConfig[currentPrice?.market_status || "closed"];
 
   return (
     <div className="max-w-[1400px] mx-auto px-6 py-8 space-y-8">
@@ -172,12 +188,12 @@ export default function AssetDetail() {
             <p className="text-text-secondary mt-1">{instrument.name}</p>
           </div>
 
-          {livePrice && (
+          {currentPrice && (
             <PriceChange
               symbol={instrument.symbol}
-              price={livePrice.price}
-              changeAmount={livePrice.change_amount}
-              changePercent={livePrice.change_percent}
+              price={currentPrice.price}
+              changeAmount={currentPrice.change_amount}
+              changePercent={currentPrice.change_percent}
               size="lg"
             />
           )}

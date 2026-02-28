@@ -86,18 +86,32 @@ async def historical_prices(instrument_id: str, days: int = 365):
     """Get historical price data for an instrument."""
     async with async_session() as session:
         if days == 1:
-            # Query live prices for the last 24 hours (1D chart)
+            # Query intraday 5-minute candles for the 1D chart
             result = await session.execute(
                 text("""
-                    SELECT fetched_at as date, price as open, price as high, price as low, price as close, 0 as volume
-                    FROM live_prices
+                    SELECT timestamp as date, open, high, low, close, volume
+                    FROM intraday_prices
                     WHERE instrument_id = :iid
-                    AND fetched_at >= NOW() - INTERVAL '1 day'
-                    ORDER BY fetched_at ASC
+                    ORDER BY timestamp ASC
                 """),
                 {"iid": instrument_id},
             )
             rows = result.fetchall()
+
+            # Fallback to live_prices if no intraday data yet
+            if not rows:
+                result = await session.execute(
+                    text("""
+                        SELECT fetched_at as date, price as open, price as high, price as low, price as close, 0 as volume
+                        FROM live_prices
+                        WHERE instrument_id = :iid
+                        AND fetched_at >= NOW() - INTERVAL '1 day'
+                        ORDER BY fetched_at ASC
+                    """),
+                    {"iid": instrument_id},
+                )
+                rows = result.fetchall()
+
             prices = [
                 HistoricalPriceSchema(
                     date=r.date.isoformat(),

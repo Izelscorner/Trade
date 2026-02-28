@@ -187,13 +187,19 @@ async def process_loop() -> None:
                 if others:
                     texts = [_build_analysis_text(a) for a in others]
                     scores = analyze_batch(texts)
-                    pairs.extend([(a["id"], s) for a, s in zip(others, scores)])
-                
+                    if len(scores) != len(others):
+                        logger.error("FinBERT returned %d scores for %d articles, skipping batch", len(scores), len(others))
+                    else:
+                        pairs.extend([(a["id"], s) for a, s in zip(others, scores)])
+
                 if asset_specific:
                     texts = [_build_analysis_text(a) for a in asset_specific]
                     asset_names = [a["asset_name"] for a in asset_specific]
                     scores = analyze_asset_specific_batch(texts, asset_names)
-                    pairs.extend([(a["id"], s) for a, s in zip(asset_specific, scores)])
+                    if len(scores) != len(asset_specific):
+                        logger.error("Asset sentiment returned %d scores for %d articles, skipping batch", len(scores), len(asset_specific))
+                    else:
+                        pairs.extend([(a["id"], s) for a, s in zip(asset_specific, scores)])
                 
                 await store_scores(pairs)
                 logger.info("Scored %d articles", len(pairs))

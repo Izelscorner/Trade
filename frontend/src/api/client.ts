@@ -26,6 +26,34 @@ async function fetchAPI<T>(path: string): Promise<T> {
   return json.data as T;
 }
 
+async function postAPI<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`API error: ${res.status} ${res.statusText}`);
+  }
+  const json: APIResponse<T> = await res.json();
+  if (json.error) {
+    throw new Error(json.error);
+  }
+  return json.data as T;
+}
+
+async function deleteAPI<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) {
+    throw new Error(`API error: ${res.status} ${res.statusText}`);
+  }
+  const json: APIResponse<T> = await res.json();
+  if (json.error) {
+    throw new Error(json.error);
+  }
+  return json.data as T;
+}
+
 // Dashboard
 export const fetchDashboard = () =>
   fetchAPI<DashboardInstrument[]>("/dashboard");
@@ -94,3 +122,16 @@ export const fetchAIAnalysis = (instrument_id: string) =>
 
 export const fetchIndependentAIAnalysis = (instrument_id: string) =>
   fetchAPI<{ analysis: string }>(`/ai-analysis/independent/${instrument_id}`);
+
+// Add Instruments
+export const addInstruments = (symbols: string) =>
+  postAPI<{ created: Instrument[]; skipped: string[] }>("/instruments", {
+    symbols,
+  });
+
+// Portfolio
+export const fetchPortfolio = () => fetchAPI<string[]>("/portfolio");
+export const addToPortfolio = (instrumentId: string) =>
+  postAPI<{ ok: boolean }>("/portfolio", { instrument_id: instrumentId });
+export const removeFromPortfolio = (instrumentId: string) =>
+  deleteAPI<{ ok: boolean }>(`/portfolio/${instrumentId}`);

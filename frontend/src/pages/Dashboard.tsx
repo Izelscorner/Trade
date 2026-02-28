@@ -1,12 +1,14 @@
 /** Dashboard page - top graded and worst graded assets */
 
+import { useEffect } from "react";
 import { useAtom } from "jotai";
-import { dashboardAtom, macroSentimentAtom, macroNewsAtom, latestNewsAtom } from "../atoms";
+import { dashboardAtom, macroSentimentAtom, macroNewsAtom } from "../atoms";
+import { wsSubscribe } from "../ws";
 import InstrumentCard from "../components/InstrumentCard";
 import MacroSentimentCard from "../components/MacroSentimentCard";
 import NewsFeed from "../components/NewsFeed";
 import { PageSkeleton } from "../components/Skeletons";
-import { Trophy, AlertTriangle, Zap, Globe } from "lucide-react";
+import { Trophy, AlertTriangle, Globe } from "lucide-react";
 import type { DashboardInstrument } from "../types";
 
 function sortByGrade(
@@ -26,7 +28,10 @@ export default function Dashboard() {
     useAtom(dashboardAtom);
   const [{ data: macroSentiments }] = useAtom(macroSentimentAtom);
   const [{ data: macroNews }] = useAtom(macroNewsAtom);
-  const [{ data: news }] = useAtom(latestNewsAtom);
+
+  useEffect(() => {
+    wsSubscribe({ page: "dashboard" });
+  }, []);
 
   if (loadingInstruments) return <PageSkeleton />;
 
@@ -95,30 +100,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Bottom Row: All Instruments + Asset News */}
-      <div
-        className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-slide-up"
-        style={{ animationDelay: "400ms" }}
-      >
-        <div>
-          {/* All Instruments */}
-          <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Zap size={18} className="text-accent-cyan" />
-              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
-                All Instruments
-              </h2>
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              {instrumentList.map((inst, i) => (
-                <InstrumentCard key={inst.id} instrument={inst} index={i} />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <NewsFeed articles={news || []} compact className="h-full" />
-      </div>
     </div>
   );
 }

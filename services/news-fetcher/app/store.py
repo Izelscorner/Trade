@@ -120,20 +120,20 @@ async def upsert_articles(articles: list[dict]) -> int:
                         title_ratio = fuzz.ratio(title_lower, rtitle)
 
                         # High full-match threshold catches same story from different sources
-                        if title_ratio > 88:
+                        if title_ratio > 90:
                             matched_id = rid
                             break
 
                         # Partial ratio only for substantial titles to avoid
                         # "AAPL earnings beat" matching "NVDA earnings beat"
-                        if len(title_lower) > 40 and len(rtitle) > 40:
-                            if fuzz.partial_ratio(title_lower, rtitle) > 92:
+                        if len(title_lower) > 50 and len(rtitle) > 50:
+                            if fuzz.partial_ratio(title_lower, rtitle) > 95:
                                 matched_id = rid
                                 break
 
                         # Summary dedup: same article republished with different headline
                         if summary_lower and rsummary and len(summary_lower) > 100 and len(rsummary) > 100:
-                            if fuzz.ratio(summary_lower[:500], rsummary[:500]) > 88:
+                            if fuzz.ratio(summary_lower[:500], rsummary[:500]) > 90:
                                 matched_id = rid
                                 break
                     except ImportError:
@@ -157,6 +157,8 @@ async def upsert_articles(articles: list[dict]) -> int:
 
                 if matched_id:
                     row = [matched_id]
+                    # Track fuzzy-matched articles in batch to catch within-batch dupes
+                    seen_in_batch.append((matched_id, title_lower, summary_lower))
                 else:
                     # Insert new article (content is temporary, cleared after sentiment scoring)
                     result = await session.execute(
@@ -180,8 +182,8 @@ async def upsert_articles(articles: list[dict]) -> int:
                     if row:
                         inserted += 1
                         seen_in_batch.append((row[0], title_lower, summary_lower))
-                
-                # 2. Map to instrument if it has one
+
+                # Map to instrument — also for duplicates so existing articles link to new instruments
                 if row and article.get("instrument_id"):
                     await session.execute(
                         text("""
