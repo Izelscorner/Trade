@@ -61,6 +61,22 @@ async def ensure_schema():
     logger.info("Schema check complete")
 
 
+async def macro_sentiment_loop() -> None:
+    """Independent loop that recalculates global macro sentiment every 30 seconds.
+
+    Decoupled from article processing so grading always has fresh macro data,
+    regardless of how fast articles are being processed.
+    """
+    await asyncio.sleep(10)  # Brief startup delay
+    logger.info("Macro sentiment loop started (30s interval)")
+    while True:
+        try:
+            await update_macro_sentiment()
+        except Exception:
+            logger.exception("Error updating macro sentiment")
+        await asyncio.sleep(30)
+
+
 async def process_loop() -> None:
     """Main processing loop - picks up unprocessed articles and runs them through Ollama."""
     await ensure_schema()
@@ -101,7 +117,6 @@ async def process_loop() -> None:
             if articles:
                 logger.info("Processing %d unprocessed articles...", len(articles))
                 consecutive_failures = 0
-                processed_count = 0
                 for article in articles:
                     try:
                         await process_article(
@@ -109,10 +124,6 @@ async def process_loop() -> None:
                             instruments, instruments_by_symbol,
                             symbol_mapping, valid_symbols_str, name_lookup,
                         )
-                        processed_count += 1
-                        # Update macro sentiment every 5 articles for faster feedback
-                        if processed_count % 5 == 0:
-                            await update_macro_sentiment()
                     except Exception:
                         logger.exception("Failed to process article: %s", article["title"][:60])
                         consecutive_failures += 1
@@ -127,8 +138,6 @@ async def process_loop() -> None:
                             consecutive_failures = 0
                             break
 
-                # Final update for any remaining articles
-                await update_macro_sentiment()
                 await cleanup_priority()
 
                 # If we got a full batch, continue immediately
@@ -145,13 +154,16 @@ async def process_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Ollama Processor Service starting...")
-    task = asyncio.create_task(process_loop())
+    process_task = asyncio.create_task(process_loop())
+    macro_task = asyncio.create_task(macro_sentiment_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    process_task.cancel()
+    macro_task.cancel()
+    for t in (process_task, macro_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     await close_session()
 
 

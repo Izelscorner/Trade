@@ -136,9 +136,8 @@ Choose: very_positive, positive, neutral, negative, very_negative
 def macro_sentiment_prompt(title: str, content: str) -> str:
     """Build macro sentiment prompt — S&P 500 / Nasdaq direction.
 
-    Western quant perspective with aggressive guardrails.
-    The key insight: regional wars ≠ Western market crash.
-    Only existential threats to Western economy are truly BAD.
+    Western quant perspective: war, conflict, rising energy costs are BAD
+    for the broad market (S&P 500) even if good for specific sectors.
     """
     text = f"{title}. {content[:500]}" if content else title
     return f"""You are a macro strategist at a Western investment bank.
@@ -149,8 +148,23 @@ Do NOT think about individual stocks or commodities. ONLY think about the S&P 50
 
 RULES — follow these exactly:
 
-IF Iran war, Gulf war, Middle East strikes, Israel conflict:
-  → MIXED (regional war boosts defense and energy sectors, offsets broader market dip)
+IF war, military strikes, Iran attack, Gulf conflict, Israel war, US casualties, bombing:
+  → BAD (war creates uncertainty, higher oil prices, supply chain disruption, market selloff)
+
+IF gas prices rising, oil prices surging, energy costs increasing:
+  → BAD (higher energy costs hurt corporate profits and consumer spending)
+
+IF Russia/China direct military threat to NATO:
+  → BAD (existential threat to Western order)
+
+IF recession warning, unemployment rising, weak GDP:
+  → BAD (economic weakness crashes stocks)
+
+IF Fed rate hikes, inflation rising, hawkish central bank:
+  → BAD (tighter money hurts stocks)
+
+IF new tariffs, trade war escalation:
+  → BAD (trade barriers hurt corporate profits)
 
 IF peace deal, ceasefire, de-escalation:
   → GOOD (reduces uncertainty, markets rally)
@@ -158,30 +172,18 @@ IF peace deal, ceasefire, de-escalation:
 IF Fed rate cuts, ECB easing, stimulus:
   → GOOD (cheap money boosts stocks)
 
-IF Fed rate hikes, inflation rising, hawkish central bank:
-  → BAD (tighter money hurts stocks)
-
 IF strong GDP, jobs data, consumer spending:
   → GOOD (economic growth lifts stocks)
-
-IF recession warning, unemployment rising, weak GDP:
-  → BAD (economic weakness crashes stocks)
 
 IF trade deals, tariff removal:
   → GOOD (free trade boosts corporate profits)
 
-IF new tariffs, trade war escalation:
-  → BAD (trade barriers hurt corporate profits)
-
-IF Russia/China direct military threat to NATO:
-  → BAD (existential threat to Western order)
-
 IF sanctions on Iran/Russia/enemies:
   → GOOD (Western power projection, no economic damage to West)
 
-IF the news is about a non-Western country only:
-  → MIXED (no direct impact on S&P 500)
+IF the news has no clear economic impact on Western markets:
+  → MIXED
 
 Answer: GOOD, BAD, or MIXED
 
-{{"sentiment": "MIXED", "confidence": 0.7}}"""
+{{"sentiment": "BAD", "confidence": 0.8}}"""

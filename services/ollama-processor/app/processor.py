@@ -413,36 +413,99 @@ async def process_article(
     logger.info("Processed article: '%s' (instruments=%s, macro=%s)", title[:60], tagged_instruments, is_macro)
 
 
+def _deterministic_macro_sentiment(title: str, content: str) -> tuple[str, float] | None:
+    """Rule-based macro sentiment for clear-cut cases.
+
+    Returns (label, confidence) or None if LLM should decide.
+    The 1B model cannot reliably follow multi-rule prompts, so we handle
+    the most important patterns deterministically.
+    """
+    combined = f"{title}. {content[:500]}".lower()
+
+    # --- NEGATIVE patterns (BAD for S&P 500) ---
+    _NEGATIVE_PATTERNS = [
+        # War and conflict
+        r'\b(?:war|attack|strikes?|bomb(?:ing|ed)?|invasi(?:on|ng)|casualties|killed|missile)\b',
+        r'\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b.*\b(?:war|attack|strike|conflict|bomb|military)\b',
+        r'\b(?:war|attack|strike|conflict|bomb|military)\b.*\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b',
+        r'\b(?:escalat|tension|threat)\b.*\b(?:military|nuclear|war)\b',
+        # Economic weakness
+        r'\brecession\b',
+        r'\bunemployment\s+(?:ris|jump|surg|spike)',
+        r'\bweak\s+(?:gdp|economy|growth|jobs)',
+        # Inflation / rate hikes
+        r'\b(?:rate\s+hike|hawkish|inflation\s+(?:ris|surg|spike|high))',
+        r'\b(?:gas|oil|energy)\s+price[s]?\s+(?:ris|surg|jump|spike|higher|soar)',
+        # Trade war
+        r'\b(?:tariff|trade\s+war|embargo)\b',
+    ]
+
+    for pattern in _NEGATIVE_PATTERNS:
+        if re.search(pattern, combined):
+            logger.debug("Deterministic macro: NEGATIVE (matched '%s') for: '%s'", pattern[:40], title[:60])
+            return ("negative", 0.85)
+
+    # --- POSITIVE patterns (GOOD for S&P 500) ---
+    _POSITIVE_PATTERNS = [
+        r'\b(?:rate\s+cut|dovish|stimulus|easing)\b',
+        r'\b(?:strong\s+(?:gdp|jobs|growth|economy))\b',
+        r'\b(?:peace\s+deal|ceasefire|de-escalat)',
+        r'\b(?:trade\s+deal|tariff\s+remov)',
+        r'\b(?:rally|boom|surge)\b.*\b(?:market|s&p|nasdaq|dow)\b',
+        r'\b(?:market|s&p|nasdaq|dow)\b.*\b(?:rally|boom|surge)\b',
+    ]
+
+    for pattern in _POSITIVE_PATTERNS:
+        if re.search(pattern, combined):
+            logger.debug("Deterministic macro: POSITIVE (matched '%s') for: '%s'", pattern[:40], title[:60])
+            return ("positive", 0.85)
+
+    # No clear pattern — let LLM decide
+    return None
+
+
 async def run_macro_sentiment(article_id: str, title: str, content: str, store_in_scores: bool = True) -> None:
     """Run macro-level sentiment analysis with Western market bias.
+
+    Uses deterministic rules for clear-cut cases (war, rate changes, etc.)
+    and falls back to LLM for ambiguous articles. The 1B model is unreliable
+    at multi-rule classification, so deterministic rules handle the important cases.
 
     Always stores the macro label on the article itself (for macro aggregate).
     Only stores in sentiment_scores if store_in_scores=True (i.e. article has
     no instrument-specific sentiment already stored).
     """
-    prompt = macro_sentiment_prompt(title, content)
-    sentiment_result = await generate_json(prompt, max_tokens=60)
-
-    if sentiment_result:
-        raw_label = sentiment_result.get("sentiment", "neutral").strip().lower().strip("<>")
-        confidence = float(sentiment_result.get("confidence", 0.5))
-        # Map simplified GOOD/BAD/MIXED to standard labels
-        _MACRO_LABEL_MAP = {
-            "good": "positive", "bad": "negative", "mixed": "neutral",
-        }
-        sentiment_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
-        # Normalize any non-standard labels
-        valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
-        if sentiment_label not in valid_labels:
-            sentiment_label = "neutral"
-        if store_in_scores:
-            await store_sentiment(article_id, sentiment_label, confidence)
-        await store_macro_label(article_id, sentiment_label)
-        logger.info("Macro sentiment for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
+    # Try deterministic rules first
+    deterministic = _deterministic_macro_sentiment(title, content)
+    if deterministic:
+        sentiment_label, confidence = deterministic
+        logger.info("Macro sentiment (deterministic) for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
     else:
-        if store_in_scores:
-            await store_sentiment(article_id, "neutral", 0.3)
-        await store_macro_label(article_id, "neutral")
+        # Fall back to LLM for ambiguous articles
+        prompt = macro_sentiment_prompt(title, content)
+        sentiment_result = await generate_json(prompt, max_tokens=60)
+
+        if sentiment_result:
+            raw_label = sentiment_result.get("sentiment", "neutral").strip().lower().strip("<>")
+            confidence = float(sentiment_result.get("confidence", 0.5))
+            logger.info("Macro raw LLM response: %s (raw_label='%s')", sentiment_result, raw_label)
+            # Map simplified GOOD/BAD/MIXED to standard labels
+            _MACRO_LABEL_MAP = {
+                "good": "positive", "bad": "negative", "mixed": "neutral",
+            }
+            sentiment_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
+            # Normalize any non-standard labels
+            valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
+            if sentiment_label not in valid_labels:
+                sentiment_label = "neutral"
+            logger.info("Macro sentiment (LLM) for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
+        else:
+            sentiment_label = "neutral"
+            confidence = 0.3
+
+    if store_in_scores:
+        await store_sentiment(article_id, sentiment_label, confidence)
+    await store_macro_label(article_id, sentiment_label)
 
 
 async def update_article_tags(
