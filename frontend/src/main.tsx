@@ -114,13 +114,13 @@ function connectWS() {
 
           // Update macro-news feed
           const macroCategories = [
-            "us_politics",
-            "uk_politics",
-            "us_finance",
-            "uk_finance",
+            "macro_markets",
+            "macro_politics",
+            "macro_conflict",
           ];
-          const macroOnly = data.filter((a: NewsArticle) =>
-            macroCategories.includes(a.category),
+          const macroOnly = data.filter(
+            (a: NewsArticle) =>
+              macroCategories.includes(a.category) || a.is_macro,
           );
           if (macroOnly.length > 0) {
             queryClient.setQueryData(
@@ -137,23 +137,17 @@ function connectWS() {
             .getQueryCache()
             .findAll({ queryKey: ["news-page"] })
             .forEach((query) => {
-              const [, qRegion, qCatType] = query.queryKey as string[];
+              const [, qCatType] = query.queryKey as string[];
               const filtered = data.filter((a: NewsArticle) => {
-                if (
-                  qRegion &&
-                  qRegion !== "all" &&
-                  !a.category.startsWith(`${qRegion}_`)
-                )
-                  return false;
                 if (qCatType && qCatType !== "all") {
                   if (qCatType === "macro") {
-                    if (!macroCategories.includes(a.category)) return false;
+                    if (
+                      !macroCategories.includes(a.category) &&
+                      !a.is_macro
+                    )
+                      return false;
                   } else {
-                    if (qRegion && qRegion !== "all") {
-                      if (a.category !== `${qRegion}_${qCatType}`) return false;
-                    } else {
-                      if (!a.category.endsWith(`_${qCatType}`)) return false;
-                    }
+                    if (a.category !== qCatType) return false;
                   }
                 }
                 return true;

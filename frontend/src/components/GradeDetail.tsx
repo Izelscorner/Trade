@@ -13,10 +13,14 @@ function ScoreBar({
   label,
   score,
   icon: Icon,
+  confidence,
+  articleCount,
 }: {
   label: string;
   score: number;
   icon: React.ElementType;
+  confidence?: number;
+  articleCount?: number;
 }) {
   // Score ranges from -1 to 1, normalize to 0-100 for the bar
   const pct = Math.max(0, Math.min(100, (score + 1) * 50));
@@ -30,6 +34,12 @@ function ScoreBar({
           <span className="text-xs text-text-secondary font-medium">
             {label}
           </span>
+          {confidence !== undefined && (
+            <span className="text-[10px] text-text-muted font-mono">
+              {(confidence * 100).toFixed(0)}% conf
+              {articleCount !== undefined && ` (${articleCount} articles)`}
+            </span>
+          )}
         </div>
         <span
           className={`text-xs font-mono font-semibold ${isPositive ? "text-accent-emerald" : score < 0 ? "text-accent-rose" : "text-text-muted"}`}
@@ -87,8 +97,16 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           label="Sentiment"
           score={grade.sentiment_score}
           icon={Newspaper}
+          confidence={grade.details?.sentiment?.confidence}
+          articleCount={grade.details?.sentiment?.articles}
         />
-        <ScoreBar label="Macro" score={grade.macro_score} icon={Globe} />
+        <ScoreBar
+          label="Macro"
+          score={grade.macro_score}
+          icon={Globe}
+          confidence={grade.details?.macro?.global?.confidence}
+          articleCount={grade.details?.macro?.global?.articles}
+        />
       </div>
 
       {grade.details?.weights && (

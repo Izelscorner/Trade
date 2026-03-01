@@ -1,8 +1,8 @@
 """News Fetcher Service - continuously fetches RSS feeds and stores articles.
 
-On startup, immediately fetches news for all categories and instruments.
-A fast-check loop runs every 2 minutes to fetch news for instruments that
-have zero articles (e.g. newly added assets).
+Fetches macro news (markets, politics, conflict) and asset-specific news
+from Yahoo Finance and Google News. Articles are stored with
+ollama_processed=false and picked up by the ollama-processor service.
 """
 
 import asyncio
@@ -11,9 +11,9 @@ import urllib.parse
 
 from sqlalchemy import text
 
-from .feeds import FEEDS, POLITICS_CATEGORIES, FINANCE_CATEGORIES
+from .feeds import FEEDS, MACRO_CATEGORIES
 from .fetcher import fetch_feed
-from .store import upsert_articles, cleanup_old_politics_news, cleanup_old_finance_news
+from .store import upsert_articles, cleanup_old_macro_news, cleanup_old_asset_news
 from .instruments import get_instruments
 from .db import async_session
 
@@ -23,8 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("news-fetcher")
 
-POLITICS_INTERVAL = 300      # 5 minutes
-FINANCE_INTERVAL = 600       # 10 minutes
+MACRO_INTERVAL = 300         # 5 minutes
 ASSET_INTERVAL = 900         # 15 minutes
 CLEANUP_INTERVAL = 900       # 15 minutes
 NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
@@ -67,32 +66,18 @@ async def fetch_instrument_news(inst: dict) -> int:
     return count
 
 
-async def politics_loop() -> None:
-    """Fetch political news on a short interval (macro sentiment)."""
+async def macro_loop() -> None:
+    """Fetch all macro news categories on a regular interval."""
     while True:
         try:
-            for category in sorted(POLITICS_CATEGORIES):
+            for category in sorted(MACRO_CATEGORIES):
                 feeds = FEEDS[category]
                 count = await fetch_category(category, feeds)
                 if count > 0:
                     logger.info("[%s] Stored %d new articles", category, count)
         except Exception:
-            logger.exception("Error in politics fetch loop")
-        await asyncio.sleep(POLITICS_INTERVAL)
-
-
-async def finance_loop() -> None:
-    """Fetch financial news on a longer interval (general market)."""
-    while True:
-        try:
-            for category in sorted(FINANCE_CATEGORIES):
-                feeds = FEEDS[category]
-                count = await fetch_category(category, feeds)
-                if count > 0:
-                    logger.info("[%s] Stored %d new articles", category, count)
-        except Exception:
-            logger.exception("Error in finance fetch loop")
-        await asyncio.sleep(FINANCE_INTERVAL)
+            logger.exception("Error in macro fetch loop")
+        await asyncio.sleep(MACRO_INTERVAL)
 
 
 async def instruments_loop() -> None:
@@ -139,8 +124,8 @@ async def cleanup_loop() -> None:
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL)
         try:
-            await cleanup_old_politics_news()
-            await cleanup_old_finance_news()
+            await cleanup_old_macro_news()
+            await cleanup_old_asset_news()
         except Exception:
             logger.exception("Error in cleanup loop")
 
@@ -148,8 +133,7 @@ async def cleanup_loop() -> None:
 async def main() -> None:
     logger.info("News Fetcher Service starting...")
     await asyncio.gather(
-        politics_loop(),
-        finance_loop(),
+        macro_loop(),
         instruments_loop(),
         new_asset_news_loop(),
         cleanup_loop(),

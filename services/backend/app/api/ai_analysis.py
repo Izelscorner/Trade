@@ -39,8 +39,9 @@ async def get_ai_analysis(instrument_id: str):
                        (s.positive - s.negative) as score
                 FROM news_articles n
                 JOIN news_instrument_map m ON n.id = m.article_id
-                LEFT JOIN sentiment_scores s ON n.id = s.article_id
+                JOIN sentiment_scores s ON n.id = s.article_id
                 WHERE m.instrument_id = :iid
+                AND n.ollama_processed = true
                 ORDER BY n.published_at DESC
                 LIMIT 10
             """),

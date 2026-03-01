@@ -12,75 +12,66 @@ logger = logging.getLogger(__name__)
 _migrated = False
 
 
-async def ensure_content_column():
-    """Add content column to news_articles if it doesn't exist."""
+async def ensure_schema():
+    """Migrate news_articles table to new schema if needed."""
     global _migrated
     if _migrated:
         return
     async with async_session() as session:
+        # Add new columns if they don't exist
         await session.execute(text(
             "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS content TEXT"
         ))
+        await session.execute(text(
+            "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS is_macro BOOLEAN NOT NULL DEFAULT false"
+        ))
+        await session.execute(text(
+            "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS is_asset_specific BOOLEAN NOT NULL DEFAULT false"
+        ))
+        await session.execute(text(
+            "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS ollama_processed BOOLEAN NOT NULL DEFAULT false"
+        ))
+        await session.execute(text(
+            "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS macro_sentiment_label VARCHAR(30)"
+        ))
+        # Drop old category constraint and add new one
+        await session.execute(text(
+            "ALTER TABLE news_articles DROP CONSTRAINT IF EXISTS news_articles_category_check"
+        ))
+        await session.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE news_articles ADD CONSTRAINT news_articles_category_check
+                    CHECK (category IN ('macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific'));
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$;
+        """))
+        # Drop old region constraint on macro_sentiment and add new one
+        await session.execute(text(
+            "ALTER TABLE macro_sentiment DROP CONSTRAINT IF EXISTS macro_sentiment_region_check"
+        ))
+        # Create partial index for unprocessed articles if not exists
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_news_articles_unprocessed
+            ON news_articles(ollama_processed, fetched_at DESC)
+            WHERE ollama_processed = false
+        """))
         await session.commit()
     _migrated = True
-    logger.info("Ensured content column exists on news_articles")
+    logger.info("Schema migration complete")
 
 
 async def upsert_articles(articles: list[dict]) -> int:
-    """Insert articles, skipping duplicates, and map to an instrument if provided."""
+    """Insert articles, skipping duplicates, and map to an instrument if provided.
+
+    Articles are inserted with ollama_processed=false. The ollama-processor
+    service will pick them up for classification and sentiment analysis.
+    """
     if not articles:
         return 0
 
-    await ensure_content_column()
+    await ensure_schema()
 
     inserted = 0
-    import aiohttp
-    
-    # Check relevance via the new local AI service before inserting
-    relevant_articles = []
-    
-    # Sub-batching articles to avoid huge payloads and long timeouts
-    CHUNK_SIZE = 20
-    article_chunks = [articles[i:i + CHUNK_SIZE] for i in range(0, len(articles), CHUNK_SIZE)]
-    
-    try:
-        # Increase timeout significantly for AI workloads
-        timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as http_sess:
-            for chunk in article_chunks:
-                payload = {
-                    "articles": [
-                        {
-                            "title": a["title"],
-                            "summary": a["summary"],
-                            "category": a["category"],
-                            "asset_name": a.get("asset_name")
-                        } for a in chunk
-                    ]
-                }
-                try:
-                    async with http_sess.post("http://relevance:8002/check/batch", json=payload) as resp:
-                        if resp.status == 200:
-                            results = await resp.json()
-                            for article, res in zip(chunk, results):
-                                if res.get("is_relevant"):
-                                    relevant_articles.append(article)
-                                else:
-                                    logger.info("Filtered irrelevant article: '%s' (Reason: %s, Score: %.2f)", 
-                                                article["title"][:50], res.get("reason"), res.get("score", 0))
-                        else:
-                            logger.error("Relevance service returned %d, skipping relevance check for this chunk", resp.status)
-                            relevant_articles.extend(chunk) # Fallback pass for this chunk
-                except Exception as e:
-                    logger.error("Error checking relevance for chunk: %s", e)
-                    relevant_articles.extend(chunk) # Fallback pass
-    except Exception:
-        logger.exception("Failed to connect to relevance service")
-        relevant_articles = articles # Total fallback pass
-        
-    articles = relevant_articles
-    if not articles:
-        return 0
 
     async with async_session() as session:
         # Load recent articles to avoid fuzzy duplicates efficiently
@@ -101,16 +92,13 @@ async def upsert_articles(articles: list[dict]) -> int:
                 # Fuzzy duplicate detection
                 matched_id = None
 
-                # Check against already inserted in this batch + recent from DB
                 all_to_check = seen_in_batch + recent_db_articles
 
                 for rid, rtitle, rsummary in all_to_check:
-                    # Match by exact title
                     if title_lower == rtitle:
                         matched_id = rid
                         break
 
-                    # Skip fuzzy matching on very short titles (too many false positives)
                     if len(title_lower) < 20 or len(rtitle) < 20:
                         continue
 
@@ -119,25 +107,20 @@ async def upsert_articles(articles: list[dict]) -> int:
 
                         title_ratio = fuzz.ratio(title_lower, rtitle)
 
-                        # High full-match threshold catches same story from different sources
                         if title_ratio > 90:
                             matched_id = rid
                             break
 
-                        # Partial ratio only for substantial titles to avoid
-                        # "AAPL earnings beat" matching "NVDA earnings beat"
                         if len(title_lower) > 50 and len(rtitle) > 50:
                             if fuzz.partial_ratio(title_lower, rtitle) > 95:
                                 matched_id = rid
                                 break
 
-                        # Summary dedup: same article republished with different headline
                         if summary_lower and rsummary and len(summary_lower) > 100 and len(rsummary) > 100:
                             if fuzz.ratio(summary_lower[:500], rsummary[:500]) > 90:
                                 matched_id = rid
                                 break
                     except ImportError:
-                        # Fallback to simple matching if rapidfuzz not available
                         if (len(title_lower) > 30 and len(rtitle) > 30) and (title_lower in rtitle or rtitle in title_lower):
                             matched_id = rid
                             break
@@ -157,14 +140,18 @@ async def upsert_articles(articles: list[dict]) -> int:
 
                 if matched_id:
                     row = [matched_id]
-                    # Track fuzzy-matched articles in batch to catch within-batch dupes
                     seen_in_batch.append((matched_id, title_lower, summary_lower))
                 else:
-                    # Insert new article (content is temporary, cleared after sentiment scoring)
+                    # Determine initial flags based on category
+                    is_macro = article["category"] in ("macro_markets", "macro_politics", "macro_conflict")
+                    is_asset = article["category"] == "asset_specific"
+
                     result = await session.execute(
                         text("""
-                            INSERT INTO news_articles (title, link, summary, content, source, category, published_at)
-                            VALUES (:title, :link, :summary, :content, :source, :category, :published_at)
+                            INSERT INTO news_articles (title, link, summary, content, source, category,
+                                                       is_macro, is_asset_specific, ollama_processed, published_at)
+                            VALUES (:title, :link, :summary, :content, :source, :category,
+                                    :is_macro, :is_asset_specific, false, :published_at)
                             ON CONFLICT (title, source) DO NOTHING
                             RETURNING id
                         """),
@@ -175,6 +162,8 @@ async def upsert_articles(articles: list[dict]) -> int:
                             "content": article.get("content"),
                             "source": article["source"],
                             "category": article["category"],
+                            "is_macro": is_macro,
+                            "is_asset_specific": is_asset,
                             "published_at": article["published_at"],
                         }
                     )
@@ -193,12 +182,12 @@ async def upsert_articles(articles: list[dict]) -> int:
                         """),
                         {"aid": row[0], "iid": article["instrument_id"]}
                     )
-                    
+
             except Exception:
                 logger.exception("Failed to insert article: %s", article["title"][:80])
                 await session.rollback()
                 continue
-                
+
         await session.commit()
 
     if inserted > 0:
@@ -206,47 +195,17 @@ async def upsert_articles(articles: list[dict]) -> int:
     return inserted
 
 
-async def cleanup_old_politics_news() -> int:
-    """Remove political news older than 24 hours (macro sentiment is rolling)."""
+async def cleanup_old_macro_news() -> int:
+    """Remove macro news older than 24 hours (macro sentiment is rolling)."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     async with async_session() as session:
-        # Delete sentiment scores for articles that will be removed
         await session.execute(
             text("""
                 DELETE FROM sentiment_scores
                 WHERE article_id IN (
                     SELECT id FROM news_articles
-                    WHERE category IN ('us_politics', 'uk_politics')
-                    AND published_at < :cutoff
-                )
-            """),
-            {"cutoff": cutoff},
-        )
-        result = await session.execute(
-            text("""
-                DELETE FROM news_articles
-                WHERE category IN ('us_politics', 'uk_politics')
-                AND published_at < :cutoff
-            """),
-            {"cutoff": cutoff},
-        )
-        await session.commit()
-        count = result.rowcount
-        if count:
-            logger.info("Cleaned up %d old political news articles", count)
-        return count
-
-
-async def cleanup_old_finance_news() -> int:
-    """Remove financial news older than 30 days."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    async with async_session() as session:
-        await session.execute(
-            text("""
-                DELETE FROM sentiment_scores
-                WHERE article_id IN (
-                    SELECT id FROM news_articles
-                    WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
+                    WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
+                    AND is_asset_specific = false
                     AND published_at < :cutoff
                 )
             """),
@@ -257,7 +216,8 @@ async def cleanup_old_finance_news() -> int:
                 DELETE FROM news_instrument_map
                 WHERE article_id IN (
                     SELECT id FROM news_articles
-                    WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
+                    WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
+                    AND is_asset_specific = false
                     AND published_at < :cutoff
                 )
             """),
@@ -266,7 +226,8 @@ async def cleanup_old_finance_news() -> int:
         result = await session.execute(
             text("""
                 DELETE FROM news_articles
-                WHERE category IN ('us_finance', 'uk_finance', 'asset_specific')
+                WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
+                AND is_asset_specific = false
                 AND published_at < :cutoff
             """),
             {"cutoff": cutoff},
@@ -274,5 +235,46 @@ async def cleanup_old_finance_news() -> int:
         await session.commit()
         count = result.rowcount
         if count:
-            logger.info("Cleaned up %d old financial/asset news articles", count)
+            logger.info("Cleaned up %d old macro news articles", count)
+        return count
+
+
+async def cleanup_old_asset_news() -> int:
+    """Remove asset-specific news older than 30 days."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    async with async_session() as session:
+        await session.execute(
+            text("""
+                DELETE FROM sentiment_scores
+                WHERE article_id IN (
+                    SELECT id FROM news_articles
+                    WHERE category = 'asset_specific'
+                    AND published_at < :cutoff
+                )
+            """),
+            {"cutoff": cutoff},
+        )
+        await session.execute(
+            text("""
+                DELETE FROM news_instrument_map
+                WHERE article_id IN (
+                    SELECT id FROM news_articles
+                    WHERE category = 'asset_specific'
+                    AND published_at < :cutoff
+                )
+            """),
+            {"cutoff": cutoff},
+        )
+        result = await session.execute(
+            text("""
+                DELETE FROM news_articles
+                WHERE category = 'asset_specific'
+                AND published_at < :cutoff
+            """),
+            {"cutoff": cutoff},
+        )
+        await session.commit()
+        count = result.rowcount
+        if count:
+            logger.info("Cleaned up %d old asset news articles", count)
         return count

@@ -5,7 +5,6 @@ export type WsPage = "dashboard" | "asset_detail" | "asset_list" | "news";
 export interface WsSubscription {
   page: WsPage;
   instrument_ids?: string[];
-  region?: string;
   category?: string;
 }
 

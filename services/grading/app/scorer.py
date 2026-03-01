@@ -90,115 +90,121 @@ async def get_technical_score(instrument_id: str, lookback_days: int = 5) -> tup
     return round(avg, 4), details
 
 
-async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
-    """Get instrument-specific sentiment score from financial news (last 3 days)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+def _median(values: list[float]) -> float:
+    """Compute the median of a sorted list."""
+    n = len(values)
+    if n % 2 == 1:
+        return values[n // 2]
+    return (values[n // 2 - 1] + values[n // 2]) / 2
+
+
+def _confidence(article_count: int, full_confidence_at: int = 20) -> float:
+    """Confidence ramps from 0.0 to 1.0 based on article count.
+
+    At 5 articles: 0.25, at 10: 0.50, at 20+: 1.0.
+    """
+    return min(1.0, article_count / full_confidence_at)
+
+
+async def get_sentiment_score(instrument_id: str, min_articles: int = 3) -> tuple[float, dict]:
+    """Get instrument-specific sentiment score from financial news (last 7 days).
+
+    Uses median of per-article scores, scaled by confidence (article count).
+    More articles = higher confidence = score closer to true median.
+    Fewer articles = lower confidence = score damped toward 0.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
     async with async_session() as session:
-        # Direct instrument-mapped articles
         result = await session.execute(
             text("""
-                SELECT s.label, COUNT(*) as cnt
+                SELECT s.label
                 FROM sentiment_scores s
                 JOIN news_instrument_map m ON m.article_id = s.article_id
                 JOIN news_articles a ON a.id = m.article_id
                 WHERE m.instrument_id = :iid
+                AND a.ollama_processed = true
                 AND a.published_at >= :cutoff
-                GROUP BY s.label
+                ORDER BY a.published_at DESC
             """),
             {"iid": instrument_id, "cutoff": cutoff},
         )
         rows = result.fetchall()
 
-        if rows:
-            total_score = 0.0
-            total_cnt = 0
-            label_details = {}
+        if len(rows) >= min_articles:
+            scores = sorted(SENTIMENT_MULTIPLIERS.get(r.label, 0.0) for r in rows)
+            n = len(scores)
+            median = _median(scores)
+            conf = _confidence(n)
+
+            # Scale median by confidence — fewer articles dampens toward neutral
+            effective = median * conf
+
+            label_counts = {}
             for r in rows:
-                cnt = int(r.cnt)
-                label_details[r.label] = cnt
-                total_cnt += cnt
-                total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
-            
-            if total_cnt > 0:
-                net = max(-1.0, min(1.0, total_score / total_cnt))
-                return round(net, 4), {"articles": total_cnt, "labels": label_details}
+                label_counts[r.label] = label_counts.get(r.label, 0) + 1
 
-        # Fallback: use general finance news sentiment
-        result = await session.execute(
-            text("""
-                SELECT s.label, COUNT(*) as cnt
-                FROM sentiment_scores s
-                JOIN news_articles a ON a.id = s.article_id
-                WHERE a.category IN ('us_finance', 'uk_finance')
-                AND a.published_at >= :cutoff
-                GROUP BY s.label
-            """),
-            {"cutoff": cutoff},
-        )
-        rows = result.fetchall()
-
-        if rows:
-            total_score = 0.0
-            total_cnt = 0
-            for r in rows:
-                cnt = int(r.cnt)
-                total_cnt += cnt
-                total_score += SENTIMENT_MULTIPLIERS.get(r.label, 0.0) * cnt
-
-            if total_cnt > 0:
-                net = max(-1.0, min(1.0, total_score / total_cnt))
-                return round(net, 4), {"articles": total_cnt, "source": "general_finance"}
+            return round(max(-1.0, min(1.0, effective)), 4), {
+                "articles": n,
+                "labels": label_counts,
+                "median": round(median, 4),
+                "confidence": round(conf, 4),
+            }
 
     return 0.0, {}
 
 
-async def get_macro_score() -> tuple[float, dict]:
+async def get_macro_score(min_articles: int = 1) -> tuple[float, dict]:
     """Get latest macro sentiment score (from politics + finance news).
 
-    Uses DISTINCT ON to get the latest entry per region, ensuring we always
-    have the freshest macro sentiment.
+    Returns (0.0, {}) if fewer than min_articles were used to compute the
+    macro sentiment — not enough data for a reliable signal.
     """
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT DISTINCT ON (region) region, score, label, article_count, calculated_at
+                SELECT region, score, label, article_count, calculated_at
                 FROM macro_sentiment
-                WHERE calculated_at >= NOW() - INTERVAL '4 hours'
-                ORDER BY region, calculated_at DESC
+                WHERE calculated_at >= NOW() - INTERVAL '12 hours'
+                ORDER BY calculated_at DESC
+                LIMIT 1
             """)
         )
-        rows = result.fetchall()
+        row = result.fetchone()
 
-    if not rows:
+    if not row:
         return 0.0, {}
 
-    total_score = 0.0
-    details = {}
-    for row in rows:
-        s = max(-1.0, min(1.0, float(row.score)))
-        total_score += s
-        details[row.region] = {
-            "score": s,
+    if row.article_count < min_articles:
+        return 0.0, {"global": {"articles": row.article_count, "below_minimum": True}}
+
+    median = max(-1.0, min(1.0, float(row.score)))
+    conf = _confidence(row.article_count)
+    effective = median * conf
+    details = {
+        "global": {
+            "score": round(effective, 4),
+            "median": round(median, 4),
+            "confidence": round(conf, 4),
             "label": row.label,
             "articles": row.article_count,
         }
+    }
 
-    avg = max(-1.0, min(1.0, total_score / len(rows)))
-    return round(avg, 4), details
+    return round(effective, 4), details
 
 
 WEIGHT_PROFILES = {
     "stock": {
-        "short": {"technical": 0.50, "sentiment": 0.30, "macro": 0.20},
+        "short": {"technical": 0.30, "sentiment": 0.45, "macro": 0.25},
         "long":  {"technical": 0.35, "sentiment": 0.30, "macro": 0.35},
     },
     "etf": {
-        "short": {"technical": 0.45, "sentiment": 0.25, "macro": 0.30},
+        "short": {"technical": 0.30, "sentiment": 0.40, "macro": 0.30},
         "long":  {"technical": 0.30, "sentiment": 0.25, "macro": 0.45},
     },
     "commodity": {
-        "short": {"technical": 0.45, "sentiment": 0.30, "macro": 0.25},
+        "short": {"technical": 0.30, "sentiment": 0.45, "macro": 0.25},
         "long":  {"technical": 0.30, "sentiment": 0.30, "macro": 0.40},
     },
 }

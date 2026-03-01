@@ -39,6 +39,8 @@ class NewsArticleSchema(BaseModel):
     summary: str | None = None
     source: str
     category: str
+    is_macro: bool = False
+    is_asset_specific: bool = False
     published_at: datetime | None = None
     sentiment: SentimentSchema | None = None
 

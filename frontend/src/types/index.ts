@@ -72,6 +72,8 @@ export interface NewsArticle {
   summary: string | null;
   source: string;
   category: string;
+  is_macro?: boolean;
+  is_asset_specific?: boolean;
   published_at: string | null;
   sentiment: Sentiment | null;
 }

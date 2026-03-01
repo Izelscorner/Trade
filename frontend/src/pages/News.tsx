@@ -1,4 +1,4 @@
-/** Full news browser page with region and category filters + real-time WS updates */
+/** Full news browser page with category filters + real-time WS updates */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -30,21 +30,17 @@ const categoryBadgeStyles: Record<
   string,
   { label: string; className: string }
 > = {
-  us_politics: {
+  macro_markets: {
+    label: "Markets",
+    className: "text-accent-amber bg-accent-amber/10",
+  },
+  macro_politics: {
     label: "Politics",
     className: "text-accent-violet bg-accent-violet/10",
   },
-  uk_politics: {
-    label: "Politics",
-    className: "text-accent-violet bg-accent-violet/10",
-  },
-  us_finance: {
-    label: "Finance",
-    className: "text-accent-amber bg-accent-amber/10",
-  },
-  uk_finance: {
-    label: "Finance",
-    className: "text-accent-amber bg-accent-amber/10",
+  macro_conflict: {
+    label: "Conflict",
+    className: "text-accent-rose bg-accent-rose/10",
   },
   asset_specific: {
     label: "Asset",
@@ -52,18 +48,20 @@ const categoryBadgeStyles: Record<
   },
 };
 
-const regionOptions = [
-  { value: "all", label: "All Regions" },
-  { value: "us", label: "🇺🇸 US" },
-  { value: "uk", label: "🇬🇧 UK" },
-] as const;
-
 const categoryOptions = [
   { value: "all", label: "All" },
-  { value: "politics", label: "Politics" },
-  { value: "finance", label: "Finance" },
   { value: "macro", label: "Macro" },
+  { value: "macro_markets", label: "Markets" },
+  { value: "macro_politics", label: "Politics" },
+  { value: "macro_conflict", label: "Conflict" },
+  { value: "asset_specific", label: "Asset" },
 ] as const;
+
+const macroCategories = [
+  "macro_markets",
+  "macro_politics",
+  "macro_conflict",
+];
 
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return "";
@@ -76,63 +74,46 @@ function timeAgo(dateStr: string | null): string {
   return `${days}d ago`;
 }
 
-function categoryLabel(cat: string): string {
-  return cat.replace("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-const macroCategories = [
-  "us_politics",
-  "uk_politics",
-  "us_finance",
-  "uk_finance",
-];
-
 export default function News() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const prevIdsRef = useRef<Set<string>>(new Set());
 
-  const region = searchParams.get("region") || "all";
   const categoryType = searchParams.get("type") || "all";
 
   // Subscribe WS to news with current filters
   useEffect(() => {
     wsSubscribe({
       page: "news",
-      region: region !== "all" ? region : undefined,
       category: categoryType !== "all" ? categoryType : undefined,
     });
-  }, [region, categoryType]);
+  }, [categoryType]);
 
   const { data: rawArticles = [], isLoading } = useQuery<NewsArticle[]>({
-    queryKey: ["news-page", region, categoryType],
+    queryKey: ["news-page", categoryType],
     queryFn: () => {
-      const opts: { category?: string; region?: string; limit: number } = {
+      const opts: { category?: string; limit: number } = {
         limit: 200,
       };
-      if (
-        region !== "all" &&
-        categoryType !== "all" &&
-        categoryType !== "macro"
-      ) {
-        opts.category = `${region}_${categoryType}`;
-      } else if (region !== "all") {
-        opts.region = region;
+      if (categoryType !== "all") {
+        opts.category = categoryType;
       }
       return fetchNews(opts);
     },
     refetchInterval: 120_000,
   });
 
-  // Client-side filtering for category types when no region is selected
+  // Client-side filtering for "macro" meta-category
   const articles = useMemo(() => {
-    if (region !== "all" || categoryType === "all") return rawArticles;
+    if (categoryType === "all") return rawArticles;
     if (categoryType === "macro") {
-      return rawArticles.filter((a) => macroCategories.includes(a.category));
+      return rawArticles.filter(
+        (a) => macroCategories.includes(a.category) || a.is_macro,
+      );
     }
-    return rawArticles.filter((a) => a.category.endsWith(`_${categoryType}`));
-  }, [rawArticles, region, categoryType]);
+    return rawArticles;
+  }, [rawArticles, categoryType]);
 
   // Track new article IDs for animation
   useEffect(() => {
@@ -222,25 +203,6 @@ export default function News() {
 
         <Filter size={16} className="text-text-muted" />
 
-        {/* Region filter */}
-        <div className="flex items-center gap-1">
-          {regionOptions.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setFilter("region", opt.value)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                region === opt.value
-                  ? "bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/20"
-                  : "text-text-secondary hover:text-text-primary hover:bg-surface-3/50"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="w-px h-6 bg-border-subtle" />
-
         {/* Category type filter */}
         <div className="flex items-center gap-1">
           {categoryOptions.map((opt) => (
@@ -310,17 +272,11 @@ export default function News() {
                           {categoryBadgeStyles[article.category].label}
                         </span>
                       )}
-                      <span className="text-[10px] text-text-muted uppercase tracking-wider">
-                        {article.category.startsWith("us")
-                          ? "🇺🇸"
-                          : article.category.startsWith("uk")
-                            ? "🇬🇧"
-                            : ""}{" "}
-                        {categoryLabel(article.category)}
-                      </span>
-                      <span className="text-[10px] text-text-muted/50">
-                        &bull;
-                      </span>
+                      {article.is_macro && (
+                        <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold text-accent-amber bg-accent-amber/10">
+                          Macro
+                        </span>
+                      )}
                       <span className="text-[10px] text-text-muted font-medium">
                         {article.source}
                       </span>

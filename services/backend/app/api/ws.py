@@ -4,7 +4,7 @@ Clients send JSON subscription messages to declare what they need:
     { "subscribe": { "page": "dashboard" } }
     { "subscribe": { "page": "asset_detail", "instrument_ids": ["uuid-here"] } }
     { "subscribe": { "page": "asset_list" } }
-    { "subscribe": { "page": "news", "region": "us", "category": "politics" } }
+    { "subscribe": { "page": "news", "category": "macro_markets" } }
 
 The server only sends data relevant to each client's subscription.
 """
@@ -31,7 +31,6 @@ class ClientSubscription:
     """Tracks what a single client is subscribed to."""
     page: str = "dashboard"  # dashboard | asset_detail | asset_list | news
     instrument_ids: list[str] = field(default_factory=list)  # for asset_detail
-    region: str | None = None  # for news filtering
     category: str | None = None  # for news filtering
 
 
@@ -53,7 +52,6 @@ class ConnectionManager:
         cs = self.connections[websocket]
         cs.page = sub.get("page", "dashboard")
         cs.instrument_ids = sub.get("instrument_ids", [])
-        cs.region = sub.get("region")
         cs.category = sub.get("category")
         logger.debug("Client subscription updated: page=%s, instruments=%s", cs.page, cs.instrument_ids)
 
@@ -164,8 +162,85 @@ async def broadcast_live_prices():
         await asyncio.sleep(5)
 
 
+def _row_to_article(r, instrument_id=None) -> dict:
+    """Convert a DB row to a news article dict for WS broadcast."""
+    return {
+        "id": str(r.id),
+        "title": r.title,
+        "link": r.link,
+        "summary": r.summary,
+        "source": r.source,
+        "category": r.category,
+        "is_macro": r.is_macro if hasattr(r, "is_macro") else False,
+        "is_asset_specific": r.is_asset_specific if hasattr(r, "is_asset_specific") else False,
+        "instrument_id": str(instrument_id or (r.instrument_id if hasattr(r, "instrument_id") and r.instrument_id else None)) or None,
+        "published_at": r.published_at.isoformat() if r.published_at else None,
+        "sentiment": {
+            "positive": float(r.positive) if r.positive is not None else 0,
+            "negative": float(r.negative) if r.negative is not None else 0,
+            "neutral": float(r.neutral) if r.neutral is not None else 0,
+            "label": r.label or "neutral"
+        }
+    }
+
+
+async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
+    """Fetch news specifically for given instrument IDs (targeted query)."""
+    if not instrument_ids:
+        return []
+    async with async_session() as session:
+        placeholders = ", ".join(f":iid{i}" for i in range(len(instrument_ids)))
+        params = {f"iid{i}": iid for i, iid in enumerate(instrument_ids)}
+        result = await session.execute(
+            text(f"""
+                SELECT n.id, n.title, n.link, n.summary, n.source, n.category,
+                       n.is_macro, n.is_asset_specific, n.published_at,
+                       s.positive, s.negative, s.neutral, s.label,
+                       m.instrument_id
+                FROM news_articles n
+                JOIN sentiment_scores s ON n.id = s.article_id
+                JOIN news_instrument_map m ON n.id = m.article_id
+                WHERE m.instrument_id IN ({placeholders})
+                AND n.ollama_processed = true
+                ORDER BY n.published_at DESC
+                LIMIT 50
+            """),
+            params,
+        )
+        return [_row_to_article(r) for r in result.fetchall()]
+
+
+async def _fetch_general_news() -> list[dict]:
+    """Fetch latest news globally for dashboard/news page."""
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT n.id, n.title, n.link, n.summary, n.source, n.category,
+                       n.is_macro, n.is_asset_specific, n.published_at,
+                       s.positive, s.negative, s.neutral, s.label,
+                       nim.instrument_id
+                FROM (
+                    SELECT * FROM news_articles
+                    WHERE ollama_processed = true
+                    ORDER BY published_at DESC
+                    LIMIT 100
+                ) n
+                JOIN sentiment_scores s ON n.id = s.article_id
+                LEFT JOIN LATERAL (
+                    SELECT instrument_id FROM news_instrument_map WHERE article_id = n.id LIMIT 1
+                ) nim ON true
+            """)
+        )
+        return [_row_to_article(r) for r in result.fetchall()]
+
+
 async def broadcast_latest_news():
-    """Broadcast news — filtered per client subscription."""
+    """Broadcast news — filtered per client subscription.
+
+    For asset_detail clients: runs a targeted query for that instrument's
+    articles so we don't miss any in the global top 100.
+    For dashboard/news: uses the global query.
+    """
     while True:
         try:
             if not manager.has_connections:
@@ -177,75 +252,57 @@ async def broadcast_latest_news():
                 await asyncio.sleep(5)
                 continue
 
-            async with async_session() as session:
-                result = await session.execute(
-                    text("""
-                        SELECT DISTINCT ON (n.id)
-                            n.id, n.title, n.link, n.summary, n.source, n.category, n.published_at,
-                            s.positive, s.negative, s.neutral, s.label,
-                            m.instrument_id
-                        FROM news_articles n
-                        LEFT JOIN sentiment_scores s ON n.id = s.article_id
-                        LEFT JOIN news_instrument_map m ON n.id = m.article_id
-                        ORDER BY n.id, n.published_at DESC
-                        LIMIT 100
-                    """)
-                )
-                rows = result.fetchall()
-
-            all_news = [
-                {
-                    "id": str(r.id),
-                    "title": r.title,
-                    "link": r.link,
-                    "summary": r.summary,
-                    "source": r.source,
-                    "category": r.category,
-                    "instrument_id": str(r.instrument_id) if r.instrument_id else None,
-                    "published_at": r.published_at.isoformat() if r.published_at else None,
-                    "sentiment": {
-                        "positive": float(r.positive) if r.positive is not None else 0,
-                        "negative": float(r.negative) if r.negative is not None else 0,
-                        "neutral": float(r.neutral) if r.neutral is not None else 0,
-                        "label": r.label or "neutral"
-                    }
-                }
-                for r in rows
-            ]
-
-            # Sort by published_at descending
-            all_news.sort(key=lambda a: a["published_at"] or "", reverse=True)
+            # Separate asset_detail clients from others
+            asset_clients = [(ws, sub) for ws, sub in clients if sub.page == "asset_detail" and sub.instrument_ids]
+            general_clients = [(ws, sub) for ws, sub in clients if not (sub.page == "asset_detail" and sub.instrument_ids)]
 
             ts = datetime.now(timezone.utc).isoformat()
-            macro_categories = {"us_politics", "uk_politics", "us_finance", "uk_finance"}
+            macro_categories = {"macro_markets", "macro_politics", "macro_conflict"}
 
-            for ws, sub in clients:
-                if sub.page == "asset_detail" and sub.instrument_ids:
-                    # Only news mapped to this instrument
-                    filtered = [n for n in all_news if n["instrument_id"] in sub.instrument_ids][:30]
-                elif sub.page == "news":
-                    # Filter by region/category if set
-                    filtered = all_news
-                    if sub.region:
-                        filtered = [n for n in filtered if n["category"].startswith(f"{sub.region}_")]
-                    if sub.category:
-                        if sub.category == "macro":
-                            filtered = [n for n in filtered if n["category"] in macro_categories]
-                        else:
-                            filtered = [n for n in filtered if n["category"].endswith(f"_{sub.category}")]
-                    filtered = filtered[:100]
-                elif sub.page == "dashboard":
-                    filtered = all_news[:50]
-                else:
-                    filtered = all_news[:50]
+            # Send targeted instrument news to asset_detail clients
+            if asset_clients:
+                # Collect all needed instrument IDs, batch the query
+                all_iids = set()
+                for _, sub in asset_clients:
+                    all_iids.update(sub.instrument_ids)
+                instrument_news = await _fetch_instrument_news(list(all_iids))
 
-                if filtered:
-                    msg = json.dumps({
-                        "type": "news_updates",
-                        "data": filtered,
-                        "timestamp": ts,
-                    })
-                    await manager.send_to(ws, msg)
+                for ws, sub in asset_clients:
+                    filtered = [n for n in instrument_news if n["instrument_id"] in sub.instrument_ids][:30]
+                    if filtered:
+                        msg = json.dumps({
+                            "type": "news_updates",
+                            "data": filtered,
+                            "timestamp": ts,
+                        })
+                        await manager.send_to(ws, msg)
+
+            # Send general news to dashboard/news page clients
+            if general_clients:
+                all_news = await _fetch_general_news()
+                all_news.sort(key=lambda a: a["published_at"] or "", reverse=True)
+
+                for ws, sub in general_clients:
+                    if sub.page == "news":
+                        filtered = all_news
+                        if sub.category:
+                            if sub.category == "macro":
+                                filtered = [n for n in filtered if n["category"] in macro_categories or n.get("is_macro")]
+                            else:
+                                filtered = [n for n in filtered if n["category"] == sub.category]
+                        filtered = filtered[:100]
+                    elif sub.page == "dashboard":
+                        filtered = all_news[:50]
+                    else:
+                        filtered = all_news[:50]
+
+                    if filtered:
+                        msg = json.dumps({
+                            "type": "news_updates",
+                            "data": filtered,
+                            "timestamp": ts,
+                        })
+                        await manager.send_to(ws, msg)
 
         except Exception:
             logger.exception("Error in broadcast_latest_news")
@@ -417,9 +474,10 @@ async def broadcast_macro_sentiment():
             async with async_session() as session:
                 result = await session.execute(
                     text("""
-                        SELECT DISTINCT ON (region) *
+                        SELECT *
                         FROM macro_sentiment
-                        ORDER BY region, calculated_at DESC
+                        ORDER BY calculated_at DESC
+                        LIMIT 1
                     """)
                 )
                 rows = result.fetchall()

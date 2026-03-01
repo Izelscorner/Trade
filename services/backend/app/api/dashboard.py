@@ -73,49 +73,61 @@ async def get_dashboard():
 
 @router.get("/macro", response_model=APIResponse)
 async def get_macro_sentiment():
-    """Get latest macro sentiment for US and UK."""
+    """Get latest global macro sentiment."""
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT DISTINCT ON (region)
-                    region, score, label, article_count, calculated_at
+                SELECT region, score, label, article_count, calculated_at
                 FROM macro_sentiment
-                ORDER BY region, calculated_at DESC
+                ORDER BY calculated_at DESC
+                LIMIT 1
             """)
         )
         rows = result.fetchall()
 
-    sentiments = [
-        MacroSentimentSchema(
-            region=r.region,
-            score=float(r.score),
-            label=r.label,
-            article_count=r.article_count,
-            calculated_at=r.calculated_at,
+    sentiments = []
+    for r in rows:
+        raw_score = float(r.score)
+        confidence = min(1.0, r.article_count / 20)
+        effective_score = round(raw_score * confidence, 4)
+        # Derive label from effective score, not raw score
+        if effective_score > 0.25:
+            label = "positive"
+        elif effective_score < -0.25:
+            label = "negative"
+        else:
+            label = "neutral"
+        sentiments.append(
+            MacroSentimentSchema(
+                region=r.region,
+                score=effective_score,
+                label=label,
+                article_count=r.article_count,
+                calculated_at=r.calculated_at,
+            )
         )
-        for r in rows
-    ]
     return APIResponse(data=[s.model_dump() for s in sentiments], timestamp=datetime.now(timezone.utc))
 
 
 @router.get("/macro/news", response_model=APIResponse)
 async def get_macro_news(limit: int = 30):
-    """Get latest macro-economic and political news that drives macro sentiment.
+    """Get latest macro news that drives macro sentiment.
 
-    Returns both political and financial news articles with their sentiment
-    scores, ordered by recency. This is the news that feeds into the
-    macro sentiment calculation.
+    Returns macro-tagged news articles with their sentiment scores,
+    ordered by recency. Only includes Ollama-processed articles.
     """
     from ..schemas import NewsArticleSchema, SentimentSchema
 
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT a.id, a.title, a.link, a.summary, a.source, a.category, a.published_at,
-                       s.positive, s.negative, s.neutral, s.label
+                SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
+                       a.is_macro, a.is_asset_specific, a.published_at,
+                       a.macro_sentiment_label
                 FROM news_articles a
-                LEFT JOIN sentiment_scores s ON s.article_id = a.id
-                WHERE a.category IN ('us_politics', 'uk_politics', 'us_finance', 'uk_finance')
+                WHERE a.is_macro = true
+                AND a.ollama_processed = true
+                AND a.macro_sentiment_label IS NOT NULL
                 ORDER BY a.published_at DESC
                 LIMIT :limit
             """),
@@ -123,15 +135,26 @@ async def get_macro_news(limit: int = 30):
         )
         rows = result.fetchall()
 
+    # Map macro sentiment labels to probability distributions for display
+    _MACRO_PROBS = {
+        "very positive": (0.90, 0.02, 0.08),
+        "positive": (0.70, 0.05, 0.25),
+        "neutral": (0.15, 0.15, 0.70),
+        "negative": (0.05, 0.70, 0.25),
+        "very negative": (0.02, 0.90, 0.08),
+    }
+
     articles = []
     for r in rows:
         sentiment = None
-        if r.label is not None:
+        label = r.macro_sentiment_label
+        if label:
+            pos, neg, neu = _MACRO_PROBS.get(label, (0.15, 0.15, 0.70))
             sentiment = SentimentSchema(
-                positive=float(r.positive),
-                negative=float(r.negative),
-                neutral=float(r.neutral),
-                label=r.label,
+                positive=pos,
+                negative=neg,
+                neutral=neu,
+                label=label,
             )
         articles.append(
             NewsArticleSchema(
@@ -141,6 +164,8 @@ async def get_macro_news(limit: int = 30):
                 summary=r.summary,
                 source=r.source,
                 category=r.category,
+                is_macro=r.is_macro,
+                is_asset_specific=r.is_asset_specific,
                 published_at=r.published_at,
                 sentiment=sentiment,
             ).model_dump()

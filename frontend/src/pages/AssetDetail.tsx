@@ -12,7 +12,7 @@ import {
   instrumentAIAnalysisAtom,
   instrumentIndependentAIAnalysisAtom,
 } from "../atoms";
-import { fetchInstrument, fetchLivePrice } from "../api/client";
+import { fetchInstrument, fetchLivePrice, prioritizeInstrument } from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
@@ -72,10 +72,11 @@ export default function AssetDetail() {
     "integrated" | "independent" | null
   >(null);
 
-  // Subscribe WS to this specific instrument
+  // Subscribe WS to this specific instrument + prioritize its unprocessed news
   useEffect(() => {
     if (id) {
       wsSubscribe({ page: "asset_detail", instrument_ids: [id] });
+      prioritizeInstrument(id);
     }
   }, [id]);
 

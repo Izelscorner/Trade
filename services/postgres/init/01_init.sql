@@ -44,7 +44,11 @@ CREATE TABLE IF NOT EXISTS news_articles (
     summary TEXT,
     content TEXT,
     source VARCHAR(100) NOT NULL,
-    category VARCHAR(50) NOT NULL CHECK (category IN ('us_politics', 'uk_politics', 'us_finance', 'uk_finance', 'asset_specific')),
+    category VARCHAR(50) NOT NULL CHECK (category IN ('macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific')),
+    is_macro BOOLEAN NOT NULL DEFAULT false,
+    is_asset_specific BOOLEAN NOT NULL DEFAULT false,
+    ollama_processed BOOLEAN NOT NULL DEFAULT false,
+    macro_sentiment_label VARCHAR(30),
     published_at TIMESTAMPTZ,
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (title, source)
@@ -59,7 +63,7 @@ CREATE TABLE IF NOT EXISTS news_instrument_map (
     UNIQUE (article_id, instrument_id)
 );
 
--- Sentiment scores (from FinBERT)
+-- Sentiment scores (from Ollama/Llama 3.2)
 CREATE TABLE IF NOT EXISTS sentiment_scores (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     article_id UUID NOT NULL REFERENCES news_articles(id) ON DELETE CASCADE,
@@ -100,7 +104,7 @@ CREATE TABLE IF NOT EXISTS grades (
 -- Macro sentiment (rolling, latest only)
 CREATE TABLE IF NOT EXISTS macro_sentiment (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    region VARCHAR(10) NOT NULL CHECK (region IN ('us', 'uk')),
+    region VARCHAR(10) NOT NULL DEFAULT 'global',
     score NUMERIC(7, 6) NOT NULL,
     label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
     article_count INT NOT NULL DEFAULT 0,
@@ -128,11 +132,18 @@ CREATE TABLE IF NOT EXISTS portfolio (
     UNIQUE(instrument_id)
 );
 
+-- Processing priority (user-triggered, signals processor to prioritize an instrument's news)
+CREATE TABLE IF NOT EXISTS processing_priority (
+    instrument_id UUID PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Indexes
 CREATE INDEX idx_historical_prices_instrument_date ON historical_prices(instrument_id, date DESC);
 CREATE INDEX idx_live_prices_instrument_fetched ON live_prices(instrument_id, fetched_at DESC);
 CREATE INDEX idx_news_articles_category_published ON news_articles(category, published_at DESC);
 CREATE INDEX idx_news_articles_fetched ON news_articles(fetched_at DESC);
+CREATE INDEX idx_news_articles_unprocessed ON news_articles(ollama_processed, fetched_at DESC) WHERE ollama_processed = false;
 CREATE INDEX idx_sentiment_scores_article ON sentiment_scores(article_id);
 CREATE INDEX idx_technical_indicators_instrument_date ON technical_indicators(instrument_id, date DESC);
 CREATE INDEX idx_grades_instrument_term ON grades(instrument_id, term, graded_at DESC);

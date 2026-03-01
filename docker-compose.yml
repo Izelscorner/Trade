@@ -26,6 +26,23 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - internal
+      - egress
+    entrypoint: ["/bin/bash", "-c", "ollama serve & sleep 5 && ollama pull llama3.2:1b && wait"]
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "4.0"
+
   news-fetcher:
     build:
       context: ./services/news-fetcher
@@ -52,28 +69,27 @@ services:
           memory: 512M
           cpus: "1.0"
 
-  sentiment:
+  ollama-processor:
     build:
-      context: ./services/sentiment
+      context: ./services/ollama-processor
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      TRANSFORMERS_CACHE: /tmp/hf_cache
-      HF_HOME: /tmp/hf_cache
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.2:1b
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_started
     ports:
-      - "8001:8001"
+      - "8003:8003"
     networks:
       - internal
-      - egress
     read_only: true
     tmpfs:
       - /tmp
-      - /home/appuser/.cache
     cap_drop:
       - ALL
     security_opt:
@@ -81,38 +97,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: "2.0"
-
-  relevance:
-    build:
-      context: ./services/relevance
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      TRANSFORMERS_CACHE: /models/hf_cache
-      HF_HOME: /models/hf_cache
-    ports:
-      - "8002:8002"
-    volumes:
-      - relevance-models:/models
-    networks:
-      - internal
-      - egress
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /home/appuser/.cache
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: "2.0"
+          memory: 512M
+          cpus: "1.0"
 
   technical-analysis:
     build:
@@ -243,7 +229,7 @@ services:
 
 volumes:
   postgres-data:
-  relevance-models:
+  ollama-models:
 
 networks:
   internal:

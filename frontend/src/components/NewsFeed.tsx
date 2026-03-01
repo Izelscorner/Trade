@@ -34,8 +34,12 @@ function timeAgo(dateStr: string | null): string {
 }
 
 function categoryLabel(cat: string): string {
-  return cat.replace("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return cat
+    .replace("macro_", "")
+    .replace("_", " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
 export default function NewsFeed({
   articles,
   title = "Latest News",
