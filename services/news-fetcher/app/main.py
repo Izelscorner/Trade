@@ -80,12 +80,48 @@ async def macro_loop() -> None:
         await asyncio.sleep(MACRO_INTERVAL)
 
 
+async def get_prioritized_instrument() -> dict | None:
+    """Check if there's a prioritized instrument in the processing queue."""
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT i.id, i.symbol, i.name, i.yfinance_symbol
+                FROM processing_priority pp
+                JOIN instruments i ON i.id = pp.instrument_id
+                ORDER BY pp.requested_at DESC
+                LIMIT 1
+            """)
+        )
+        row = result.fetchone()
+        if row:
+            return {"id": str(row.id), "symbol": row.symbol, "name": row.name, "yfinance_symbol": row.yfinance_symbol}
+    return None
+
+
 async def instruments_loop() -> None:
-    """Fetch instrument-specific news from Yahoo Finance and Google News."""
+    """Fetch instrument-specific news from Yahoo Finance and Google News.
+
+    Checks for prioritized instruments first and fetches those before
+    the regular cycle through all instruments.
+    """
     while True:
         try:
+            # Check for prioritized instrument and fetch it first
+            priority = await get_prioritized_instrument()
+            if priority:
+                logger.info("Priority fetch for %s", priority["symbol"])
+                await fetch_instrument_news(priority)
+                await asyncio.sleep(2)
+
             instruments = await get_instruments()
             for inst in instruments:
+                # Re-check priority between instruments — if user clicked a new one, fetch it
+                priority = await get_prioritized_instrument()
+                if priority and priority["symbol"] != inst["symbol"]:
+                    logger.info("Priority fetch for %s (interrupting cycle)", priority["symbol"])
+                    await fetch_instrument_news(priority)
+                    await asyncio.sleep(2)
+
                 await fetch_instrument_news(inst)
                 await asyncio.sleep(2)
         except Exception:

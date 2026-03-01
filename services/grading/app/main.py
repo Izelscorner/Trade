@@ -97,6 +97,16 @@ async def detect_changes(since: datetime) -> dict:
     return {"instruments": changed_instruments, "macro_changed": macro_changed}
 
 
+async def get_priority_instrument_id() -> str | None:
+    """Get the currently prioritized instrument ID from the processing_priority table."""
+    async with async_session() as session:
+        result = await session.execute(
+            text("SELECT instrument_id::text FROM processing_priority ORDER BY requested_at DESC LIMIT 1")
+        )
+        row = result.fetchone()
+        return row.instrument_id if row else None
+
+
 async def grading_loop() -> None:
     """Main grading loop - detects changes and regrades affected instruments."""
     # Wait for other services to populate initial data
@@ -164,6 +174,11 @@ async def grading_loop() -> None:
                 # Only regrade instruments with new data
                 instruments = await get_instruments()
                 instruments_to_grade = [i for i in instruments if i["id"] in changes["instruments"]]
+
+            # Check for prioritized instrument and ensure it's graded first
+            priority_id = await get_priority_instrument_id()
+            if priority_id:
+                instruments_to_grade.sort(key=lambda i: 0 if i["id"] == priority_id else 1)
 
             if not instruments_to_grade:
                 continue

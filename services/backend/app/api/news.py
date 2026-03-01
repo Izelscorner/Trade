@@ -148,11 +148,12 @@ async def prioritize_instrument(instrument_id: str):
         if unprocessed == 0:
             return {"status": "ok", "message": "All articles already processed", "unprocessed": 0}
 
+        # Clear all existing priorities — only one instrument prioritized at a time
+        await session.execute(text("DELETE FROM processing_priority"))
         await session.execute(
             text("""
                 INSERT INTO processing_priority (instrument_id, requested_at)
                 VALUES (:iid, NOW())
-                ON CONFLICT (instrument_id) DO UPDATE SET requested_at = NOW()
             """),
             {"iid": instrument_id},
         )

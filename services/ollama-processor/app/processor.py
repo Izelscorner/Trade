@@ -280,14 +280,21 @@ async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
             text("""
                 SELECT a.id, a.title, a.summary, a.content, a.category
                 FROM news_articles a
-                LEFT JOIN news_instrument_map nim ON nim.article_id = a.id
-                LEFT JOIN processing_priority pp ON pp.instrument_id = nim.instrument_id
+                LEFT JOIN LATERAL (
+                    SELECT pp.requested_at
+                    FROM news_instrument_map nim
+                    JOIN processing_priority pp ON pp.instrument_id = nim.instrument_id
+                    WHERE nim.article_id = a.id
+                    ORDER BY pp.requested_at DESC
+                    LIMIT 1
+                ) pri ON true
                 WHERE a.ollama_processed = false
                 ORDER BY
-                    CASE WHEN pp.instrument_id IS NOT NULL THEN 0
+                    CASE WHEN pri.requested_at IS NOT NULL THEN 0
                          WHEN a.category LIKE 'macro_%%' THEN :macro_pri
                          ELSE 2
                     END,
+                    COALESCE(pri.requested_at, '1970-01-01'::timestamptz) DESC,
                     a.fetched_at ASC
                 LIMIT :limit
             """),
