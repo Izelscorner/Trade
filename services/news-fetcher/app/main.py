@@ -102,8 +102,15 @@ async def instruments_loop() -> None:
     """Fetch instrument-specific news from Yahoo Finance and Google News.
 
     Checks for prioritized instruments first and fetches those before
-    the regular cycle through all instruments.
+    the regular cycle through all instruments. All instruments are fetched
+    concurrently (up to 3 at a time) to reduce cycle time.
     """
+    sem = asyncio.Semaphore(3)
+
+    async def fetch_with_semaphore(inst: dict) -> int:
+        async with sem:
+            return await fetch_instrument_news(inst)
+
     while True:
         try:
             # Check for prioritized instrument and fetch it first
@@ -111,19 +118,16 @@ async def instruments_loop() -> None:
             if priority:
                 logger.info("Priority fetch for %s", priority["symbol"])
                 await fetch_instrument_news(priority)
-                await asyncio.sleep(2)
 
             instruments = await get_instruments()
-            for inst in instruments:
-                # Re-check priority between instruments — if user clicked a new one, fetch it
-                priority = await get_prioritized_instrument()
-                if priority and priority["symbol"] != inst["symbol"]:
-                    logger.info("Priority fetch for %s (interrupting cycle)", priority["symbol"])
-                    await fetch_instrument_news(priority)
-                    await asyncio.sleep(2)
 
-                await fetch_instrument_news(inst)
-                await asyncio.sleep(2)
+            # Fetch all instruments concurrently with a semaphore limit
+            tasks = [fetch_with_semaphore(inst) for inst in instruments]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for inst, result in zip(instruments, results):
+                if isinstance(result, Exception):
+                    logger.error("Error fetching news for %s: %s", inst["symbol"], result)
+
         except Exception:
             logger.exception("Error in instruments fetch loop")
         await asyncio.sleep(ASSET_INTERVAL)

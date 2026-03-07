@@ -4,6 +4,7 @@ Clients send JSON subscription messages to declare what they need:
     { "subscribe": { "page": "dashboard" } }
     { "subscribe": { "page": "asset_detail", "instrument_ids": ["uuid-here"] } }
     { "subscribe": { "page": "asset_list" } }
+    { "subscribe": { "page": "portfolio", "instrument_ids": ["uuid1", "uuid2"] } }
     { "subscribe": { "page": "news", "category": "macro_markets" } }
 
 The server only sends data relevant to each client's subscription.
@@ -29,8 +30,8 @@ router = APIRouter()
 @dataclass
 class ClientSubscription:
     """Tracks what a single client is subscribed to."""
-    page: str = "dashboard"  # dashboard | asset_detail | asset_list | news
-    instrument_ids: list[str] = field(default_factory=list)  # for asset_detail
+    page: str = "dashboard"  # dashboard | asset_detail | asset_list | portfolio | news
+    instrument_ids: list[str] = field(default_factory=list)  # for asset_detail and portfolio
     category: str | None = None  # for news filtering
 
 
@@ -55,6 +56,26 @@ class ConnectionManager:
         cs.category = sub.get("category")
         logger.debug("Client subscription updated: page=%s, instruments=%s", cs.page, cs.instrument_ids)
 
+        # Auto-prioritize processing when user navigates to an asset detail page
+        if cs.page == "asset_detail" and cs.instrument_ids:
+            asyncio.create_task(self._write_priority(cs.instrument_ids[0]))
+
+    async def _write_priority(self, instrument_id: str) -> None:
+        """Mark an instrument as priority for Ollama processing."""
+        try:
+            async with async_session() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO processing_priority (instrument_id, requested_at)
+                        VALUES (:iid::uuid, NOW())
+                        ON CONFLICT (instrument_id) DO UPDATE SET requested_at = NOW()
+                    """),
+                    {"iid": instrument_id},
+                )
+                await session.commit()
+        except Exception:
+            logger.debug("Could not write processing priority for %s", instrument_id)
+
     def get_clients_for(self, data_type: str) -> list[tuple[WebSocket, ClientSubscription]]:
         """Return clients that need a specific data type based on their page."""
         results = []
@@ -64,20 +85,20 @@ class ConnectionManager:
                 if sub.page != "news":
                     results.append((ws, sub))
             elif data_type == "news_updates":
-                # Dashboard, news page, and asset_detail need news
-                if sub.page in ("dashboard", "news", "asset_detail"):
+                # Dashboard, news page, asset_detail, and portfolio need news
+                if sub.page in ("dashboard", "news", "asset_detail", "portfolio"):
                     results.append((ws, sub))
             elif data_type == "grade_updates":
-                # Dashboard, asset_detail, and asset_list need grades
-                if sub.page in ("dashboard", "asset_detail", "asset_list"):
+                # Dashboard, asset_detail, asset_list, and portfolio need grades
+                if sub.page in ("dashboard", "asset_detail", "asset_list", "portfolio"):
                     results.append((ws, sub))
             elif data_type == "technical_updates":
                 # Only asset_detail needs technical indicators
                 if sub.page == "asset_detail":
                     results.append((ws, sub))
             elif data_type == "macro_sentiment_updates":
-                # Dashboard and news page need macro sentiment
-                if sub.page in ("dashboard", "news"):
+                # Dashboard, news page, and asset_detail need macro sentiment
+                if sub.page in ("dashboard", "news", "asset_detail"):
                     results.append((ws, sub))
         return results
 
@@ -141,8 +162,8 @@ async def broadcast_live_prices():
             ts = datetime.now(timezone.utc).isoformat()
 
             for ws, sub in clients:
-                if sub.page == "asset_detail" and sub.instrument_ids:
-                    # Only send prices for subscribed instruments
+                if sub.page in ("asset_detail", "portfolio") and sub.instrument_ids:
+                    # Filter to subscribed instruments only
                     filtered = [p for p in all_prices if p["instrument_id"] in sub.instrument_ids]
                 else:
                     # Dashboard / asset_list get all prices
@@ -252,9 +273,9 @@ async def broadcast_latest_news():
                 await asyncio.sleep(5)
                 continue
 
-            # Separate asset_detail clients from others
-            asset_clients = [(ws, sub) for ws, sub in clients if sub.page == "asset_detail" and sub.instrument_ids]
-            general_clients = [(ws, sub) for ws, sub in clients if not (sub.page == "asset_detail" and sub.instrument_ids)]
+            # Separate instrument-specific clients (asset_detail + portfolio) from general
+            asset_clients = [(ws, sub) for ws, sub in clients if sub.page in ("asset_detail", "portfolio") and sub.instrument_ids]
+            general_clients = [(ws, sub) for ws, sub in clients if not (sub.page in ("asset_detail", "portfolio") and sub.instrument_ids)]
 
             ts = datetime.now(timezone.utc).isoformat()
             macro_categories = {"macro_markets", "macro_politics", "macro_conflict"}
@@ -369,7 +390,7 @@ async def broadcast_latest_grades():
             ts = datetime.now(timezone.utc).isoformat()
 
             for ws, sub in clients:
-                if sub.page == "asset_detail" and sub.instrument_ids:
+                if sub.page in ("asset_detail", "portfolio") and sub.instrument_ids:
                     filtered = [g for g in all_grades if g["instrument_id"] in sub.instrument_ids]
                 else:
                     filtered = all_grades
@@ -482,16 +503,24 @@ async def broadcast_macro_sentiment():
                 )
                 rows = result.fetchall()
 
-            sentiment = [
-                {
+            sentiment = []
+            for r in rows:
+                raw_score = float(r.score)
+                confidence = min(1.0, r.article_count / 10)
+                effective_score = round(raw_score * confidence, 4)
+                if effective_score > 0.25:
+                    label = "positive"
+                elif effective_score < -0.25:
+                    label = "negative"
+                else:
+                    label = "neutral"
+                sentiment.append({
                     "region": r.region,
-                    "score": float(r.score),
-                    "label": r.label,
+                    "score": effective_score,
+                    "label": label,
                     "article_count": r.article_count,
-                    "calculated_at": r.calculated_at.isoformat()
-                }
-                for r in rows
-            ]
+                    "calculated_at": r.calculated_at.isoformat(),
+                })
 
             msg = json.dumps({
                 "type": "macro_sentiment_updates",

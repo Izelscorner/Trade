@@ -48,8 +48,12 @@ export interface GradeDetails {
     avg_positive?: number;
     avg_negative?: number;
     source?: string;
+    confidence?: number;
   };
-  macro: Record<string, { score: number; label: string; articles: number }>;
+  macro: Record<
+    string,
+    { score: number; label: string; articles: number; confidence?: number }
+  >;
 }
 
 export interface Sentiment {

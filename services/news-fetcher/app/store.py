@@ -195,86 +195,77 @@ async def upsert_articles(articles: list[dict]) -> int:
     return inserted
 
 
+# Rolling window caps — keep only the N most recent articles per bucket.
+# When new articles push past the cap, oldest are evicted automatically.
+MACRO_CAP_PER_CATEGORY = 75   # 75 × 3 categories = 225 macro articles max
+ASSET_CAP_PER_INSTRUMENT = 50  # 50 × 7 instruments = 350 asset articles max
+
+
+async def _delete_articles(session, ids: list) -> int:
+    """Cascade-delete articles by ID (scores → map → articles)."""
+    if not ids:
+        return 0
+    id_list = ", ".join(f"'{i}'" for i in ids)
+    await session.execute(text(f"DELETE FROM sentiment_scores WHERE article_id IN ({id_list})"))
+    await session.execute(text(f"DELETE FROM news_instrument_map WHERE article_id IN ({id_list})"))
+    result = await session.execute(text(f"DELETE FROM news_articles WHERE id IN ({id_list})"))
+    return result.rowcount
+
+
 async def cleanup_old_macro_news() -> int:
-    """Remove macro news older than 24 hours (macro sentiment is rolling)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    """Keep only the MACRO_CAP_PER_CATEGORY most recent articles per macro category.
+
+    Newer articles always displace older ones — true rolling window.
+    """
+    total_deleted = 0
+    categories = ("macro_markets", "macro_politics", "macro_conflict")
     async with async_session() as session:
-        await session.execute(
-            text("""
-                DELETE FROM sentiment_scores
-                WHERE article_id IN (
+        for cat in categories:
+            result = await session.execute(
+                text("""
                     SELECT id FROM news_articles
-                    WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
-                    AND is_asset_specific = false
-                    AND published_at < :cutoff
-                )
-            """),
-            {"cutoff": cutoff},
-        )
-        await session.execute(
-            text("""
-                DELETE FROM news_instrument_map
-                WHERE article_id IN (
-                    SELECT id FROM news_articles
-                    WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
-                    AND is_asset_specific = false
-                    AND published_at < :cutoff
-                )
-            """),
-            {"cutoff": cutoff},
-        )
-        result = await session.execute(
-            text("""
-                DELETE FROM news_articles
-                WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
-                AND is_asset_specific = false
-                AND published_at < :cutoff
-            """),
-            {"cutoff": cutoff},
-        )
+                    WHERE category = :cat AND is_asset_specific = false
+                    ORDER BY published_at DESC
+                    OFFSET :cap
+                """),
+                {"cat": cat, "cap": MACRO_CAP_PER_CATEGORY},
+            )
+            old_ids = [str(r.id) for r in result.fetchall()]
+            deleted = await _delete_articles(session, old_ids)
+            if deleted:
+                logger.info("Trimmed %d old %s articles (cap=%d)", deleted, cat, MACRO_CAP_PER_CATEGORY)
+                total_deleted += deleted
         await session.commit()
-        count = result.rowcount
-        if count:
-            logger.info("Cleaned up %d old macro news articles", count)
-        return count
+    return total_deleted
 
 
 async def cleanup_old_asset_news() -> int:
-    """Remove asset-specific news older than 30 days."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    """Keep only the ASSET_CAP_PER_INSTRUMENT most recent articles per instrument.
+
+    Newer articles always displace older ones — true rolling window.
+    """
+    total_deleted = 0
     async with async_session() as session:
-        await session.execute(
-            text("""
-                DELETE FROM sentiment_scores
-                WHERE article_id IN (
-                    SELECT id FROM news_articles
-                    WHERE category = 'asset_specific'
-                    AND published_at < :cutoff
-                )
-            """),
-            {"cutoff": cutoff},
-        )
-        await session.execute(
-            text("""
-                DELETE FROM news_instrument_map
-                WHERE article_id IN (
-                    SELECT id FROM news_articles
-                    WHERE category = 'asset_specific'
-                    AND published_at < :cutoff
-                )
-            """),
-            {"cutoff": cutoff},
-        )
-        result = await session.execute(
-            text("""
-                DELETE FROM news_articles
-                WHERE category = 'asset_specific'
-                AND published_at < :cutoff
-            """),
-            {"cutoff": cutoff},
-        )
+        # Get all instrument IDs
+        inst_result = await session.execute(text("SELECT id FROM instruments"))
+        instrument_ids = [str(r.id) for r in inst_result.fetchall()]
+
+        for inst_id in instrument_ids:
+            result = await session.execute(
+                text("""
+                    SELECT a.id FROM news_articles a
+                    JOIN news_instrument_map m ON m.article_id = a.id
+                    WHERE m.instrument_id = :iid
+                    AND a.category = 'asset_specific'
+                    ORDER BY a.published_at DESC
+                    OFFSET :cap
+                """),
+                {"iid": inst_id, "cap": ASSET_CAP_PER_INSTRUMENT},
+            )
+            old_ids = [str(r.id) for r in result.fetchall()]
+            deleted = await _delete_articles(session, old_ids)
+            if deleted:
+                logger.info("Trimmed %d old asset articles for instrument %s (cap=%d)", deleted, inst_id, ASSET_CAP_PER_INSTRUMENT)
+                total_deleted += deleted
         await session.commit()
-        count = result.rowcount
-        if count:
-            logger.info("Cleaned up %d old asset news articles", count)
-        return count
+    return total_deleted

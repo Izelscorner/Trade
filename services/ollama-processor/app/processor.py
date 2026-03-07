@@ -1,5 +1,6 @@
-"""Main processing pipeline: classifies and scores unprocessed news articles via Ollama."""
+"""Main processing pipeline: classifies and scores unprocessed news articles via Cerebras API."""
 
+import asyncio
 import re
 import logging
 from datetime import datetime, timedelta, timezone
@@ -7,8 +8,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from .db import async_session
-from .ollama_client import generate_json
+from .cerebras_client import generate_json
 from .prompts import (
+    CLASSIFY_SYSTEM,
+    SENTIMENT_SYSTEM,
+    MACRO_SYSTEM,
     classify_prompt,
     sentiment_prompt,
     macro_sentiment_prompt,
@@ -50,16 +54,15 @@ SENTIMENT_LABEL_MAP = {
 }
 
 # --- Deterministic post-processing rules ---
-# These override Llama 3.2 1B's unreliable macro classification.
 
 # Categories from the news-fetcher that are inherently macro
 MACRO_SOURCE_CATEGORIES = {"macro_markets", "macro_politics", "macro_conflict"}
 
 # Patterns in titles that indicate asset-specific (NOT macro) content
 _ASSET_SPECIFIC_PATTERNS = re.compile(
-    r"""(?ix)                # case-insensitive, verbose
+    r"""(?ix)
     (?:
-        \$[A-Z]{1,5}\b               # ticker symbol like $AAPL, $GOOGL
+        \$[A-Z]{1,5}\b
         | shares?\s+(?:of|sold|acquired|bought|purchased|cut)
         | (?:buys?|sells?|acquires?|purchases?)\s+\d[\d,.]*\s+shares?
         | (?:stake|position|holding)\s+in\b
@@ -89,7 +92,7 @@ _MACRO_PATTERNS = re.compile(
     """
 )
 
-# Commodity-specific price keywords that distinguish price news from company news
+# Commodity-specific price keywords
 _COMMODITY_PRICE_KEYWORDS = {
     "gold": ["gold price", "gold futures", "gold market", "gold rally", "gold surge", "gold drop", "bullion"],
     "oil": ["oil price", "crude oil", "oil futures", "oil market", "brent", "wti"],
@@ -117,12 +120,7 @@ async def get_instruments() -> list[dict]:
 
 
 def build_name_lookup(instruments: list[dict]) -> dict[str, list[str]]:
-    """Build a symbol -> [search names] map dynamically from instrument data.
-
-    For stocks/ETFs: uses the company name words as search terms.
-    For commodities: uses commodity-specific price keywords to avoid
-    matching company names (e.g. "gold mining company" != gold futures).
-    """
+    """Build a symbol -> [search names] map dynamically from instrument data."""
     lookup = {}
     for inst in instruments:
         symbol = inst["symbol"]
@@ -130,21 +128,15 @@ def build_name_lookup(instruments: list[dict]) -> dict[str, list[str]]:
         category = inst["category"]
 
         if category == "commodity":
-            # For commodities, only match price-specific phrases
-            # Extract base commodity name from the instrument name
-            lookup[symbol] = []  # no generic name match
+            lookup[symbol] = []
         else:
-            # For stocks/ETFs, extract meaningful name parts
-            # Remove common suffixes like "Inc.", "Corporation", "ETF"
             clean = re.sub(r'\b(inc\.?|corp\.?|corporation|ltd\.?|llc|plc|etf|futures|co\.?)\b', '', name, flags=re.I)
             clean = clean.strip().strip(',').strip()
             names = [n.strip() for n in clean.split() if len(n.strip()) > 2]
-            # Also add the full clean name and symbol
             search_names = []
             if clean and len(clean) > 2:
                 search_names.append(clean)
             search_names.extend(names)
-            # Deduplicate
             seen = set()
             unique = []
             for n in search_names:
@@ -163,21 +155,17 @@ def _check_direct_mention(title: str, content: str, name_lookup: dict[str, list[
     mentioned = set()
 
     for symbol, names in name_lookup.items():
-        # Check if symbol itself is mentioned
         if symbol.lower() in combined:
             mentioned.add(symbol)
             continue
-        # Check name variants
         if any(n in combined for n in names):
             mentioned.add(symbol)
 
-    # Check commodities separately using price-specific keywords
     for inst in instruments:
         if inst["category"] != "commodity":
             continue
         symbol = inst["symbol"]
         name_lower = inst["name"].lower()
-        # Try to find matching commodity keywords
         for commodity_key, keywords in _COMMODITY_PRICE_KEYWORDS.items():
             if commodity_key in name_lower:
                 if any(kw in combined for kw in keywords):
@@ -197,48 +185,32 @@ def postprocess_classification(
     name_lookup: dict[str, list[str]],
     instruments: list[dict],
 ) -> tuple[list[str], bool]:
-    """Apply deterministic rules to correct LLM classification errors.
-
-    Returns corrected (instruments, is_macro).
-    """
+    """Apply deterministic rules to correct LLM classification errors."""
     combined = f"{title} {content[:300]}"
 
-    # Rule 0: Articles from macro feed categories are ALWAYS macro
     _MACRO_CATEGORIES = {"macro_markets", "macro_politics", "macro_conflict"}
     if source_category in _MACRO_CATEGORIES:
         llm_is_macro = True
 
-    # Rule 1: Asset-specific feed articles are NOT macro unless they match macro patterns
     if source_category == "asset_specific":
         if llm_is_macro and not _MACRO_PATTERNS.search(combined):
-            logger.debug("Post-proc: overriding is_macro=False for asset feed: '%s'", title[:60])
             llm_is_macro = False
 
-    # Rule 2: Titles matching asset-specific patterns are NOT macro (only for asset feeds)
     if source_category == "asset_specific" and llm_is_macro and _ASSET_SPECIFIC_PATTERNS.search(title):
         if not _MACRO_PATTERNS.search(combined):
-            logger.debug("Post-proc: overriding is_macro=False due to asset pattern: '%s'", title[:60])
             llm_is_macro = False
 
-    # Rule 3: Any article matching strong macro patterns should be macro (even from asset feeds)
     if not llm_is_macro and _MACRO_PATTERNS.search(combined):
-        logger.debug("Post-proc: overriding is_macro=True due to macro pattern: '%s'", title[:60])
         llm_is_macro = True
 
-    # Rule 4: Don't tag instruments for articles clearly about other companies
-    # If the title has a ticker like $NEM, $DELL that's not in our tracked set,
-    # and no tracked instrument is actually mentioned, clear the instruments list
     foreign_tickers = re.findall(r'\$([A-Z]{1,5})\b', title)
     if foreign_tickers:
         foreign_tickers_set = set(foreign_tickers)
         tracked_in_title = foreign_tickers_set & valid_symbols
         if not tracked_in_title and foreign_tickers_set:
-            # Title mentions tickers we don't track, LLM probably mis-tagged
             direct = _check_direct_mention(title, content, name_lookup, instruments)
             llm_instruments = [s for s in llm_instruments if s in direct]
 
-    # Rule 5: Validate ALL instrument tags — only keep instruments actually
-    # mentioned by name/symbol in the article (LLM often hallucinates tags)
     if llm_instruments:
         direct = _check_direct_mention(title, content, name_lookup, instruments)
         validated = [s for s in llm_instruments if s in direct]
@@ -246,34 +218,27 @@ def postprocess_classification(
             logger.debug("Post-proc: filtered instruments %s -> %s for: '%s'", llm_instruments, validated, title[:60])
             llm_instruments = validated
 
-    # Rule 6: If LLM returned empty instruments but a tracked company is directly
-    # named in the title, add it (LLM 1B often misses obvious mentions)
     if not llm_instruments:
         direct = _check_direct_mention(title, "", name_lookup, instruments)
         if direct:
             llm_instruments = list(direct)
-            logger.debug("Post-proc: added instruments %s from title: '%s'", direct, title[:60])
 
     return llm_instruments, llm_is_macro
 
 
 async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
-    """Get articles that haven't been processed by Ollama yet.
+    """Get articles that haven't been processed yet.
 
     Priority ordering:
-      0 — User-prioritized instruments (clicked in frontend)
-      1 — Macro articles (until 10+ macro articles are processed, then same as asset)
-      2 — Asset-specific articles
+      0 - User-prioritized instruments (clicked in frontend)
+      1 - Macro articles (until 10+ macro articles are processed, then same as asset)
+      2 - Asset-specific articles
     """
     async with async_session() as session:
-        # Check how many macro articles are already processed (for interleaving)
         macro_count_res = await session.execute(
             text("SELECT count(*) FROM news_articles WHERE is_macro = true AND ollama_processed = true")
         )
         macro_processed = macro_count_res.scalar() or 0
-
-        # Once we have 10+ processed macro articles, stop prioritizing macro
-        # over asset-specific — interleave by fetched_at instead
         macro_priority = 1 if macro_processed >= 10 else 0
 
         result = await session.execute(
@@ -295,7 +260,7 @@ async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
                          ELSE 2
                     END,
                     COALESCE(pri.requested_at, '1970-01-01'::timestamptz) DESC,
-                    a.fetched_at ASC
+                    a.published_at DESC
                 LIMIT :limit
             """),
             {"limit": limit, "macro_pri": macro_priority},
@@ -322,7 +287,7 @@ async def process_article(
     valid_symbols_str: str,
     name_lookup: dict[str, list[str]],
 ) -> None:
-    """Process a single article through the Ollama pipeline.
+    """Process a single article through the Cerebras pipeline.
 
     1. Classify + tag instruments (single LLM call)
     2. Apply deterministic post-processing rules
@@ -336,7 +301,7 @@ async def process_article(
 
     # Step 1: Classify + tag via LLM
     prompt = classify_prompt(title, content, symbol_mapping, valid_symbols_str)
-    classification = await generate_json(prompt, max_tokens=200)
+    classification = await generate_json(prompt, system=CLASSIFY_SYSTEM, max_tokens=300)
 
     if not classification:
         logger.warning("Failed to classify article %s: '%s', skipping for retry", article_id, title[:60])
@@ -346,23 +311,21 @@ async def process_article(
     raw_instruments = classification.get("instruments", [])
     is_macro = classification.get("is_macro", False)
 
-    # Extract symbols from LLM output (handles strings, dicts, and full descriptions)
+    # Extract symbols from LLM output
     tagged_instruments = []
     for inst in raw_instruments:
         if isinstance(inst, dict):
-            # LLM returned {"AAPL": "Apple Inc.", ...} — extract keys
             for key in inst.keys():
                 sym = key.strip().upper()
                 if sym in valid_symbols:
                     tagged_instruments.append(sym)
         elif isinstance(inst, str):
-            # Take first word/token which should be the symbol
             symbol = inst.split(" ")[0].split("-")[0].strip().upper()
             if symbol in valid_symbols:
                 tagged_instruments.append(symbol)
-    tagged_instruments = list(dict.fromkeys(tagged_instruments))  # deduplicate preserving order
+    tagged_instruments = list(dict.fromkeys(tagged_instruments))
 
-    # Step 1b: Handle spam
+    # Handle spam
     if article_type == "spam":
         logger.info("Filtered spam article: '%s'", title[:60])
         await delete_article(article_id)
@@ -374,7 +337,7 @@ async def process_article(
         valid_symbols, name_lookup, instruments,
     )
 
-    # Step 2b: If neither macro nor instrument-related, filter out
+    # If neither macro nor instrument-related, filter out
     if not is_macro and not tagged_instruments:
         logger.info("Filtered irrelevant article: '%s'", title[:60])
         await delete_article(article_id)
@@ -384,75 +347,197 @@ async def process_article(
     await update_article_tags(article_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids)
 
     # Step 4: Contextual sentiment analysis
-    # For dual articles (macro + instruments), run BOTH sentiments:
-    #   - Instrument sentiment → stored in sentiment_scores (for per-instrument grades)
-    #   - Macro sentiment → stored as macro_sentiment_label on the article (for macro aggregate)
     sentiment_stored = False
     if tagged_instruments:
-        for symbol in tagged_instruments:
-            inst = instruments_by_symbol.get(symbol, {})
-            role = get_role(inst) if inst else f"You predict {symbol} price direction."
-            asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
-            prompt = sentiment_prompt(title, content, role, asset_desc)
-            sentiment_result = await generate_json(prompt, max_tokens=60)
+        first_symbol = tagged_instruments[0]
+        first_inst = instruments_by_symbol.get(first_symbol, {})
 
-            if sentiment_result:
-                sentiment_label = sentiment_result.get("sentiment", "neutral")
-                confidence = float(sentiment_result.get("confidence", 0.5))
-                await store_sentiment(article_id, sentiment_label, confidence)
-                logger.info("Sentiment for %s on '%s': %s (conf=%.2f)",
-                           symbol, title[:40], sentiment_label, confidence)
-                sentiment_stored = True
-                break  # One sentiment score per article
+        # Try deterministic rules first
+        deterministic_sent = _deterministic_instrument_sentiment(
+            title, content, first_inst.get("category", "stock")
+        )
+        if deterministic_sent:
+            sentiment_label, confidence = deterministic_sent
+            await store_sentiment(article_id, sentiment_label, confidence)
+            logger.info("Sentiment (deterministic) for %s on '%s': %s (conf=%.2f)",
+                       first_symbol, title[:40], sentiment_label, confidence)
+            sentiment_stored = True
+        else:
+            # Use Cerebras for sentiment
+            for symbol in tagged_instruments:
+                inst = instruments_by_symbol.get(symbol, {})
+                role = get_role(inst) if inst else f"You predict {symbol} price direction."
+                asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
+                prompt = sentiment_prompt(title, content, role, asset_desc)
+
+                # Try up to 2 times (rate limits can cause first attempt to fail)
+                sentiment_result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+                if not sentiment_result:
+                    await asyncio.sleep(2)
+                    sentiment_result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+
+                if sentiment_result:
+                    sentiment_label = sentiment_result.get("sentiment", "neutral")
+                    confidence = float(sentiment_result.get("confidence", 0.5))
+                    await store_sentiment(article_id, sentiment_label, confidence)
+                    logger.info("Sentiment for %s on '%s': %s (conf=%.2f)",
+                               symbol, title[:40], sentiment_label, confidence)
+                    sentiment_stored = True
+                    break
 
     if is_macro:
-        # Always run macro sentiment for macro articles — stored on the article
-        # itself (separate from sentiment_scores) so it feeds the macro aggregate
         await run_macro_sentiment(article_id, title, content, store_in_scores=not sentiment_stored)
 
     if not sentiment_stored and not is_macro:
-        # Fallback: store neutral sentiment so article shows in API
-        await store_sentiment(article_id, "neutral", 0.3)
-        logger.warning("Fallback neutral sentiment for: '%s'", title[:60])
+        logger.warning("No sentiment stored for '%s' — leaving unprocessed for retry", title[:60])
+        return
 
     # Step 5: Mark as processed and clear content
     await mark_processed(article_id)
     logger.info("Processed article: '%s' (instruments=%s, macro=%s)", title[:60], tagged_instruments, is_macro)
 
 
-def _deterministic_macro_sentiment(title: str, content: str) -> tuple[str, float] | None:
-    """Rule-based macro sentiment for clear-cut cases.
+def _deterministic_instrument_sentiment(title: str, content: str, category: str) -> tuple[str, float] | None:
+    """Rule-based instrument sentiment for clear-cut analyst/price signals."""
+    combined = f"{title}. {content[:300]}".lower()
 
-    Returns (label, confidence) or None if LLM should decide.
-    The 1B model cannot reliably follow multi-rule prompts, so we handle
-    the most important patterns deterministically.
-    """
+    if category == "commodity":
+        _COMMODITY_TANGENTIAL = [
+            r'\bgold\s+stocks?\b',
+            r'\b(?:oil|energy)\s+stocks?\b',
+            r'\b(?:gold|silver|oil)\s+(?:miner|mining|producer|company|companies|etf)\b',
+        ]
+        for pattern in _COMMODITY_TANGENTIAL:
+            if re.search(pattern, combined):
+                return ("neutral", 0.75)
+
+    _VERY_POSITIVE = [
+        r'\b(?:beat|beats|exceeded|surpass)\b.{0,40}\b(?:earn|revenue|estimate|expect)',
+        r'\b(?:earn|revenue|profit)\b.{0,40}\b(?:beat|beats|exceeded|surpass)',
+        r'\b(?:rais|increas|hik|boost|lift|up)\b.{0,30}\b(?:price\s+target|pt\b|target\s+price)',
+        r'\bprice\s+target\b.{0,30}\b(?:rais|increas|hik|boost|lift|up)',
+        r'\b(?:upgrad)\b.{0,30}\b(?:buy|outperform|overweight|strong\s+buy)',
+        r'\b(?:buy|outperform|overweight|strong\s+buy)\b.{0,30}\b(?:upgrad)',
+        r'\b(?:win|land|award|secur|clinch|bag)\w*\b.{0,25}\b(?:contract|deal|order)\b',
+        r'\b(?:contract|deal|order)\b.{0,25}\b(?:win|land|award|secur|clinch)\w*\b',
+        r'\b(?:new\s+contract|major\s+contract|billion.{0,10}contract|contract\s+award)',
+        r'\b(?:F-35|F35|fighter\s+jet|defense\s+contract|military\s+contract)\b',
+        r'\b(?:expand|quadrupl|doubl|tripl|scal)\w*\b.{0,40}\b(?:defense|defence|military|weapons?|arms?)\b',
+        r'\bweapons?\s+(?:makers?|manufacturer)\b.{0,60}\b(?:expand|agree|produc|increas|ramp)\b',
+        r'\b(?:defense|defence|military)\s+(?:production|manufactur|spending|budget)\b.{0,40}\b(?:expand|increas|surge|boost|ramp|quadrupl)\b',
+        r'\brecord\b.{0,30}\b(?:revenue|profit|earn|backlog|sales)',
+        r'\b(?:revenue|profit|earn|backlog|sales)\b.{0,30}\brecord\b',
+        r'\bstrong\s+(?:earn|revenue|result|guidance|demand)\b',
+        r'\bmark\s+your\s+calendar',
+        # Large orders: "$X billion order", "$X.XB deal"
+        r'\$\d+(?:\.\d+)?\s*(?:billion|B)\b.{0,30}\b(?:order|deal|contract|program)',
+    ]
+
+    _POSITIVE = [
+        r'\b(?:likes?|bullish|favor|recommends?)\b.{0,40}\b(?:stock|share|position)',
+        r'\b(?:stock|share)\b.{0,40}\b(?:likes?|bullish|favor|recommends?)',
+        r'\b(?:rais)\b.{0,20}\b(?:price\s+target|pt\b)',
+        r'\b(?:buy\s+rating|maintains?\s+buy|reiterates?\s+buy|maintains?\s+overweight)',
+        r'\biniti\w+\b.{0,20}\b(?:buy|outperform|overweight)',
+        r'\b(?:positive|optimistic)\b.{0,30}\b(?:outlook|guidance|view)',
+        r'\bpositive\s+(?:earn|revenue|result|catalyst)',
+        r'\b(?:dividend\s+(?:increas|grow|hike)|special\s+dividend)\b',
+        r'\bshare\s+(?:buyback|repurchase)\b',
+        r'\b(?:trump|president|pentagon|government)\b.{0,60}\b(?:defense|weapons?|military)\b.{0,40}\b(?:expand|produc|spend|fund|increas)\b',
+        # Bullish analyst conviction: "best stock to own/buy", "top pick", "must own"
+        r'\b(?:best|top|number.one|#1|must.own|must.buy)\b.{0,30}\b(?:stock|pick|investment|buy)\b',
+        # Undervaluation signals: "still cheap", "undervalued", "bargain", "discount"
+        r'\b(?:still\s+cheap|undervalued|bargain|trading\s+at\s+a\s+discount|too\s+cheap)\b',
+        # Surge/rally/soar language about a specific stock
+        r'\b(?:stock|share|price)\b.{0,30}\b(?:surge|soar|rocket|skyrocket|moon)\b',
+        r'\b(?:surge|soar|rocket|skyrocket)\b.{0,30}\b(?:stock|share|price)\b',
+        # Analyst reiterates/maintains with positive context (order, growth, beat)
+        r'\breiterates?\b.{0,30}\b(?:stock|rating)\b',
+        r'\breiterates?\b.{0,20}\b(?:outperform|buy|overweight)\b',
+        # Stocks "making gains", "currently up", "rallies", "rises"
+        r'\b(?:stock|shares?)\b.{0,30}\b(?:making\s+gains|up\s+\d|rall(?:y|ies|ied)|ris(?:es?|ing)|climb)',
+        r'\b(?:defense|defence)\s+(?:stock|sector)\w*\b.{0,30}\b(?:gain|ris|up|rall|climb|surge)',
+        r'\bcurrently\s+up\b',
+        # War/conflict context → positive for defense stocks specifically
+        r'\b(?:war|strike|conflict|military)\b.{0,60}\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b',
+        r'\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b.{0,60}\b(?:war|strike|conflict|military)\b',
+        # Pentagon meetings, defense CEO meetings
+        r'\b(?:pentagon|defense\s+(?:chief|leader|ceo|secretary))\b.{0,40}\b(?:meet|discuss|plan|agree)',
+    ]
+
+    _VERY_NEGATIVE = [
+        r'\b(?:miss|misses|missed|fell\s+short)\b.{0,40}\b(?:earn|revenue|estimate|expect)',
+        r'\b(?:earn|revenue|profit)\b.{0,40}\b(?:miss|misses|missed|fell\s+short)',
+        r'\b(?:cut|lower|reduc|slash)\b.{0,30}\b(?:price\s+target|pt\b|target\s+price)',
+        r'\bprice\s+target\b.{0,30}\b(?:cut|lower|reduc|slash)',
+        r'\b(?:downgrad)\b.{0,30}\b(?:sell|underperform|underweight)',
+        r'\b(?:sell|underperform|underweight)\b.{0,30}\b(?:downgrad)',
+        r'\b(?:layoff|restructur|writedown|write-off|impairment)\b',
+        r'\bguidance\b.{0,30}\b(?:cut|lower|below|miss|weak)',
+    ]
+
+    _NEGATIVE = [
+        r'\b(?:bearish|negative\s+outlook|headwind)\b',
+        r'\b(?:downgrad)\b.{0,30}\b(?:hold|neutral)',
+        r'\b(?:sell\s+rating|maintains?\s+sell)',
+        r'\brisky\b.{0,20}\b(?:stock|invest|bet)',
+        r'\b(?:avoid|stay\s+away|cautious)\b.{0,30}\b(?:stock|share)',
+        r'\b(?:forget|avoid|abandon|dump|ditch)\b.{0,40}\b(?:gold|oil|silver|commodit)',
+        r'\b(?:gold|silver|oil)\b.{0,50}\b(?:not\s+worth|overvalued|bubble)',
+        r'\b(?:crypto|bitcoin|btc|digital\s+asset)\b.{0,70}\b(?:better|smarter|outperform|superior|replace)\b.{0,40}\b(?:gold|silver|hard\s+asset)',
+        r'\b(?:smarter|better)\b.{0,30}\b(?:bet|alternative|choice)\b.{0,30}\b(?:than\s+gold|than\s+oil|than\s+silver)',
+    ]
+
+    for pattern in _VERY_POSITIVE:
+        if re.search(pattern, combined):
+            return ("very positive", 0.90)
+    for pattern in _POSITIVE:
+        if re.search(pattern, combined):
+            return ("positive", 0.80)
+    for pattern in _VERY_NEGATIVE:
+        if re.search(pattern, combined):
+            return ("very negative", 0.90)
+    for pattern in _NEGATIVE:
+        if re.search(pattern, combined):
+            return ("negative", 0.80)
+
+    return None
+
+
+def _deterministic_macro_sentiment(title: str, content: str) -> tuple[str, float] | None:
+    """Rule-based macro sentiment for clear-cut cases."""
     combined = f"{title}. {content[:500]}".lower()
 
-    # --- NEGATIVE patterns (BAD for S&P 500) ---
+    _NEUTRAL_PATTERNS = [
+        r'\b(?:forced\s+steriliz|sterilisation|reparation[s]?\s+for|human\s+rights\s+court)',
+        r'\b(?:shootout|drug\s+bust|gang\s+warfare|human\s+trafficking|domestic\s+violence)\b',
+        r'\b(?:mayor|city\s+council|local\s+election|municipal)\b',
+        r'\b(?:drone|uav|unmanned)\b.{0,50}\b(?:fire|ignit|damage)\b.{0,50}\b(?:facilit|plant|pipeline|field)\b',
+        r'\b(?:ignit|set\s+fire|on\s+fire|fire\s+at)\b.{0,40}\b(?:oil|gas|fuel)\s+(?:facilit|plant|pipeline|field)\b',
+        r'\b(?:Cuba|Peru|Bolivia|Paraguay|Honduras|Nicaragua|Myanmar|Cambodia)\b.{0,80}\b(?:court|ruling|shootout|cartel|protest)\b',
+    ]
+
+    for pattern in _NEUTRAL_PATTERNS:
+        if re.search(pattern, combined):
+            return ("neutral", 0.85)
+
     _NEGATIVE_PATTERNS = [
-        # War and conflict
         r'\b(?:war|attack|strikes?|bomb(?:ing|ed)?|invasi(?:on|ng)|casualties|killed|missile)\b',
         r'\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b.*\b(?:war|attack|strike|conflict|bomb|military)\b',
         r'\b(?:war|attack|strike|conflict|bomb|military)\b.*\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b',
         r'\b(?:escalat|tension|threat)\b.*\b(?:military|nuclear|war)\b',
-        # Economic weakness
         r'\brecession\b',
         r'\bunemployment\s+(?:ris|jump|surg|spike)',
         r'\bweak\s+(?:gdp|economy|growth|jobs)',
-        # Inflation / rate hikes
         r'\b(?:rate\s+hike|hawkish|inflation\s+(?:ris|surg|spike|high))',
         r'\b(?:gas|oil|energy)\s+price[s]?\s+(?:ris|surg|jump|spike|higher|soar)',
-        # Trade war
         r'\b(?:tariff|trade\s+war|embargo)\b',
     ]
 
     for pattern in _NEGATIVE_PATTERNS:
         if re.search(pattern, combined):
-            logger.debug("Deterministic macro: NEGATIVE (matched '%s') for: '%s'", pattern[:40], title[:60])
             return ("negative", 0.85)
 
-    # --- POSITIVE patterns (GOOD for S&P 500) ---
     _POSITIVE_PATTERNS = [
         r'\b(?:rate\s+cut|dovish|stimulus|easing)\b',
         r'\b(?:strong\s+(?:gdp|jobs|growth|economy))\b',
@@ -464,44 +549,28 @@ def _deterministic_macro_sentiment(title: str, content: str) -> tuple[str, float
 
     for pattern in _POSITIVE_PATTERNS:
         if re.search(pattern, combined):
-            logger.debug("Deterministic macro: POSITIVE (matched '%s') for: '%s'", pattern[:40], title[:60])
             return ("positive", 0.85)
 
-    # No clear pattern — let LLM decide
     return None
 
 
 async def run_macro_sentiment(article_id: str, title: str, content: str, store_in_scores: bool = True) -> None:
-    """Run macro-level sentiment analysis with Western market bias.
-
-    Uses deterministic rules for clear-cut cases (war, rate changes, etc.)
-    and falls back to LLM for ambiguous articles. The 1B model is unreliable
-    at multi-rule classification, so deterministic rules handle the important cases.
-
-    Always stores the macro label on the article itself (for macro aggregate).
-    Only stores in sentiment_scores if store_in_scores=True (i.e. article has
-    no instrument-specific sentiment already stored).
-    """
-    # Try deterministic rules first
+    """Run macro-level sentiment analysis with Western market bias."""
     deterministic = _deterministic_macro_sentiment(title, content)
     if deterministic:
         sentiment_label, confidence = deterministic
         logger.info("Macro sentiment (deterministic) for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
     else:
-        # Fall back to LLM for ambiguous articles
         prompt = macro_sentiment_prompt(title, content)
-        sentiment_result = await generate_json(prompt, max_tokens=60)
+        sentiment_result = await generate_json(prompt, system=MACRO_SYSTEM, max_tokens=60)
 
         if sentiment_result:
             raw_label = sentiment_result.get("sentiment", "neutral").strip().lower().strip("<>")
             confidence = float(sentiment_result.get("confidence", 0.5))
-            logger.info("Macro raw LLM response: %s (raw_label='%s')", sentiment_result, raw_label)
-            # Map simplified GOOD/BAD/MIXED to standard labels
             _MACRO_LABEL_MAP = {
                 "good": "positive", "bad": "negative", "mixed": "neutral",
             }
             sentiment_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
-            # Normalize any non-standard labels
             valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
             if sentiment_label not in valid_labels:
                 sentiment_label = "neutral"
@@ -533,7 +602,6 @@ async def update_article_tags(
             {"id": article_id, "is_macro": is_macro, "is_asset": is_asset_specific},
         )
 
-        # Delete old instrument mappings before inserting fresh ones
         await session.execute(
             text("DELETE FROM news_instrument_map WHERE article_id = :aid"),
             {"aid": article_id},
@@ -627,22 +695,16 @@ async def delete_article(article_id: str) -> None:
 
 
 async def update_macro_sentiment() -> None:
-    """Calculate aggregate global macro sentiment from macro_sentiment_label on articles.
-
-    Uses the dedicated macro_sentiment_label column (set via macro_sentiment_prompt)
-    rather than sentiment_scores, so that dual articles (macro + instrument) contribute
-    their Western-market-biased macro sentiment, not their instrument-specific sentiment.
-    """
+    """Calculate aggregate global macro sentiment from macro_sentiment_label on articles."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
 
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT macro_sentiment_label
+                SELECT COALESCE(macro_sentiment_label, 'neutral') AS macro_sentiment_label
                 FROM news_articles
                 WHERE is_macro = true
                 AND ollama_processed = true
-                AND macro_sentiment_label IS NOT NULL
                 AND published_at >= :cutoff
                 ORDER BY published_at DESC
             """),
@@ -655,15 +717,13 @@ async def update_macro_sentiment() -> None:
 
         total_cnt = len(rows)
 
-        # Use median for robustness against outliers
-        scores = sorted(SENTIMENT_MULTIPLIERS.get(r.macro_sentiment_label, 0.0) for r in rows)
-        if total_cnt % 2 == 1:
-            net_score = scores[total_cnt // 2]
-        else:
-            net_score = (scores[total_cnt // 2 - 1] + scores[total_cnt // 2]) / 2
+        scores = [SENTIMENT_MULTIPLIERS.get(r.macro_sentiment_label, 0.0) for r in rows
+                  if r.macro_sentiment_label != "neutral"]
+        if not scores:
+            return
+        net_score = sum(scores) / len(scores)
         net_score = max(-1.0, min(1.0, net_score))
 
-        # Determine overall label
         if net_score > 0.25:
             label = "positive"
         elif net_score < -0.25:

@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "allow": ["Bash(docker *)", "Bash(docker-compose *)"],
+    "deny": ["Read(./.env)"]
+  }
+}

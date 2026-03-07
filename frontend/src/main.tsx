@@ -2,7 +2,8 @@
 
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { Provider as JotaiProvider } from "jotai";
+import { Provider as JotaiProvider, createStore } from "jotai";
+import { queryClientAtom } from "jotai-tanstack-query";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { _setWs, _resendSubscription } from "./ws";
@@ -24,6 +25,11 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// Share the same QueryClient between React Query context and Jotai atoms
+// so that WS setQueryData updates are visible to atomWithQuery consumers.
+const jotaiStore = createStore();
+jotaiStore.set(queryClientAtom, queryClient);
 
 // --- WebSocket connection ---
 
@@ -260,7 +266,7 @@ connectWS();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <JotaiProvider>
+      <JotaiProvider store={jotaiStore}>
         <App />
       </JotaiProvider>
     </QueryClientProvider>

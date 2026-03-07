@@ -88,7 +88,7 @@ async def get_macro_sentiment():
     sentiments = []
     for r in rows:
         raw_score = float(r.score)
-        confidence = min(1.0, r.article_count / 20)
+        confidence = min(1.0, r.article_count / 10)
         effective_score = round(raw_score * confidence, 4)
         # Derive label from effective score, not raw score
         if effective_score > 0.25:
@@ -123,11 +123,11 @@ async def get_macro_news(limit: int = 30):
             text("""
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
-                       a.macro_sentiment_label
+                       COALESCE(a.macro_sentiment_label, 'neutral') as macro_sentiment_label
                 FROM news_articles a
                 WHERE a.is_macro = true
                 AND a.ollama_processed = true
-                AND a.macro_sentiment_label IS NOT NULL
+                AND a.published_at >= NOW() - INTERVAL '72 hours'
                 ORDER BY a.published_at DESC
                 LIMIT :limit
             """),

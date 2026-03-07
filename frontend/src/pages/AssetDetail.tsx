@@ -11,6 +11,7 @@ import {
   instrumentGradesAtom,
   instrumentAIAnalysisAtom,
   instrumentIndependentAIAnalysisAtom,
+  macroSentimentAtom,
 } from "../atoms";
 import { fetchInstrument, fetchLivePrice, prioritizeInstrument } from "../api/client";
 import { wsSubscribe } from "../ws";
@@ -18,6 +19,7 @@ import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
 import TechnicalPanel from "../components/TechnicalPanel";
 import GradeDetail from "../components/GradeDetail";
+import MacroSentimentCard from "../components/MacroSentimentCard";
 import NewsFeed from "../components/NewsFeed";
 import AIAnalysisModal from "../components/AIAnalysisModal";
 import { PageSkeleton } from "../components/Skeletons";
@@ -58,6 +60,7 @@ export default function AssetDetail() {
   const [{ data: technical }] = useAtom(technicalAtom);
   const [{ data: news }] = useAtom(newsAtom);
   const [{ data: grades }] = useAtom(gradesAtom);
+  const [{ data: macroSentiments }] = useAtom(macroSentimentAtom);
   const [{ data: aiAnalysis, isFetching: aiLoading, refetch: fetchAI }] =
     useAtom(aiAtom);
   const [
@@ -204,6 +207,11 @@ export default function AssetDetail() {
       {/* Grades */}
       <div className="animate-slide-up" style={{ animationDelay: "100ms" }}>
         <GradeDetail shortGrade={shortGrade} longGrade={longGrade} />
+      </div>
+
+      {/* Macro Sentiment */}
+      <div className="animate-slide-up" style={{ animationDelay: "150ms" }}>
+        <MacroSentimentCard sentiments={macroSentiments || []} />
       </div>
 
       {/* Chart + Technicals */}

@@ -26,23 +26,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      - "11434:11434"
-    networks:
-      - internal
-      - egress
-    entrypoint: ["/bin/bash", "-c", "ollama serve & sleep 5 && ollama pull llama3.2:1b && wait"]
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: "4.0"
-
   news-fetcher:
     build:
       context: ./services/news-fetcher
@@ -76,17 +59,16 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: llama3.2:1b
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
+      CEREBRAS_MODEL: ${CEREBRAS_MODEL:-gpt-oss-120b}
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_started
     ports:
       - "8003:8003"
     networks:
       - internal
+      - egress
     read_only: true
     tmpfs:
       - /tmp
@@ -229,7 +211,6 @@ services:
 
 volumes:
   postgres-data:
-  ollama-models:
 
 networks:
   internal:

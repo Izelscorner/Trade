@@ -90,28 +90,21 @@ async def get_technical_score(instrument_id: str, lookback_days: int = 5) -> tup
     return round(avg, 4), details
 
 
-def _median(values: list[float]) -> float:
-    """Compute the median of a sorted list."""
-    n = len(values)
-    if n % 2 == 1:
-        return values[n // 2]
-    return (values[n // 2 - 1] + values[n // 2]) / 2
 
-
-def _confidence(article_count: int, full_confidence_at: int = 20) -> float:
+def _confidence(article_count: int, full_confidence_at: int = 10) -> float:
     """Confidence ramps from 0.0 to 1.0 based on article count.
 
-    At 5 articles: 0.25, at 10: 0.50, at 20+: 1.0.
+    At 5 articles: 0.50, at 10+: 1.0.
     """
     return min(1.0, article_count / full_confidence_at)
 
 
-async def get_sentiment_score(instrument_id: str, min_articles: int = 3) -> tuple[float, dict]:
+async def get_sentiment_score(instrument_id: str, min_articles: int = 1) -> tuple[float, dict]:
     """Get instrument-specific sentiment score from financial news (last 7 days).
 
-    Uses median of per-article scores, scaled by confidence (article count).
-    More articles = higher confidence = score closer to true median.
-    Fewer articles = lower confidence = score damped toward 0.
+    Uses mean of per-article scores, scaled by confidence (article count).
+    Mean correctly reflects the full distribution — median collapses to 0 when
+    neutral articles are the majority even if clear positive/negative signal exists.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
@@ -132,22 +125,28 @@ async def get_sentiment_score(instrument_id: str, min_articles: int = 3) -> tupl
         rows = result.fetchall()
 
         if len(rows) >= min_articles:
-            scores = sorted(SENTIMENT_MULTIPLIERS.get(r.label, 0.0) for r in rows)
-            n = len(scores)
-            median = _median(scores)
-            conf = _confidence(n)
-
-            # Scale median by confidence — fewer articles dampens toward neutral
-            effective = median * conf
-
             label_counts = {}
             for r in rows:
                 label_counts[r.label] = label_counts.get(r.label, 0) + 1
 
+            # Exclude neutral — they carry no directional signal
+            scored = [SENTIMENT_MULTIPLIERS.get(r.label, 0.0) for r in rows
+                      if r.label != "neutral"]
+            if not scored:
+                return 0.0, {"articles": len(rows), "labels": label_counts}
+
+            n = len(scored)
+            mean = sum(scored) / n
+            conf = _confidence(n)
+
+            # Scale mean by confidence — fewer articles dampens toward neutral
+            effective = mean * conf
+
             return round(max(-1.0, min(1.0, effective)), 4), {
-                "articles": n,
+                "articles": len(rows),
+                "scored": n,
                 "labels": label_counts,
-                "median": round(median, 4),
+                "mean": round(mean, 4),
                 "confidence": round(conf, 4),
             }
 

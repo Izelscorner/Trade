@@ -1,6 +1,6 @@
 /** WebSocket subscription manager — used by page components to declare their data needs. */
 
-export type WsPage = "dashboard" | "asset_detail" | "asset_list" | "news";
+export type WsPage = "dashboard" | "asset_detail" | "asset_list" | "portfolio" | "news";
 
 export interface WsSubscription {
   page: WsPage;

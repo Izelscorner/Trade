@@ -15,8 +15,10 @@ export default function Portfolio() {
   const { portfolioIds } = usePortfolio();
 
   useEffect(() => {
-    wsSubscribe({ page: "dashboard" });
-  }, []);
+    if (portfolioIds.length > 0) {
+      wsSubscribe({ page: "portfolio", instrument_ids: portfolioIds });
+    }
+  }, [portfolioIds]);
 
   if (isLoading) return <PageSkeleton />;
 

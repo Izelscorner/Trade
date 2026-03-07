@@ -116,20 +116,26 @@ async def grading_loop() -> None:
     last_check = datetime.now(timezone.utc)
     last_full_regrade = datetime.min.replace(tzinfo=timezone.utc)
 
-    # Initial full grading pass
+    async def grade_and_store(inst: dict, term: str) -> None:
+        try:
+            grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
+            if grade:
+                await store_grade(grade)
+                logger.info(
+                    "[%s] %s-term grade: %s (score=%.4f, tech=%.4f, sent=%.4f, macro=%.4f)",
+                    inst["symbol"], term, grade["overall_grade"], grade["overall_score"],
+                    grade["technical_score"], grade["sentiment_score"], grade["macro_score"],
+                )
+        except Exception:
+            logger.exception("[%s] Failed to grade (%s-term)", inst["symbol"], term)
+
+    # Initial full grading pass — all instruments graded concurrently
     logger.info("Running initial full grading pass...")
-    for inst in instruments:
-        for term in ("short", "long"):
-            try:
-                grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
-                if grade:
-                    await store_grade(grade)
-                    logger.info(
-                        "[%s] %s-term grade: %s (score=%.4f)",
-                        inst["symbol"], term, grade["overall_grade"], grade["overall_score"],
-                    )
-            except Exception:
-                logger.exception("[%s] Failed to grade (%s-term)", inst["symbol"], term)
+    await asyncio.gather(*[
+        grade_and_store(inst, term)
+        for inst in instruments
+        for term in ("short", "long")
+    ])
     last_full_regrade = datetime.now(timezone.utc)
     logger.info("Initial grading complete")
 
@@ -140,17 +146,14 @@ async def grading_loop() -> None:
             now = datetime.now(timezone.utc)
             time_since_full = (now - last_full_regrade).total_seconds()
 
-            # Periodic full regrade
+            # Periodic full regrade — all instruments concurrently
             if time_since_full >= FULL_REGRADE_INTERVAL:
                 instruments = await get_instruments()
-                for inst in instruments:
-                    for term in ("short", "long"):
-                        try:
-                            grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
-                            if grade:
-                                await store_grade(grade)
-                        except Exception:
-                            logger.exception("[%s] Failed to grade (%s-term)", inst["symbol"], term)
+                await asyncio.gather(*[
+                    grade_and_store(inst, term)
+                    for inst in instruments
+                    for term in ("short", "long")
+                ])
                 last_full_regrade = now
                 last_check = now
                 logger.info("Full regrade complete")
@@ -183,20 +186,11 @@ async def grading_loop() -> None:
             if not instruments_to_grade:
                 continue
 
-            for inst in instruments_to_grade:
-                for term in ("short", "long"):
-                    try:
-                        grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
-                        if grade:
-                            await store_grade(grade)
-                            logger.info(
-                                "[%s] %s-term regrade: %s (score=%.4f, tech=%.4f, sent=%.4f, macro=%.4f)",
-                                inst["symbol"], term, grade["overall_grade"],
-                                grade["overall_score"], grade["technical_score"],
-                                grade["sentiment_score"], grade["macro_score"],
-                            )
-                    except Exception:
-                        logger.exception("[%s] Failed to regrade (%s-term)", inst["symbol"], term)
+            await asyncio.gather(*[
+                grade_and_store(inst, term)
+                for inst in instruments_to_grade
+                for term in ("short", "long")
+            ])
 
         except Exception:
             logger.exception("Error in grading loop")
