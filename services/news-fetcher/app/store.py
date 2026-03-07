@@ -63,7 +63,7 @@ async def ensure_schema():
 async def upsert_articles(articles: list[dict]) -> int:
     """Insert articles, skipping duplicates, and map to an instrument if provided.
 
-    Articles are inserted with ollama_processed=false. The ollama-processor
+    Articles are inserted with ollama_processed=false. The llm-processor
     service will pick them up for classification and sentiment analysis.
     """
     if not articles:

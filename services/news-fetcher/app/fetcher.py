@@ -242,7 +242,7 @@ async def fetch_feed(url: str, source: str, category: str, instrument_id: str | 
             "asset_name": asset_name,
         })
 
-    # Scrape full article content in parallel for Ollama analysis
+    # Scrape full article content in parallel for LLM Processor analysis
     if articles:
         import asyncio as _asyncio
         try:

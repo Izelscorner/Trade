@@ -27,9 +27,9 @@ All services run as Docker containers orchestrated via Docker Compose.
 │  └──────────────┘    └──────────────┘    └──────────────────────────┘             │
 │                                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐                        │
-│  │ Ollama       │◄───│  Ollama      │    │  Grading     │                        │
-│  │ (Llama 3.2)  │    │  Processor   │    │  Service     │                        │
-│  │ :11434       │    │  :8003       │    │  (Python)    │                        │
+│  │ Cerebras AI  │◄───│  LLM         │    │  Grading     │                        │
+│  │ (Remote API) │    │  Processor   │    │  Service     │                        │
+│  │ cerebras.ai  │    │  :8003       │    │  (Python)    │                        │
 │  └──────────────┘    └──────────────┘    └──────────────┘                        │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -59,15 +59,7 @@ All services run as Docker containers orchestrated via Docker Compose.
 - **Deduplication:** `rapidfuzz` (C++ backend) for title/summary similarity checks (90%+ partial ratio).
 - **Content Scraping:** Fetches full article content from links with paywall detection and HTML sanitization.
 
-### 3. Ollama Service (LLM Runtime)
-
-- **Port:** 11434
-- **Image:** `ollama/ollama:latest`
-- **Model:** `llama3.2:1b` — pulled automatically on startup
-- **Purpose:** Serves the LLM for classification and sentiment analysis via HTTP API.
-- **Resources:** 4GB memory limit, 4 CPUs.
-
-### 4. Ollama Processor Service (Python/FastAPI)
+### 3. LLM Processor Service (Python/FastAPI)
 
 - **Port:** 8003
 - **Purpose:** Unified AI pipeline that replaces the old Relevance (DistilBERT) and Sentiment (FinBERT) services. Polls the database for unprocessed articles and runs them through Llama 3.2 1B for classification and contextual sentiment analysis.
@@ -82,6 +74,7 @@ All services run as Docker containers orchestrated via Docker Compose.
   3. **Contextual Sentiment Analysis** (per-instrument LLM call) — Role-based prompting (e.g., "You are a gold commodity trader") with chain-of-thought reasoning. Returns `{sentiment, confidence}`.
   4. **Macro Sentiment Aggregation** — After each batch, computes average sentiment from all macro articles (last 24h) and stores in `macro_sentiment` table with `region = 'global'`.
 - **Configuration:** Batch size 20, process interval 15s, temperature 0.0 (deterministic), JSON format mode enabled.
+- **Batch API Strategy:** Articles are grouped into sub-batches (10 for classify, 8 for sentiment, 8 for macro) and sent as a single Cerebras API prompt expecting a JSON array response — dramatically reducing API call frequency.
 - **Sentiment Labels:** very_positive, positive, neutral, negative, very_negative — mapped to probability distributions (positive/negative/neutral) for compatibility with the grading system.
 
 ### 5. Technical Analysis Service (Python/pandas)
@@ -131,7 +124,7 @@ All services run as Docker containers orchestrated via Docker Compose.
 The system operates as a **unidirectional predictive pipeline**:
 
 1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds, `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`.
-2. **AI Processing Layer:** `ollama-processor` polls for unprocessed articles, classifies them (spam/news, instruments, macro), runs contextual sentiment analysis via Llama 3.2 1B, and applies deterministic post-processing rules to correct LLM errors. Articles marked `ollama_processed = true`.
+2. **AI Processing Layer:** `llm-processor` polls for unprocessed articles, batch-classifies them (N articles → 1 Cerebras API call → JSON array), applies deterministic post-processing, and batch-scores sentiment per instrument. Articles marked `ollama_processed = true`.
 3. **Signal Layer:** `technical-analysis` computes trend/momentum/volatility indicators from price data.
 4. **Synthesis Layer:** `grading` combines sentiment, technical, and macro signals into weighted investment grades (A+ to F).
 5. **Presentation Layer:** `backend` API serves only processed/scored articles. `frontend` displays grades, news, and macro sentiment.
@@ -146,7 +139,7 @@ Trade/
 │   ├── postgres/                    # Database init scripts
 │   ├── backend/                     # FastAPI REST API + Gemini AI analysis
 │   ├── news-fetcher/                # RSS/search feed ingestion
-│   ├── ollama-processor/            # Unified AI classification + sentiment (Llama 3.2)
+│   ├── llm-processor/               # Unified AI classification + sentiment (Cerebras batch API)
 │   ├── technical-analysis/          # SMA/MACD/RSI computation
 │   ├── price-fetcher/               # yfinance live + historical prices
 │   └── grading/                     # Signal aggregation into grades
@@ -167,7 +160,7 @@ Trade/
 
 ## Key Technical Decisions
 
-- **Ollama + Llama 3.2 1B** for classification and sentiment — runs locally, no API keys, deterministic at temperature 0. Combined classification+tagging in one LLM call, contextual sentiment with role-based prompting per instrument.
+- **Cerebras AI** for classification and sentiment — remote API (gpt-oss-120b), no local GPU required, temperature 0. Batch processing: N articles per API call returning JSON arrays, drastically reducing API call frequency.
 - **Deterministic post-processing** — Regex rules override LLM classification errors (asset vs macro, instrument tagging validation). Necessary because a 1B model makes frequent classification mistakes.
 - **yfinance** for all market data (live + historical) — free, no API key required.
 - **Gemini API** for deep AI analysis — used only in backend for on-demand instrument analysis, not for batch processing.

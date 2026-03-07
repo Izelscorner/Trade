@@ -2,7 +2,7 @@
 
 Fetches macro news (markets, politics, conflict) and asset-specific news
 from Yahoo Finance and Google News. Articles are stored with
-ollama_processed=false and picked up by the ollama-processor service.
+ollama_processed=false and picked up by the llm-processor service.
 """
 
 import asyncio

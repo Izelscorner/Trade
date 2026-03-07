@@ -1,4 +1,11 @@
-"""Main processing pipeline: classifies and scores unprocessed news articles via Cerebras API."""
+"""Main processing pipeline: classifies and scores unprocessed news articles via Cerebras API.
+
+Batch processing strategy:
+  - Classification: N articles → 1 API call → JSON array of results
+  - Sentiment: group articles by first instrument → 1 API call per instrument bucket → JSON array
+  - Macro sentiment: N macro articles → 1 API call → JSON array of results
+This dramatically reduces the number of API calls to Cerebras.
+"""
 
 import asyncio
 import re
@@ -8,12 +15,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from .db import async_session
-from .cerebras_client import generate_json
+from .cerebras_client import generate_json, generate_json_array
 from .prompts import (
     CLASSIFY_SYSTEM,
     SENTIMENT_SYSTEM,
     MACRO_SYSTEM,
     classify_prompt,
+    batch_classify_prompt,
+    batch_sentiment_prompt,
+    batch_macro_sentiment_prompt,
     sentiment_prompt,
     macro_sentiment_prompt,
     build_instrument_context,
@@ -25,6 +35,20 @@ logger = logging.getLogger(__name__)
 
 PROCESS_INTERVAL = 15  # seconds between processing cycles
 BATCH_SIZE = 20
+
+# Sub-batch sizes for LLM calls (keep prompts from getting too long)
+CLASSIFY_BATCH = 8    # articles per classify API call
+SENTIMENT_BATCH = 6   # articles per sentiment API call (per instrument)
+MACRO_BATCH = 3       # macro articles per macro-sentiment API call (small = avoids truncation)
+
+# Token budgets per article (generous to avoid truncation → fallback burst)
+CLASSIFY_TOKENS_PER_ARTICLE = 130   # {"id","type","instruments","is_macro"} × N
+SENTIMENT_TOKENS_PER_ARTICLE = 55   # {"id","sentiment","confidence"} × N
+MACRO_TOKENS_PER_ARTICLE = 120      # generous: model uses verbose formatting (MIXED/BAD/GOOD + newlines)
+TOKENS_OVERHEAD = 150               # wrapper object + whitespace slack
+
+# Small sleep between consecutive sub-batch chunks to smooth rate-limit pressure
+INTER_CHUNK_DELAY = 1.0  # seconds
 
 # Map sentiment labels to probability distributions
 SENTIMENT_PROBABILITIES = {
@@ -277,6 +301,319 @@ async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Batch processing — the main public entry point
+# ---------------------------------------------------------------------------
+
+async def process_batch(
+    articles: list[dict],
+    instrument_ids: dict[str, str],
+    valid_symbols: set[str],
+    instruments: list[dict],
+    instruments_by_symbol: dict[str, dict],
+    symbol_mapping: str,
+    valid_symbols_str: str,
+    name_lookup: dict[str, list[str]],
+) -> None:
+    """Process a batch of articles with minimal API calls.
+
+    Steps:
+      1. Batch-classify all articles (1 call per CLASSIFY_BATCH articles)
+      2. Apply deterministic post-processing per article
+      3. Filter spam / irrelevant articles
+      4. Group remaining articles by first instrument, batch-sentiment per group
+      5. Batch macro-sentiment for all macro articles
+      6. Mark all articles processed
+    """
+    if not articles:
+        return
+
+    # --- Step 1: Batch classify ---
+    classify_results: dict[str, dict] = {}  # article_id -> classification
+    for chunk_start in range(0, len(articles), CLASSIFY_BATCH):
+        if chunk_start > 0:
+            await asyncio.sleep(INTER_CHUNK_DELAY)
+        chunk = articles[chunk_start:chunk_start + CLASSIFY_BATCH]
+        prompt = batch_classify_prompt(chunk, symbol_mapping, valid_symbols_str)
+        max_tok = CLASSIFY_TOKENS_PER_ARTICLE * len(chunk) + TOKENS_OVERHEAD
+        raw_results = await generate_json_array(
+            prompt, system=CLASSIFY_SYSTEM, max_tokens=max_tok
+        )
+        if raw_results is None:
+            # Fallback: try one-at-a-time for this chunk
+            logger.warning("Batch classify failed for chunk of %d, falling back to individual calls", len(chunk))
+            for art in chunk:
+                result = await _classify_single(art, symbol_mapping, valid_symbols_str)
+                if result:
+                    classify_results[art["id"]] = result
+        else:
+            for item in raw_results:
+                if isinstance(item, dict) and "id" in item:
+                    classify_results[item["id"]] = item
+            # Articles missing from response: retry individually
+            found_ids = {item["id"] for item in raw_results if isinstance(item, dict) and "id" in item}
+            for art in chunk:
+                if art["id"] not in found_ids:
+                    logger.warning("Article %s missing from batch classify response, retrying individually", art["id"])
+                    result = await _classify_single(art, symbol_mapping, valid_symbols_str)
+                    if result:
+                        classify_results[art["id"]] = result
+
+    # --- Step 2: Post-process classifications ---
+    article_map = {a["id"]: a for a in articles}
+
+    keep: list[dict] = []          # articles to run sentiment on
+    macro_articles: list[dict] = [] # macro articles needing macro-sentiment
+    to_delete: list[str] = []      # spam article IDs
+
+    for art in articles:
+        art_id = art["id"]
+        clf = classify_results.get(art_id)
+        if not clf:
+            logger.warning("No classification for article %s, skipping", art_id)
+            continue
+
+        article_type = clf.get("type", "spam")
+        raw_instruments = clf.get("instruments", [])
+        is_macro = clf.get("is_macro", False)
+
+        # Extract symbols
+        tagged_instruments = []
+        for inst in raw_instruments:
+            if isinstance(inst, dict):
+                for key in inst.keys():
+                    sym = key.strip().upper()
+                    if sym in valid_symbols:
+                        tagged_instruments.append(sym)
+            elif isinstance(inst, str):
+                symbol = inst.split(" ")[0].split("-")[0].strip().upper()
+                if symbol in valid_symbols:
+                    tagged_instruments.append(symbol)
+        tagged_instruments = list(dict.fromkeys(tagged_instruments))
+
+        if article_type == "spam":
+            logger.info("Filtered spam: '%s'", art["title"][:60])
+            to_delete.append(art_id)
+            continue
+
+        title = art["title"]
+        content = art["content"] or art["summary"]
+        source_category = art["category"]
+
+        tagged_instruments, is_macro = postprocess_classification(
+            title, content, source_category, tagged_instruments, is_macro,
+            valid_symbols, name_lookup, instruments,
+        )
+
+        if not is_macro and not tagged_instruments:
+            logger.info("Filtered irrelevant: '%s'", title[:60])
+            to_delete.append(art_id)
+            continue
+
+        # Store article state for later steps
+        art["_tagged"] = tagged_instruments
+        art["_is_macro"] = is_macro
+        keep.append(art)
+
+        if is_macro:
+            macro_articles.append(art)
+
+        # Update DB flags + instrument map
+        await update_article_tags(art_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids)
+
+    # --- Step 3: Delete spam/irrelevant ---
+    for art_id in to_delete:
+        await delete_article(art_id)
+
+    if not keep:
+        return
+
+    # --- Step 4: Batch sentiment by instrument group ---
+    # Build per-instrument buckets (keyed by first tagged instrument symbol)
+    instrument_buckets: dict[str, list[dict]] = {}
+    no_instrument_articles: list[dict] = []
+
+    for art in keep:
+        tagged = art.get("_tagged", [])
+        if tagged:
+            bucket_key = tagged[0]
+            instrument_buckets.setdefault(bucket_key, []).append(art)
+        else:
+            no_instrument_articles.append(art)
+
+    sentiment_stored: dict[str, bool] = {art["id"]: False for art in keep}
+
+    for symbol, bucket in instrument_buckets.items():
+        inst = instruments_by_symbol.get(symbol, {})
+
+        # First pass: deterministic sentiment
+        needs_llm = []
+        for art in bucket:
+            det = _deterministic_instrument_sentiment(
+                art["title"], art["content"] or art["summary"],
+                inst.get("category", "stock")
+            )
+            if det:
+                s_label, s_conf = det
+                await store_sentiment(art["id"], s_label, s_conf)
+                logger.info("Sentiment (det) %s on '%s': %s", symbol, art["title"][:40], s_label)
+                sentiment_stored[art["id"]] = True
+            else:
+                needs_llm.append(art)
+
+        if not needs_llm:
+            continue
+
+        # Second pass: batch LLM sentiment
+        role = get_role(inst) if inst else f"You predict {symbol} price direction."
+        asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
+
+        for chunk_start in range(0, len(needs_llm), SENTIMENT_BATCH):
+            if chunk_start > 0:
+                await asyncio.sleep(INTER_CHUNK_DELAY)
+            chunk = needs_llm[chunk_start:chunk_start + SENTIMENT_BATCH]
+            prompt = batch_sentiment_prompt(chunk, role, asset_desc)
+            max_tok = SENTIMENT_TOKENS_PER_ARTICLE * len(chunk) + TOKENS_OVERHEAD
+            raw_results = await generate_json_array(
+                prompt, system=SENTIMENT_SYSTEM, max_tokens=max_tok
+            )
+            if raw_results is None:
+                # Fallback: individual calls
+                logger.warning("Batch sentiment failed for %s chunk of %d", symbol, len(chunk))
+                for art in chunk:
+                    result = await _sentiment_single(art, role, asset_desc)
+                    if result:
+                        await store_sentiment(art["id"], result.get("sentiment", "neutral"),
+                                              float(result.get("confidence", 0.5)))
+                        sentiment_stored[art["id"]] = True
+            else:
+                result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
+                for art in chunk:
+                    item = result_map.get(art["id"])
+                    if item:
+                        s_label = item.get("sentiment", "neutral")
+                        s_conf = float(item.get("confidence", 0.5))
+                        await store_sentiment(art["id"], s_label, s_conf)
+                        logger.info("Sentiment (batch) %s on '%s': %s (%.2f)", symbol, art["title"][:40], s_label, s_conf)
+                        sentiment_stored[art["id"]] = True
+                    else:
+                        # Missing from batch response — fallback
+                        result = await _sentiment_single(art, role, asset_desc)
+                        if result:
+                            await store_sentiment(art["id"], result.get("sentiment", "neutral"),
+                                                  float(result.get("confidence", 0.5)))
+                            sentiment_stored[art["id"]] = True
+
+    # --- Step 5: Batch macro sentiment ---
+    if macro_articles:
+        for chunk_start in range(0, len(macro_articles), MACRO_BATCH):
+            chunk = macro_articles[chunk_start:chunk_start + MACRO_BATCH]
+            await _run_batch_macro_sentiment(chunk, sentiment_stored)
+
+    # --- Step 6: Mark processed ---
+    for art in keep:
+        art_id = art["id"]
+        is_macro = art.get("_is_macro", False)
+        stored = sentiment_stored.get(art_id, False)
+
+        if not stored and not is_macro:
+            logger.warning("No sentiment for '%s' — skipping mark processed", art["title"][:60])
+            continue
+
+        await mark_processed(art_id)
+        logger.info("Processed: '%s' (instruments=%s, macro=%s)",
+                    art["title"][:60], art.get("_tagged", []), is_macro)
+
+
+async def _classify_single(article: dict, symbol_mapping: str, valid_symbols_str: str) -> dict | None:
+    """Fallback: classify a single article with the old single-call approach."""
+    title = article["title"]
+    content = article["content"] or article["summary"]
+    prompt = classify_prompt(title, content, symbol_mapping, valid_symbols_str)
+    result = await generate_json(prompt, system=CLASSIFY_SYSTEM, max_tokens=300)
+    if result:
+        result["id"] = article["id"]
+    return result
+
+
+async def _sentiment_single(article: dict, role: str, asset_desc: str) -> dict | None:
+    """Fallback: sentiment for a single article."""
+    title = article["title"]
+    content = article["content"] or article["summary"]
+    prompt = sentiment_prompt(title, content, role, asset_desc)
+    result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+    if not result:
+        result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+    return result
+
+
+async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dict[str, bool]) -> None:
+    """Run macro sentiment in batch; fall back to deterministic + then individual LLM."""
+    # First pass: deterministic
+    needs_llm = []
+    for art in articles:
+        det = _deterministic_macro_sentiment(art["title"], art["content"] or art["summary"])
+        if det:
+            s_label, s_conf = det
+            logger.info("Macro (det) '%s': %s", art["title"][:40], s_label)
+            store_in_scores = not sentiment_stored.get(art["id"], False)
+            if store_in_scores:
+                await store_sentiment(art["id"], s_label, s_conf)
+                sentiment_stored[art["id"]] = True
+            await store_macro_label(art["id"], s_label)
+        else:
+            needs_llm.append(art)
+
+    if not needs_llm:
+        return
+
+    # Second pass: batch LLM
+    prompt = batch_macro_sentiment_prompt(needs_llm)
+    max_tok = MACRO_TOKENS_PER_ARTICLE * len(needs_llm) + TOKENS_OVERHEAD
+    raw_results = await generate_json_array(
+        prompt, system=MACRO_SYSTEM, max_tokens=max_tok
+    )
+
+    _MACRO_LABEL_MAP = {"good": "positive", "bad": "negative", "mixed": "neutral", "GOOD": "positive", "BAD": "negative", "MIXED": "neutral"}
+    valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
+
+    if raw_results is not None:
+        result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
+        for art in needs_llm:
+            item = result_map.get(art["id"])
+            if item:
+                raw_label = item.get("sentiment", "neutral").strip().lower().strip("<>")
+                confidence = float(item.get("confidence", 0.5))
+                s_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
+                if s_label not in valid_labels:
+                    s_label = "neutral"
+                logger.info("Macro (batch) '%s': %s (%.2f)", art["title"][:40], s_label, confidence)
+                store_in_scores = not sentiment_stored.get(art["id"], False)
+                if store_in_scores:
+                    await store_sentiment(art["id"], s_label, confidence)
+                    sentiment_stored[art["id"]] = True
+                await store_macro_label(art["id"], s_label)
+            else:
+                # fallback individual
+                await run_macro_sentiment(
+                    art["id"], art["title"], art["content"] or art["summary"],
+                    store_in_scores=not sentiment_stored.get(art["id"], False)
+                )
+                sentiment_stored[art["id"]] = True
+    else:
+        # Batch failed — fallback individual
+        for art in needs_llm:
+            await run_macro_sentiment(
+                art["id"], art["title"], art["content"] or art["summary"],
+                store_in_scores=not sentiment_stored.get(art["id"], False)
+            )
+            sentiment_stored[art["id"]] = True
+
+
+# ---------------------------------------------------------------------------
+# Legacy per-article entrypoint (kept for backward compat / fallback)
+# ---------------------------------------------------------------------------
+
 async def process_article(
     article: dict,
     instrument_ids: dict[str, str],
@@ -287,114 +624,12 @@ async def process_article(
     valid_symbols_str: str,
     name_lookup: dict[str, list[str]],
 ) -> None:
-    """Process a single article through the Cerebras pipeline.
-
-    1. Classify + tag instruments (single LLM call)
-    2. Apply deterministic post-processing rules
-    3. If relevant: run contextual sentiment analysis
-    4. Mark as processed
-    """
-    article_id = article["id"]
-    title = article["title"]
-    content = article["content"] or article["summary"]
-    source_category = article["category"]
-
-    # Step 1: Classify + tag via LLM
-    prompt = classify_prompt(title, content, symbol_mapping, valid_symbols_str)
-    classification = await generate_json(prompt, system=CLASSIFY_SYSTEM, max_tokens=300)
-
-    if not classification:
-        logger.warning("Failed to classify article %s: '%s', skipping for retry", article_id, title[:60])
-        return
-
-    article_type = classification.get("type", "spam")
-    raw_instruments = classification.get("instruments", [])
-    is_macro = classification.get("is_macro", False)
-
-    # Extract symbols from LLM output
-    tagged_instruments = []
-    for inst in raw_instruments:
-        if isinstance(inst, dict):
-            for key in inst.keys():
-                sym = key.strip().upper()
-                if sym in valid_symbols:
-                    tagged_instruments.append(sym)
-        elif isinstance(inst, str):
-            symbol = inst.split(" ")[0].split("-")[0].strip().upper()
-            if symbol in valid_symbols:
-                tagged_instruments.append(symbol)
-    tagged_instruments = list(dict.fromkeys(tagged_instruments))
-
-    # Handle spam
-    if article_type == "spam":
-        logger.info("Filtered spam article: '%s'", title[:60])
-        await delete_article(article_id)
-        return
-
-    # Step 2: Apply deterministic post-processing
-    tagged_instruments, is_macro = postprocess_classification(
-        title, content, source_category, tagged_instruments, is_macro,
-        valid_symbols, name_lookup, instruments,
+    """Process a single article (fallback — use process_batch instead)."""
+    await process_batch(
+        [article],
+        instrument_ids, valid_symbols, instruments, instruments_by_symbol,
+        symbol_mapping, valid_symbols_str, name_lookup,
     )
-
-    # If neither macro nor instrument-related, filter out
-    if not is_macro and not tagged_instruments:
-        logger.info("Filtered irrelevant article: '%s'", title[:60])
-        await delete_article(article_id)
-        return
-
-    # Step 3: Update article flags and instrument mappings
-    await update_article_tags(article_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids)
-
-    # Step 4: Contextual sentiment analysis
-    sentiment_stored = False
-    if tagged_instruments:
-        first_symbol = tagged_instruments[0]
-        first_inst = instruments_by_symbol.get(first_symbol, {})
-
-        # Try deterministic rules first
-        deterministic_sent = _deterministic_instrument_sentiment(
-            title, content, first_inst.get("category", "stock")
-        )
-        if deterministic_sent:
-            sentiment_label, confidence = deterministic_sent
-            await store_sentiment(article_id, sentiment_label, confidence)
-            logger.info("Sentiment (deterministic) for %s on '%s': %s (conf=%.2f)",
-                       first_symbol, title[:40], sentiment_label, confidence)
-            sentiment_stored = True
-        else:
-            # Use Cerebras for sentiment
-            for symbol in tagged_instruments:
-                inst = instruments_by_symbol.get(symbol, {})
-                role = get_role(inst) if inst else f"You predict {symbol} price direction."
-                asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
-                prompt = sentiment_prompt(title, content, role, asset_desc)
-
-                # Try up to 2 times (rate limits can cause first attempt to fail)
-                sentiment_result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
-                if not sentiment_result:
-                    await asyncio.sleep(2)
-                    sentiment_result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
-
-                if sentiment_result:
-                    sentiment_label = sentiment_result.get("sentiment", "neutral")
-                    confidence = float(sentiment_result.get("confidence", 0.5))
-                    await store_sentiment(article_id, sentiment_label, confidence)
-                    logger.info("Sentiment for %s on '%s': %s (conf=%.2f)",
-                               symbol, title[:40], sentiment_label, confidence)
-                    sentiment_stored = True
-                    break
-
-    if is_macro:
-        await run_macro_sentiment(article_id, title, content, store_in_scores=not sentiment_stored)
-
-    if not sentiment_stored and not is_macro:
-        logger.warning("No sentiment stored for '%s' — leaving unprocessed for retry", title[:60])
-        return
-
-    # Step 5: Mark as processed and clear content
-    await mark_processed(article_id)
-    logger.info("Processed article: '%s' (instruments=%s, macro=%s)", title[:60], tagged_instruments, is_macro)
 
 
 def _deterministic_instrument_sentiment(title: str, content: str, category: str) -> tuple[str, float] | None:
@@ -429,7 +664,6 @@ def _deterministic_instrument_sentiment(title: str, content: str, category: str)
         r'\b(?:revenue|profit|earn|backlog|sales)\b.{0,30}\brecord\b',
         r'\bstrong\s+(?:earn|revenue|result|guidance|demand)\b',
         r'\bmark\s+your\s+calendar',
-        # Large orders: "$X billion order", "$X.XB deal"
         r'\$\d+(?:\.\d+)?\s*(?:billion|B)\b.{0,30}\b(?:order|deal|contract|program)',
     ]
 
@@ -444,24 +678,17 @@ def _deterministic_instrument_sentiment(title: str, content: str, category: str)
         r'\b(?:dividend\s+(?:increas|grow|hike)|special\s+dividend)\b',
         r'\bshare\s+(?:buyback|repurchase)\b',
         r'\b(?:trump|president|pentagon|government)\b.{0,60}\b(?:defense|weapons?|military)\b.{0,40}\b(?:expand|produc|spend|fund|increas)\b',
-        # Bullish analyst conviction: "best stock to own/buy", "top pick", "must own"
         r'\b(?:best|top|number.one|#1|must.own|must.buy)\b.{0,30}\b(?:stock|pick|investment|buy)\b',
-        # Undervaluation signals: "still cheap", "undervalued", "bargain", "discount"
         r'\b(?:still\s+cheap|undervalued|bargain|trading\s+at\s+a\s+discount|too\s+cheap)\b',
-        # Surge/rally/soar language about a specific stock
         r'\b(?:stock|share|price)\b.{0,30}\b(?:surge|soar|rocket|skyrocket|moon)\b',
         r'\b(?:surge|soar|rocket|skyrocket)\b.{0,30}\b(?:stock|share|price)\b',
-        # Analyst reiterates/maintains with positive context (order, growth, beat)
         r'\breiterates?\b.{0,30}\b(?:stock|rating)\b',
         r'\breiterates?\b.{0,20}\b(?:outperform|buy|overweight)\b',
-        # Stocks "making gains", "currently up", "rallies", "rises"
         r'\b(?:stock|shares?)\b.{0,30}\b(?:making\s+gains|up\s+\d|rall(?:y|ies|ied)|ris(?:es?|ing)|climb)',
         r'\b(?:defense|defence)\s+(?:stock|sector)\w*\b.{0,30}\b(?:gain|ris|up|rall|climb|surge)',
         r'\bcurrently\s+up\b',
-        # War/conflict context → positive for defense stocks specifically
         r'\b(?:war|strike|conflict|military)\b.{0,60}\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b',
         r'\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b.{0,60}\b(?:war|strike|conflict|military)\b',
-        # Pentagon meetings, defense CEO meetings
         r'\b(?:pentagon|defense\s+(?:chief|leader|ceo|secretary))\b.{0,40}\b(?:meet|discuss|plan|agree)',
     ]
 

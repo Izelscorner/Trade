@@ -1,7 +1,7 @@
-"""Cerebras Processor Service - classifies and scores news articles using Cerebras API.
+"""LLM Processor Service - classifies and scores news articles using Cerebras API.
 
-Replaces the old Ollama-based processor with a remote Cerebras API call
-for much faster throughput and better model quality.
+Uses batch API calls: N articles → 1 Cerebras request → JSON array of results,
+dramatically reducing API call frequency.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from .cerebras_client import check_health, close_client
 from .processor import (
     get_unprocessed_articles,
     get_instruments,
-    process_article,
+    process_batch,
     update_macro_sentiment,
     cleanup_priority,
     build_name_lookup,
@@ -29,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("ollama-processor")
+logger = logging.getLogger("llm-processor")
 
 
 async def wait_for_cerebras(max_retries: int = 30, delay: int = 5) -> bool:
@@ -79,7 +79,7 @@ async def macro_sentiment_loop() -> None:
 
 
 async def process_loop() -> None:
-    """Main processing loop - picks up unprocessed articles and runs them through Cerebras."""
+    """Main processing loop - picks up unprocessed articles and runs them through Cerebras in batches."""
     await ensure_schema()
 
     if not await wait_for_cerebras():
@@ -99,17 +99,6 @@ async def process_loop() -> None:
 
     logger.info("Loaded %d instruments: %s", len(instruments), ", ".join(sorted(valid_symbols)))
 
-    # Limit parallel Cerebras requests to avoid rate limiting (free tier)
-    sem = asyncio.Semaphore(2)
-
-    async def process_with_semaphore(article: dict) -> None:
-        async with sem:
-            await process_article(
-                article, instrument_ids, valid_symbols,
-                instruments, instruments_by_symbol,
-                symbol_mapping, valid_symbols_str, name_lookup,
-            )
-
     while True:
         try:
             refresh_counter += 1
@@ -125,22 +114,19 @@ async def process_loop() -> None:
             articles = await get_unprocessed_articles()
 
             if articles:
-                logger.info("Processing %d unprocessed articles...", len(articles))
-
-                results = await asyncio.gather(
-                    *[process_with_semaphore(a) for a in articles],
-                    return_exceptions=True,
-                )
-
-                failures = [r for r in results if isinstance(r, Exception)]
-                for exc in failures:
-                    logger.exception("Failed to process article: %s", exc)
-
-                if len(failures) >= 3:
-                    logger.warning("Multiple failures in batch, API may be down. Backing off...")
-                    await asyncio.sleep(30)
+                logger.info("Batch-processing %d articles...", len(articles))
+                try:
+                    await process_batch(
+                        articles,
+                        instrument_ids, valid_symbols, instruments, instruments_by_symbol,
+                        symbol_mapping, valid_symbols_str, name_lookup,
+                    )
+                except Exception:
+                    logger.exception("Error in process_batch")
+                    # Check if API is still healthy
                     if not await check_health():
-                        logger.warning("Cerebras API not healthy, waiting for recovery...")
+                        logger.warning("Cerebras API not healthy after batch error, backing off 30s...")
+                        await asyncio.sleep(30)
                         await wait_for_cerebras(max_retries=12, delay=10)
 
                 await cleanup_priority()
@@ -158,7 +144,7 @@ async def process_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Cerebras Processor Service starting...")
+    logger.info("LLM Processor Service starting...")
     process_task = asyncio.create_task(process_loop())
     macro_task = asyncio.create_task(macro_sentiment_loop())
     yield
@@ -172,7 +158,7 @@ async def lifespan(app: FastAPI):
     await close_client()
 
 
-app = FastAPI(title="Cerebras Processor Service", lifespan=lifespan)
+app = FastAPI(title="LLM Processor Service", lifespan=lifespan)
 
 
 @app.get("/health")

@@ -52,9 +52,9 @@ services:
           memory: 512M
           cpus: "1.0"
 
-  ollama-processor:
+  llm-processor:
     build:
-      context: ./services/ollama-processor
+      context: ./services/llm-processor
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:

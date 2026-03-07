@@ -21,7 +21,7 @@ async def list_news(
 
     Filter by category (macro_markets, macro_politics, macro_conflict, asset_specific)
     or by instrument_id for mapped articles.
-    Only returns articles that have been processed by Ollama.
+    Only returns articles that have been processed by the LLM Processor.
     """
     params: dict = {"limit": min(limit, 200)}
 
