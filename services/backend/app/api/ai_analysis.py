@@ -4,23 +4,30 @@ import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
-import google.generativeai as genai
+import httpx
 
 from ..core.db import async_session
 from ..schemas import APIResponse
 
 router = APIRouter()
 
-# Configure Gemini
-api_key = os.getenv("GEMINI_API_KEY")
-if api_key:
-    genai.configure(api_key=api_key)
+# Route requests through the internal LLM processor proxy to share the 40 RPM global lock
+LLM_PROCESSOR_URL = "http://llm-processor:8003/v1/chat/completions"
+
+async def _call_llm_proxy(messages: list[dict], max_tokens: int = 2000) -> str:
+    """Call the internal LLM Processor proxy to get AI completions."""
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            LLM_PROCESSOR_URL,
+            json={"messages": messages, "max_tokens": max_tokens}
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("content", "")
 
 @router.get("/{instrument_id}", response_model=APIResponse)
 async def get_ai_analysis(instrument_id: str):
-    """Generate a deep AI analysis for an instrument using Gemini."""
-    if not api_key:
-        return APIResponse(error="Gemini API key not configured", timestamp=datetime.now(timezone.utc))
+    """Generate a deep AI analysis for an instrument using the NVIDIA API."""
 
     async with async_session() as session:
         # 1. Get Instrument Info
@@ -116,9 +123,11 @@ Format the output in clean Markdown.
 """
 
     try:
-        model = genai.GenerativeModel('gemini-flash-latest')
-        response = model.generate_content(prompt)
-        analysis_text = response.text
+        messages = [
+            {"role": "system", "content": "You are a senior quantitative analyst and portfolio manager at a top-tier Western investment bank. You provide crisp, actionable, and deeply analytical investment advice."},
+            {"role": "user", "content": prompt}
+        ]
+        analysis_text = await _call_llm_proxy(messages, max_tokens=2000)
         
         return APIResponse(
             data={"analysis": analysis_text},
@@ -126,14 +135,12 @@ Format the output in clean Markdown.
         )
     except Exception as e:
         return APIResponse(
-            error=f"Gemini Analysis Error: {str(e)}",
+            error=f"NVIDIA Analysis Error: {str(e)}",
             timestamp=datetime.now(timezone.utc)
         )
 @router.get("/independent/{instrument_id}", response_model=APIResponse)
 async def get_independent_ai_analysis(instrument_id: str):
-    """Generate an independent AI analysis for an instrument using Gemini's knowledge."""
-    if not api_key:
-        return APIResponse(error="Gemini API key not configured", timestamp=datetime.now(timezone.utc))
+    """Generate an independent AI analysis for an instrument using the NVIDIA API's knowledge base."""
 
     async with async_session() as session:
         res = await session.execute(
@@ -147,9 +154,11 @@ async def get_independent_ai_analysis(instrument_id: str):
     prompt = f"Deeply analyze {instrument.name} ({instrument.symbol}) asset for long term and short term investment."
 
     try:
-        model = genai.GenerativeModel('gemini-flash-latest')
-        response = model.generate_content(prompt)
-        analysis_text = response.text
+        messages = [
+            {"role": "system", "content": "You are a senior quantitative analyst. You provide detailed investment dossiers based purely on your fundamental knowledge of global assets."},
+            {"role": "user", "content": prompt}
+        ]
+        analysis_text = await _call_llm_proxy(messages, max_tokens=2000)
         
         return APIResponse(
             data={"analysis": analysis_text},
@@ -157,6 +166,6 @@ async def get_independent_ai_analysis(instrument_id: str):
         )
     except Exception as e:
         return APIResponse(
-            error=f"Gemini Independent Analysis Error: {str(e)}",
+            error=f"NVIDIA Independent Analysis Error: {str(e)}",
             timestamp=datetime.now(timezone.utc)
         )

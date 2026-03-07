@@ -23,14 +23,14 @@ NIM_MODEL = os.getenv("NIM_MODEL", "qwen/qwen3.5-122b-a10b")
 NIM_API_KEY = os.getenv("NIM_API_KEY", "not-needed")
 
 # Rate limiter - NVIDIA Hosted API limits us to 40 requests/minute.
-# We enforce a strict 1.5 second delay between any two outgoing requests globally.
-CONCURRENCY_LIMIT = int(os.getenv("NIM_CONCURRENCY", "4"))
+# We enforce a strict 2.0 second delay between any two outgoing requests globally.
+CONCURRENCY_LIMIT = int(os.getenv("NIM_CONCURRENCY", "1"))
 _semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
 # Global rate limit state
 _rate_limit_lock = asyncio.Lock()
 _last_request_time = 0.0
-RATE_LIMIT_DELAY = 1.5  # seconds (=> max 40 requests / 60 seconds)
+RATE_LIMIT_DELAY = 2.0  # seconds (=> max 30 requests / 60 seconds)
 
 _client: AsyncOpenAI | None = None
 
@@ -41,7 +41,7 @@ def get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             base_url=NIM_BASE_URL,
             api_key=NIM_API_KEY,
-            max_retries=3,
+            max_retries=0,
         )
     return _client
 
@@ -67,7 +67,8 @@ async def _enforce_rate_limit():
 async def _call_with_retry(
     messages: list[dict],
     max_tokens: int,
-    max_attempts: int = 3,
+    max_attempts: int = 4,
+    response_format: dict | None = {"type": "json_object"}
 ) -> str | None:
     """Fire a chat completion to NVIDIA NIM."""
     client = get_client()
@@ -82,13 +83,13 @@ async def _call_with_retry(
                     max_completion_tokens=max_tokens,
                     temperature=0.0,
                     # NIM supports json_object if the model is capable
-                    response_format={"type": "json_object"},
+                    response_format=response_format,
                 )
                 return response.choices[0].message.content or ""
 
             except APIStatusError as exc:
-                if exc.status_code >= 500:
-                    wait = 2.0 * (2 ** attempt)
+                if exc.status_code >= 500 or exc.status_code == 429:
+                    wait = 5.0 * (2 ** attempt)
                     logger.warning(
                         "NIM %d on attempt %d/%d — sleeping %.1fs",
                         exc.status_code, attempt + 1, max_attempts, wait,
@@ -101,7 +102,7 @@ async def _call_with_retry(
             except Exception:
                 logger.exception("NIM API call failed (attempt %d/%d)", attempt + 1, max_attempts)
                 if attempt < max_attempts - 1:
-                    await asyncio.sleep(2.0 * (2 ** attempt))
+                    await asyncio.sleep(5.0 * (2 ** attempt))
 
     logger.error("NIM API failed after %d attempts", max_attempts)
     return None

@@ -168,7 +168,9 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      NIM_BASE_URL: https://integrate.api.nvidia.com/v1
+      NIM_MODEL: qwen/qwen3.5-122b-a10b
+      NIM_API_KEY: ${NIM_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy

@@ -11,9 +11,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from sqlalchemy import text
+from pydantic import BaseModel
+from typing import Optional
 
 from .db import async_session
-from .nim_client import check_health, close_client
+from .nim_client import check_health, close_client, _call_with_retry
 from .processor import (
     get_unprocessed_articles,
     get_instruments,
@@ -165,3 +167,19 @@ app = FastAPI(title="LLM Processor Service", lifespan=lifespan)
 async def health():
     nim_ready = await check_health()
     return {"status": "ok" if nim_ready else "waiting_for_nim", "nim": nim_ready}
+
+
+class ChatRequest(BaseModel):
+    messages: list[dict]
+    max_tokens: int = 2000
+
+@app.post("/v1/chat/completions")
+async def chat_completions_proxy(req: ChatRequest):
+    """Internal proxy to share the global API rate limiter."""
+    content = await _call_with_retry(
+        messages=req.messages,
+        max_tokens=req.max_tokens,
+        max_attempts=4,
+        response_format=None
+    )
+    return {"content": content}
