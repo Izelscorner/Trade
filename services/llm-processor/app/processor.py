@@ -1,10 +1,8 @@
-"""Main processing pipeline: classifies and scores unprocessed news articles via Cerebras API.
-
-Batch processing strategy:
+"""Batch processing strategy:
   - Classification: N articles → 1 API call → JSON array of results
   - Sentiment: group articles by first instrument → 1 API call per instrument bucket → JSON array
   - Macro sentiment: N macro articles → 1 API call → JSON array of results
-This dramatically reduces the number of API calls to Cerebras.
+This dramatically reduces the number of API calls to NVIDIA NIM.
 """
 
 import asyncio
@@ -15,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from .db import async_session
-from .cerebras_client import generate_json, generate_json_array
+from .nim_client import generate_json, generate_json_array
 from .prompts import (
     CLASSIFY_SYSTEM,
     SENTIMENT_SYSTEM,
@@ -446,23 +444,8 @@ async def process_batch(
     for symbol, bucket in instrument_buckets.items():
         inst = instruments_by_symbol.get(symbol, {})
 
-        # First pass: deterministic sentiment
-        needs_llm = []
-        for art in bucket:
-            det = _deterministic_instrument_sentiment(
-                art["title"], art["content"] or art["summary"],
-                inst.get("category", "stock")
-            )
-            if det:
-                s_label, s_conf = det
-                await store_sentiment(art["id"], s_label, s_conf)
-                logger.info("Sentiment (det) %s on '%s': %s", symbol, art["title"][:40], s_label)
-                sentiment_stored[art["id"]] = True
-            else:
-                needs_llm.append(art)
-
-        if not needs_llm:
-            continue
+        # Bypass deterministic pass - fully rely on LLM
+        needs_llm = bucket
 
         # Second pass: batch LLM sentiment
         role = get_role(inst) if inst else f"You predict {symbol} price direction."
@@ -549,23 +532,8 @@ async def _sentiment_single(article: dict, role: str, asset_desc: str) -> dict |
 
 async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dict[str, bool]) -> None:
     """Run macro sentiment in batch; fall back to deterministic + then individual LLM."""
-    # First pass: deterministic
-    needs_llm = []
-    for art in articles:
-        det = _deterministic_macro_sentiment(art["title"], art["content"] or art["summary"])
-        if det:
-            s_label, s_conf = det
-            logger.info("Macro (det) '%s': %s", art["title"][:40], s_label)
-            store_in_scores = not sentiment_stored.get(art["id"], False)
-            if store_in_scores:
-                await store_sentiment(art["id"], s_label, s_conf)
-                sentiment_stored[art["id"]] = True
-            await store_macro_label(art["id"], s_label)
-        else:
-            needs_llm.append(art)
-
-    if not needs_llm:
-        return
+    # Fully rely on LLM for macro sentiment batch
+    needs_llm = articles
 
     # Second pass: batch LLM
     prompt = batch_macro_sentiment_prompt(needs_llm)
@@ -574,7 +542,13 @@ async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dic
         prompt, system=MACRO_SYSTEM, max_tokens=max_tok
     )
 
-    _MACRO_LABEL_MAP = {"good": "positive", "bad": "negative", "mixed": "neutral", "GOOD": "positive", "BAD": "negative", "MIXED": "neutral"}
+    _MACRO_LABEL_MAP = {
+        "good": "positive", "bad": "negative", "mixed": "neutral",
+        "very_good": "very_positive", "very_bad": "very_negative",
+        "very good": "very_positive", "very bad": "very_negative",
+        "GOOD": "positive", "BAD": "negative", "MIXED": "neutral",
+        "VERY_GOOD": "very_positive", "VERY_BAD": "very_negative",
+    }
     valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
 
     if raw_results is not None:
@@ -632,153 +606,8 @@ async def process_article(
     )
 
 
-def _deterministic_instrument_sentiment(title: str, content: str, category: str) -> tuple[str, float] | None:
-    """Rule-based instrument sentiment for clear-cut analyst/price signals."""
-    combined = f"{title}. {content[:300]}".lower()
+# Removed _deterministic_instrument_sentiment and _deterministic_macro_sentiment
 
-    if category == "commodity":
-        _COMMODITY_TANGENTIAL = [
-            r'\bgold\s+stocks?\b',
-            r'\b(?:oil|energy)\s+stocks?\b',
-            r'\b(?:gold|silver|oil)\s+(?:miner|mining|producer|company|companies|etf)\b',
-        ]
-        for pattern in _COMMODITY_TANGENTIAL:
-            if re.search(pattern, combined):
-                return ("neutral", 0.75)
-
-    _VERY_POSITIVE = [
-        r'\b(?:beat|beats|exceeded|surpass)\b.{0,40}\b(?:earn|revenue|estimate|expect)',
-        r'\b(?:earn|revenue|profit)\b.{0,40}\b(?:beat|beats|exceeded|surpass)',
-        r'\b(?:rais|increas|hik|boost|lift|up)\b.{0,30}\b(?:price\s+target|pt\b|target\s+price)',
-        r'\bprice\s+target\b.{0,30}\b(?:rais|increas|hik|boost|lift|up)',
-        r'\b(?:upgrad)\b.{0,30}\b(?:buy|outperform|overweight|strong\s+buy)',
-        r'\b(?:buy|outperform|overweight|strong\s+buy)\b.{0,30}\b(?:upgrad)',
-        r'\b(?:win|land|award|secur|clinch|bag)\w*\b.{0,25}\b(?:contract|deal|order)\b',
-        r'\b(?:contract|deal|order)\b.{0,25}\b(?:win|land|award|secur|clinch)\w*\b',
-        r'\b(?:new\s+contract|major\s+contract|billion.{0,10}contract|contract\s+award)',
-        r'\b(?:F-35|F35|fighter\s+jet|defense\s+contract|military\s+contract)\b',
-        r'\b(?:expand|quadrupl|doubl|tripl|scal)\w*\b.{0,40}\b(?:defense|defence|military|weapons?|arms?)\b',
-        r'\bweapons?\s+(?:makers?|manufacturer)\b.{0,60}\b(?:expand|agree|produc|increas|ramp)\b',
-        r'\b(?:defense|defence|military)\s+(?:production|manufactur|spending|budget)\b.{0,40}\b(?:expand|increas|surge|boost|ramp|quadrupl)\b',
-        r'\brecord\b.{0,30}\b(?:revenue|profit|earn|backlog|sales)',
-        r'\b(?:revenue|profit|earn|backlog|sales)\b.{0,30}\brecord\b',
-        r'\bstrong\s+(?:earn|revenue|result|guidance|demand)\b',
-        r'\bmark\s+your\s+calendar',
-        r'\$\d+(?:\.\d+)?\s*(?:billion|B)\b.{0,30}\b(?:order|deal|contract|program)',
-    ]
-
-    _POSITIVE = [
-        r'\b(?:likes?|bullish|favor|recommends?)\b.{0,40}\b(?:stock|share|position)',
-        r'\b(?:stock|share)\b.{0,40}\b(?:likes?|bullish|favor|recommends?)',
-        r'\b(?:rais)\b.{0,20}\b(?:price\s+target|pt\b)',
-        r'\b(?:buy\s+rating|maintains?\s+buy|reiterates?\s+buy|maintains?\s+overweight)',
-        r'\biniti\w+\b.{0,20}\b(?:buy|outperform|overweight)',
-        r'\b(?:positive|optimistic)\b.{0,30}\b(?:outlook|guidance|view)',
-        r'\bpositive\s+(?:earn|revenue|result|catalyst)',
-        r'\b(?:dividend\s+(?:increas|grow|hike)|special\s+dividend)\b',
-        r'\bshare\s+(?:buyback|repurchase)\b',
-        r'\b(?:trump|president|pentagon|government)\b.{0,60}\b(?:defense|weapons?|military)\b.{0,40}\b(?:expand|produc|spend|fund|increas)\b',
-        r'\b(?:best|top|number.one|#1|must.own|must.buy)\b.{0,30}\b(?:stock|pick|investment|buy)\b',
-        r'\b(?:still\s+cheap|undervalued|bargain|trading\s+at\s+a\s+discount|too\s+cheap)\b',
-        r'\b(?:stock|share|price)\b.{0,30}\b(?:surge|soar|rocket|skyrocket|moon)\b',
-        r'\b(?:surge|soar|rocket|skyrocket)\b.{0,30}\b(?:stock|share|price)\b',
-        r'\breiterates?\b.{0,30}\b(?:stock|rating)\b',
-        r'\breiterates?\b.{0,20}\b(?:outperform|buy|overweight)\b',
-        r'\b(?:stock|shares?)\b.{0,30}\b(?:making\s+gains|up\s+\d|rall(?:y|ies|ied)|ris(?:es?|ing)|climb)',
-        r'\b(?:defense|defence)\s+(?:stock|sector)\w*\b.{0,30}\b(?:gain|ris|up|rall|climb|surge)',
-        r'\bcurrently\s+up\b',
-        r'\b(?:war|strike|conflict|military)\b.{0,60}\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b',
-        r'\b(?:defense|defence|rtx|raytheon|lockheed|northrop)\b.{0,60}\b(?:war|strike|conflict|military)\b',
-        r'\b(?:pentagon|defense\s+(?:chief|leader|ceo|secretary))\b.{0,40}\b(?:meet|discuss|plan|agree)',
-    ]
-
-    _VERY_NEGATIVE = [
-        r'\b(?:miss|misses|missed|fell\s+short)\b.{0,40}\b(?:earn|revenue|estimate|expect)',
-        r'\b(?:earn|revenue|profit)\b.{0,40}\b(?:miss|misses|missed|fell\s+short)',
-        r'\b(?:cut|lower|reduc|slash)\b.{0,30}\b(?:price\s+target|pt\b|target\s+price)',
-        r'\bprice\s+target\b.{0,30}\b(?:cut|lower|reduc|slash)',
-        r'\b(?:downgrad)\b.{0,30}\b(?:sell|underperform|underweight)',
-        r'\b(?:sell|underperform|underweight)\b.{0,30}\b(?:downgrad)',
-        r'\b(?:layoff|restructur|writedown|write-off|impairment)\b',
-        r'\bguidance\b.{0,30}\b(?:cut|lower|below|miss|weak)',
-    ]
-
-    _NEGATIVE = [
-        r'\b(?:bearish|negative\s+outlook|headwind)\b',
-        r'\b(?:downgrad)\b.{0,30}\b(?:hold|neutral)',
-        r'\b(?:sell\s+rating|maintains?\s+sell)',
-        r'\brisky\b.{0,20}\b(?:stock|invest|bet)',
-        r'\b(?:avoid|stay\s+away|cautious)\b.{0,30}\b(?:stock|share)',
-        r'\b(?:forget|avoid|abandon|dump|ditch)\b.{0,40}\b(?:gold|oil|silver|commodit)',
-        r'\b(?:gold|silver|oil)\b.{0,50}\b(?:not\s+worth|overvalued|bubble)',
-        r'\b(?:crypto|bitcoin|btc|digital\s+asset)\b.{0,70}\b(?:better|smarter|outperform|superior|replace)\b.{0,40}\b(?:gold|silver|hard\s+asset)',
-        r'\b(?:smarter|better)\b.{0,30}\b(?:bet|alternative|choice)\b.{0,30}\b(?:than\s+gold|than\s+oil|than\s+silver)',
-    ]
-
-    for pattern in _VERY_POSITIVE:
-        if re.search(pattern, combined):
-            return ("very positive", 0.90)
-    for pattern in _POSITIVE:
-        if re.search(pattern, combined):
-            return ("positive", 0.80)
-    for pattern in _VERY_NEGATIVE:
-        if re.search(pattern, combined):
-            return ("very negative", 0.90)
-    for pattern in _NEGATIVE:
-        if re.search(pattern, combined):
-            return ("negative", 0.80)
-
-    return None
-
-
-def _deterministic_macro_sentiment(title: str, content: str) -> tuple[str, float] | None:
-    """Rule-based macro sentiment for clear-cut cases."""
-    combined = f"{title}. {content[:500]}".lower()
-
-    _NEUTRAL_PATTERNS = [
-        r'\b(?:forced\s+steriliz|sterilisation|reparation[s]?\s+for|human\s+rights\s+court)',
-        r'\b(?:shootout|drug\s+bust|gang\s+warfare|human\s+trafficking|domestic\s+violence)\b',
-        r'\b(?:mayor|city\s+council|local\s+election|municipal)\b',
-        r'\b(?:drone|uav|unmanned)\b.{0,50}\b(?:fire|ignit|damage)\b.{0,50}\b(?:facilit|plant|pipeline|field)\b',
-        r'\b(?:ignit|set\s+fire|on\s+fire|fire\s+at)\b.{0,40}\b(?:oil|gas|fuel)\s+(?:facilit|plant|pipeline|field)\b',
-        r'\b(?:Cuba|Peru|Bolivia|Paraguay|Honduras|Nicaragua|Myanmar|Cambodia)\b.{0,80}\b(?:court|ruling|shootout|cartel|protest)\b',
-    ]
-
-    for pattern in _NEUTRAL_PATTERNS:
-        if re.search(pattern, combined):
-            return ("neutral", 0.85)
-
-    _NEGATIVE_PATTERNS = [
-        r'\b(?:war|attack|strikes?|bomb(?:ing|ed)?|invasi(?:on|ng)|casualties|killed|missile)\b',
-        r'\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b.*\b(?:war|attack|strike|conflict|bomb|military)\b',
-        r'\b(?:war|attack|strike|conflict|bomb|military)\b.*\b(?:iran|gulf|middle\s*east|israel|gaza|ukraine|russia)\b',
-        r'\b(?:escalat|tension|threat)\b.*\b(?:military|nuclear|war)\b',
-        r'\brecession\b',
-        r'\bunemployment\s+(?:ris|jump|surg|spike)',
-        r'\bweak\s+(?:gdp|economy|growth|jobs)',
-        r'\b(?:rate\s+hike|hawkish|inflation\s+(?:ris|surg|spike|high))',
-        r'\b(?:gas|oil|energy)\s+price[s]?\s+(?:ris|surg|jump|spike|higher|soar)',
-        r'\b(?:tariff|trade\s+war|embargo)\b',
-    ]
-
-    for pattern in _NEGATIVE_PATTERNS:
-        if re.search(pattern, combined):
-            return ("negative", 0.85)
-
-    _POSITIVE_PATTERNS = [
-        r'\b(?:rate\s+cut|dovish|stimulus|easing)\b',
-        r'\b(?:strong\s+(?:gdp|jobs|growth|economy))\b',
-        r'\b(?:peace\s+deal|ceasefire|de-escalat)',
-        r'\b(?:trade\s+deal|tariff\s+remov)',
-        r'\b(?:rally|boom|surge)\b.*\b(?:market|s&p|nasdaq|dow)\b',
-        r'\b(?:market|s&p|nasdaq|dow)\b.*\b(?:rally|boom|surge)\b',
-    ]
-
-    for pattern in _POSITIVE_PATTERNS:
-        if re.search(pattern, combined):
-            return ("positive", 0.85)
-
-    return None
 
 
 async def run_macro_sentiment(article_id: str, title: str, content: str, store_in_scores: bool = True) -> None:
@@ -796,6 +625,8 @@ async def run_macro_sentiment(article_id: str, title: str, content: str, store_i
             confidence = float(sentiment_result.get("confidence", 0.5))
             _MACRO_LABEL_MAP = {
                 "good": "positive", "bad": "negative", "mixed": "neutral",
+                "very_good": "very_positive", "very_bad": "very_negative",
+                "very good": "very_positive", "very bad": "very_negative",
             }
             sentiment_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
             valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
@@ -949,11 +780,11 @@ async def update_macro_sentiment() -> None:
         if not scores:
             return
         net_score = sum(scores) / len(scores)
-        net_score = max(-1.0, min(1.0, net_score))
+        net_score = max(-3.0, min(3.0, net_score))
 
-        if net_score > 0.25:
+        if net_score > 0.75:
             label = "positive"
-        elif net_score < -0.25:
+        elif net_score < -0.75:
             label = "negative"
         else:
             label = "neutral"

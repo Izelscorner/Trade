@@ -30,8 +30,8 @@ export default function MacroSentimentCard({
     );
   }
 
-  const isPositive = sentiment.score > 0.05;
-  const isNegative = sentiment.score < -0.05;
+  const isPositive = sentiment.score > 0.15;
+  const isNegative = sentiment.score < -0.15;
 
   const color = isPositive
     ? "text-accent-emerald"

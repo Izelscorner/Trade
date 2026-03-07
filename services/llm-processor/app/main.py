@@ -1,6 +1,6 @@
-"""LLM Processor Service - classifies and scores news articles using Cerebras API.
+"""LLM Processor Service - classifies and scores news articles using NVIDIA NIM.
 
-Uses batch API calls: N articles → 1 Cerebras request → JSON array of results,
+Uses batch API calls: N articles → 1 NIM request → JSON array of results,
 dramatically reducing API call frequency.
 """
 
@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from .db import async_session
-from .cerebras_client import check_health, close_client
+from .nim_client import check_health, close_client
 from .processor import (
     get_unprocessed_articles,
     get_instruments,
@@ -32,16 +32,16 @@ logging.basicConfig(
 logger = logging.getLogger("llm-processor")
 
 
-async def wait_for_cerebras(max_retries: int = 30, delay: int = 5) -> bool:
-    """Wait for Cerebras API to be reachable."""
+async def wait_for_nim(max_retries: int = 30, delay: int = 5) -> bool:
+    """Wait for NVIDIA NIM API to be reachable."""
     for attempt in range(max_retries):
         if await check_health():
-            logger.info("Cerebras API is reachable")
+            logger.info("NVIDIA NIM API is reachable")
             return True
         if attempt % 3 == 0:
-            logger.info("Waiting for Cerebras API (attempt %d/%d)...", attempt + 1, max_retries)
+            logger.info("Waiting for NVIDIA NIM API (attempt %d/%d)...", attempt + 1, max_retries)
         await asyncio.sleep(delay)
-    logger.error("Cerebras API not reachable after %d attempts", max_retries)
+    logger.error("NVIDIA NIM API not reachable after %d attempts", max_retries)
     return False
 
 
@@ -79,11 +79,11 @@ async def macro_sentiment_loop() -> None:
 
 
 async def process_loop() -> None:
-    """Main processing loop - picks up unprocessed articles and runs them through Cerebras in batches."""
+    """Main processing loop - picks up unprocessed articles and runs them through NIM in batches."""
     await ensure_schema()
 
-    if not await wait_for_cerebras():
-        logger.error("Cannot start processing without Cerebras API. Retrying in 60s...")
+    if not await wait_for_nim():
+        logger.error("Cannot start processing without NVIDIA NIM API. Retrying in 60s...")
         await asyncio.sleep(60)
         asyncio.create_task(process_loop())
         return
@@ -125,9 +125,9 @@ async def process_loop() -> None:
                     logger.exception("Error in process_batch")
                     # Check if API is still healthy
                     if not await check_health():
-                        logger.warning("Cerebras API not healthy after batch error, backing off 30s...")
+                        logger.warning("NIM API not healthy after batch error, backing off 30s...")
                         await asyncio.sleep(30)
-                        await wait_for_cerebras(max_retries=12, delay=10)
+                        await wait_for_nim(max_retries=12, delay=10)
 
                 await cleanup_priority()
 
@@ -163,5 +163,5 @@ app = FastAPI(title="LLM Processor Service", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    cerebras_ready = await check_health()
-    return {"status": "ok" if cerebras_ready else "waiting_for_cerebras", "cerebras": cerebras_ready}
+    nim_ready = await check_health()
+    return {"status": "ok" if nim_ready else "waiting_for_nim", "nim": nim_ready}

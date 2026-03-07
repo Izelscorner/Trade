@@ -12,50 +12,56 @@ logger = logging.getLogger(__name__)
 
 # Signal to numeric score mapping
 SIGNAL_SCORES = {
-    "strong_buy": 1.0,
-    "buy": 0.5,
+    "strong_buy": 3.0,
+    "buy": 1.5,
     "neutral": 0.0,
-    "sell": -0.5,
-    "strong_sell": -1.0,
+    "sell": -1.5,
+    "strong_sell": -3.0,
 }
 
 # Sentiment label to multiplier mapping
 SENTIMENT_MULTIPLIERS = {
-    "very positive": 1.0,
-    "positive": 0.5,
+    "very positive": 3.0,
+    "positive": 1.5,
     "neutral": 0.0,
-    "negative": -0.5,
-    "very negative": -1.0,
+    "negative": -1.5,
+    "very negative": -3.0,
 }
 
 # Score to letter grade mapping — symmetric thresholds
 def score_to_grade(score: float) -> str:
-    """Convert a -1.0 to 1.0 score to a letter grade.
+    """Convert a -3.0 to 3.0 score to a letter grade.
 
     Symmetric distribution with wider neutral zone:
-        A+ : [0.75, 1.0]   — strong bullish
-        A  : [0.50, 0.75)  — bullish
-        B+ : [0.25, 0.50)  — moderately bullish
-        B  : [0.10, 0.25)  — slightly bullish
-        C  : [-0.10, 0.10) — neutral
-        D  : [-0.25, -0.10) — slightly bearish
-        D- : [-0.50, -0.25) — moderately bearish
-        F  : [-1.0, -0.50)  — bearish
+        A+ : [2.25, 3.0]   — strong bullish
+        A  : [1.50, 2.25)  — bullish
+        A- : [1.00, 1.50)
+        B+ : [0.50, 1.00)  — moderately bullish
+        B  : [0.25, 0.50)  — slightly bullish
+        C  : [-0.25, 0.25) — neutral
+        D  : [-0.50, -0.25) — slightly bearish
+        D- : [-1.00, -0.50)
+        F+ : [-1.50, -1.00)
+        F  : [-3.0, -1.50)  — bearish
     """
-    if score >= 0.75:
+    if score >= 2.25:
         return "A+"
-    elif score >= 0.50:
+    elif score >= 1.50:
         return "A"
-    elif score >= 0.25:
+    elif score >= 1.00:
+        return "A-"
+    elif score >= 0.50:
         return "B+"
-    elif score >= 0.10:
+    elif score >= 0.25:
         return "B"
-    elif score >= -0.10:
+    elif score > -0.25:
         return "C"
-    elif score >= -0.25:
+    elif score > -0.50:
         return "D"
-    elif score >= -0.50:
+    elif score > -1.00:
         return "D-"
+    elif score > -1.50:
+        return "F+"
     else:
         return "F"
 
@@ -86,7 +92,7 @@ async def get_technical_score(instrument_id: str, lookback_days: int = 5) -> tup
         total += score
         details[row.indicator_name] = {"signal": row.signal, "score": score}
 
-    avg = max(-1.0, min(1.0, total / len(rows)))
+    avg = max(-3.0, min(3.0, total / len(rows)))
     return round(avg, 4), details
 
 
@@ -142,7 +148,7 @@ async def get_sentiment_score(instrument_id: str, min_articles: int = 1) -> tupl
             # Scale mean by confidence — fewer articles dampens toward neutral
             effective = mean * conf
 
-            return round(max(-1.0, min(1.0, effective)), 4), {
+            return round(max(-3.0, min(3.0, effective)), 4), {
                 "articles": len(rows),
                 "scored": n,
                 "labels": label_counts,
@@ -177,7 +183,7 @@ async def get_macro_score(min_articles: int = 1) -> tuple[float, dict]:
     if row.article_count < min_articles:
         return 0.0, {"global": {"articles": row.article_count, "below_minimum": True}}
 
-    median = max(-1.0, min(1.0, float(row.score)))
+    median = max(-3.0, min(3.0, float(row.score)))
     conf = _confidence(row.article_count)
     effective = median * conf
     details = {
@@ -232,7 +238,7 @@ async def grade_instrument(
         + sentiment_score * weights["sentiment"]
         + macro_score * weights["macro"]
     )
-    overall = round(max(-1.0, min(1.0, overall)), 4)
+    overall = round(max(-3.0, min(3.0, overall)), 4)
     grade = score_to_grade(overall)
 
     now = datetime.now(timezone.utc)

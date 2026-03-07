@@ -22,8 +22,8 @@ function ScoreBar({
   confidence?: number;
   articleCount?: number;
 }) {
-  // Score ranges from -1 to 1, normalize to 0-100 for the bar
-  const pct = Math.max(0, Math.min(100, (score + 1) * 50));
+  // Score ranges from -3.0 to 3.0, normalize to 0-100 for the bar
+  const pct = Math.max(0, Math.min(100, ((score + 3) / 6) * 100));
   const isPositive = score > 0;
 
   return (

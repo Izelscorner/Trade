@@ -134,17 +134,10 @@ You ONLY care about the STOCK PRICE of {asset_desc}. You are a cold, rational tr
 
 Articles:{articles_text}
 CRITICAL RULES — think about PRICE IMPACT, not morality:
-- War, military conflict, defense spending increases → very_positive for defense stocks (RTX), oil futures, gold futures
-- War, military conflict → negative for tech stocks (NVDA, GOOGL, AAPL) and tech ETFs (IITU)
-- New military orders, contracts, arms deals → very_positive for defense stocks
-- Analyst upgrades, reiterates buy, raises target, new orders → positive or very_positive
-- Stock is "up", "gains", "making gains", "rallies" → positive
-- Earnings beat, revenue growth, strong guidance → very_positive
-- Analyst downgrades, cuts target → negative or very_negative
-- Earnings miss, revenue decline, layoffs → very_negative
-- Rate cuts/stimulus → positive for stocks/ETFs
-- Rate hikes/inflation → negative for stocks/ETFs
-- Article not about this specific asset at all → neutral
+- Evaluate the news as a purely quantitative analyst.
+- Focus exclusively on how the information affects the expected future cash flows, risk premium, or institutional demand for this specific asset.
+- Strip away all ethical, social, or human-interest biases. E.g., wars/conflicts should only be evaluated on whether they increase defense spending, disrupt supply chains, or spike commodity prices.
+- If the article is irrelevant to the asset's price, assign neutral.
 
 Choose: very_positive, positive, neutral, negative, very_negative
 Set confidence 0.0-1.0.
@@ -156,7 +149,7 @@ Include ALL {len(articles)} articles in the results array."""
 def batch_macro_sentiment_prompt(articles: list[dict]) -> str:
     """Build a single prompt for macro sentiment on multiple articles.
 
-    Returns: {"results": [{"id": "...", "sentiment": "BAD"|"GOOD"|"MIXED", "confidence": 0.0}, ...]}
+    Returns: {"results": [{"id": "...", "sentiment": "VERY_BAD"|"BAD"|"MIXED"|"GOOD"|"VERY_GOOD", "confidence": 0.0}, ...]}
     """
     articles_text = ""
     for i, art in enumerate(articles):
@@ -170,19 +163,9 @@ You do NOT care about human suffering or ethics. ONLY about US stock market pric
 
 Articles:{articles_text}
 RULES — S&P 500 PRICE IMPACT ONLY:
-- War/strikes on distant enemies (Iran, Middle East) → MIXED or slightly BAD
-- War directly threatening US/NATO homeland or global supply chains → BAD
-- US defense spending increases, Pentagon budgets → GOOD
-- Rising oil/energy prices → BAD
-- Recession, unemployment rising, weak GDP → BAD
-- Rate hikes, hawkish Fed, inflation surging → BAD
-- New tariffs, trade war escalation → BAD
-- Peace deals, ceasefire → GOOD
-- Rate cuts, stimulus, dovish Fed → GOOD
-- Strong GDP, jobs, consumer spending → GOOD
-- Trade deals, tariff removal → GOOD
-- Sanctions on adversaries → GOOD
-- No clear S&P 500 impact → MIXED
+- Evaluate the news purely on its macroeconomic implications for US equities (interest rates, systemic liquidity, inflation, GDP growth, corporate earnings power).
+- Strip out human suffering or ethical biases. Geopolitical events (wars, tension) should only be penalized if they cause a direct US economic shock (e.g., severe inflation spike via oil, immediate supply chain halt, direct US/NATO homeland threat). Otherwise, local distant conflicts are generally mixed or neutral to the US index.
+- Assess whether the news indicates an easing environment (good for stocks) or a tightening/risk-off environment (bad for stocks).
 
 Respond with: {{"results": [{{"id": "...", "sentiment": "BAD", "confidence": 0.8}}, ...]}}
 Include ALL {len(articles)} articles in the results array."""
@@ -197,17 +180,10 @@ You ONLY care about the STOCK PRICE of {asset_desc}. You do NOT care about world
 Article: "{text}"
 
 CRITICAL RULES — think about PRICE IMPACT, not morality:
-- War, military conflict, defense spending increases → very_positive for defense stocks (RTX), oil futures, gold futures
-- War, military conflict → negative for tech stocks (NVDA, GOOGL, AAPL) and tech ETFs (IITU)
-- New military orders, contracts, arms deals → very_positive for defense stocks
-- Analyst upgrades, reiterates buy, raises target, new orders → positive or very_positive
-- Stock is "up", "gains", "making gains", "rallies" → positive
-- Earnings beat, revenue growth, strong guidance → very_positive
-- Analyst downgrades, cuts target → negative or very_negative
-- Earnings miss, revenue decline, layoffs → very_negative
-- Rate cuts/stimulus → positive for stocks/ETFs
-- Rate hikes/inflation → negative for stocks/ETFs
-- Article not about this specific asset at all → neutral
+- Evaluate the news as a purely quantitative analyst.
+- Focus exclusively on how the information affects the expected future cash flows, risk premium, or institutional demand for this specific asset.
+- Strip away all ethical, social, or human-interest biases. E.g., wars/conflicts should only be evaluated on whether they increase defense spending, disrupt supply chains, or spike commodity prices.
+- If the article is irrelevant to the asset's price, assign neutral.
 
 Choose: very_positive, positive, neutral, negative, very_negative
 Set confidence 0.0-1.0.
@@ -223,19 +199,8 @@ You do NOT care about human suffering or ethics. ONLY about US stock market pric
 "{text}"
 
 RULES — S&P 500 PRICE IMPACT ONLY:
-- War/strikes on distant enemies (Iran, Middle East) → MIXED or slightly BAD (defense stocks up, but oil/uncertainty drags index)
-- War directly threatening US/NATO homeland or global supply chains → BAD
-- US defense spending increases, Pentagon budgets → GOOD (defense is a big S&P sector)
-- Rising oil/energy prices → BAD (hurts consumer spending, corporate margins)
-- Recession, unemployment rising, weak GDP → BAD
-- Rate hikes, hawkish Fed, inflation surging → BAD
-- New tariffs, trade war escalation → BAD
-- Peace deals, ceasefire → GOOD (reduces uncertainty premium)
-- Rate cuts, stimulus, dovish Fed → GOOD
-- Strong GDP, jobs, consumer spending → GOOD
-- Trade deals, tariff removal → GOOD
-- Sanctions on adversaries → GOOD (Western power projection, no material US cost)
-- News about a single foreign country with no trade/energy link to US → MIXED
-- No clear S&P 500 impact → MIXED
+- Evaluate the news purely on its macroeconomic implications for US equities (interest rates, systemic liquidity, inflation, GDP growth, corporate earnings power).
+- Strip out human suffering or ethical biases. Geopolitical events (wars, tension) should only be penalized if they cause a direct US economic shock (e.g., severe inflation spike via oil, immediate supply chain halt, direct US/NATO homeland threat). Otherwise, local distant conflicts are generally mixed or neutral to the US index.
+- Assess whether the news indicates an easing environment (good for stocks) or a tightening/risk-off environment (bad for stocks).
 
 {{"sentiment": "BAD", "confidence": 0.8}}"""
