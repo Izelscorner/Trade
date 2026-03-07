@@ -27,9 +27,9 @@ All services run as Docker containers orchestrated via Docker Compose.
 │  └──────────────┘    └──────────────┘    └──────────────────────────┘             │
 │                                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐                        │
-│  │ Cerebras AI  │◄───│  LLM         │    │  Grading     │                        │
+│  │ NVIDIA NIM   │◄───│  LLM         │    │  Grading     │                        │
 │  │ (Remote API) │    │  Processor   │    │  Service     │                        │
-│  │ cerebras.ai  │    │  :8003       │    │  (Python)    │                        │
+│  │ Qwen 122B    │    │  :8003       │    │  (Python)    │                        │
 │  └──────────────┘    └──────────────┘    └──────────────┘                        │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -62,7 +62,7 @@ All services run as Docker containers orchestrated via Docker Compose.
 ### 3. LLM Processor Service (Python/FastAPI)
 
 - **Port:** 8003
-- **Purpose:** Unified AI pipeline that replaces the old Relevance (DistilBERT) and Sentiment (FinBERT) services. Polls the database for unprocessed articles and runs them through Llama 3.2 1B for classification and contextual sentiment analysis.
+- **Purpose:** Unified AI pipeline that replaces the old Relevance (DistilBERT) and Sentiment (FinBERT) services. Polls the database for unprocessed articles and runs them through the highly capable Qwen 3.5 122B model via the NVIDIA API for classification and unrestrictive, context-aware sentiment analysis.
 - **Processing Pipeline (per article):**
   1. **Classification + Instrument Tagging** (single LLM call) — Returns `{type: "news"|"spam", instruments: ["AAPL", ...], is_macro: true|false}`. Spam articles are deleted.
   2. **Deterministic Post-Processing** — Regex-based rules correct LLM errors:
@@ -71,10 +71,10 @@ All services run as Docker containers orchestrated via Docker Compose.
      - Macro patterns (geopolitical conflicts, central banks) force `is_macro = true`
      - Foreign tickers in titles are validated against tracked instruments
      - Over-tagged instruments (>2) are filtered to only directly mentioned names
-  3. **Contextual Sentiment Analysis** (per-instrument LLM call) — Role-based prompting (e.g., "You are a gold commodity trader") with chain-of-thought reasoning. Returns `{sentiment, confidence}`.
-  4. **Macro Sentiment Aggregation** — After each batch, computes average sentiment from all macro articles (last 24h) and stores in `macro_sentiment` table with `region = 'global'`.
-- **Configuration:** Batch size 20, process interval 15s, temperature 0.0 (deterministic), JSON format mode enabled.
-- **Batch API Strategy:** Articles are grouped into sub-batches (10 for classify, 8 for sentiment, 8 for macro) and sent as a single Cerebras API prompt expecting a JSON array response — dramatically reducing API call frequency.
+  3. **Contextual Sentiment Analysis** (per-instrument LLM call) — Role-based prompting (e.g., "You are a quantitative analyst"). Relies 100% on the LLM's reasoning for price impact without any hardcoded deterministic rules. Returns `{sentiment, confidence}`.
+  4. **Macro Sentiment Aggregation** — After each batch, computes macro sentiment purely using LLM structured reasoning and stores in `macro_sentiment` table.
+- **API Call & Rate Limiting:** Uses the NVIDIA Hosted API for the `qwen/qwen3.5-122b-a10b` model. A strict global rate limiter (an `asyncio.Lock` enforcing a 1.5-second minimum delay between outgoing requests) guarantees the application never exceeds the hard limit of 40 Requests/Minute (RPM).
+- **Batch Processing Strategy:** Batch size 20, temperature 0.0 (deterministic), strict JSON formatting. Articles are grouped into sub-batches (8 for classify, 6 for sentiment, 3 for macro) and sent as single API prompts expecting JSON array responses to aggressively minimize total API calls.
 - **Sentiment Labels:** very_positive, positive, neutral, negative, very_negative — mapped to probability distributions (positive/negative/neutral) for compatibility with the grading system.
 
 ### 5. Technical Analysis Service (Python/pandas)
@@ -124,7 +124,7 @@ All services run as Docker containers orchestrated via Docker Compose.
 The system operates as a **unidirectional predictive pipeline**:
 
 1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds, `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`.
-2. **AI Processing Layer:** `llm-processor` polls for unprocessed articles, batch-classifies them (N articles → 1 Cerebras API call → JSON array), applies deterministic post-processing, and batch-scores sentiment per instrument. Articles marked `ollama_processed = true`.
+2. **AI Processing Layer:** `llm-processor` polls for unprocessed articles, batch-classifies them (N articles → 1 NVIDIA API call → JSON array), applies deterministic post-processing for tagging, and batch-scores sentiment purely via LLM. Articles marked `ollama_processed = true`.
 3. **Signal Layer:** `technical-analysis` computes trend/momentum/volatility indicators from price data.
 4. **Synthesis Layer:** `grading` combines sentiment, technical, and macro signals into weighted investment grades (A+ to F).
 5. **Presentation Layer:** `backend` API serves only processed/scored articles. `frontend` displays grades, news, and macro sentiment.
@@ -139,7 +139,7 @@ Trade/
 │   ├── postgres/                    # Database init scripts
 │   ├── backend/                     # FastAPI REST API + Gemini AI analysis
 │   ├── news-fetcher/                # RSS/search feed ingestion
-│   ├── llm-processor/               # Unified AI classification + sentiment (Cerebras batch API)
+│   ├── llm-processor/               # Unified AI classification + sentiment (NVIDIA API / Qwen 122B)
 │   ├── technical-analysis/          # SMA/MACD/RSI computation
 │   ├── price-fetcher/               # yfinance live + historical prices
 │   └── grading/                     # Signal aggregation into grades
@@ -160,8 +160,9 @@ Trade/
 
 ## Key Technical Decisions
 
-- **Cerebras AI** for classification and sentiment — remote API (gpt-oss-120b), no local GPU required, temperature 0. Batch processing: N articles per API call returning JSON arrays, drastically reducing API call frequency.
-- **Deterministic post-processing** — Regex rules override LLM classification errors (asset vs macro, instrument tagging validation). Necessary because a 1B model makes frequent classification mistakes.
+- **NVIDIA Hosted API (NIM)** for classification and sentiment — using `qwen/qwen3.5-122b-a10b`. Temperature 0. Uses advanced batch processing (N articles per call) and a global `asyncio.Lock` rate limiter (1.5s delay) to stay strictly below the 40 RPM limit while processing hundreds of articles efficiently.
+- **100% LLM-driven Sentiment** — With the highly capable Qwen 122B model, deterministic rigid sentiment mapping was abandoned. The LLM is trusted to quantitatively evaluate price impacts directly based on future cash flows and macro environments without hardcoded biases.
+- **Deterministic Classification Correction** — Regex rules still override basic model tagging hallucinations (e.g., classifying a company specific article as macro, or making up non-tracked tags).
 - **yfinance** for all market data (live + historical) — free, no API key required.
 - **Gemini API** for deep AI analysis — used only in backend for on-demand instrument analysis, not for batch processing.
 - **Jotai + Jotai Query** over Redux/React Query — lighter, atomic state management.
