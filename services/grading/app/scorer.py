@@ -132,25 +132,25 @@ COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
 
 SENTIMENT_PARAMS = {
     "short": {
-        "half_life_hours": 24.0,    # 24h half-life: yesterday's news = 50% weight
-        "window_days": 3,           # 3-day lookback
+        "half_life_hours": 12.0,    # 12h half-life: rapid decay for shock value
+        "window_days": 2,           # 2-day lookback (0 - 48 hours)
         "full_confidence_at": 20,   # 20 non-neutral articles = full confidence
     },
     "long": {
-        "half_life_hours": 96.0,    # 4-day half-life: week-old news still relevant
-        "window_days": 14,          # 14-day lookback
+        "half_life_hours": 168.0,   # 7-day half-life (1 week): steady institutional tone
+        "window_days": 30,          # 30-day lookback
         "full_confidence_at": 40,   # 40 non-neutral articles = full confidence
     },
 }
 
 MACRO_PARAMS = {
     "short": {
-        "half_life_hours": 6.0,     # 6h half-life: fast-moving macro
-        "window_hours": 12,         # 12h lookback
+        "half_life_hours": 24.0,    # 24h half-life: immediate shock value
+        "window_hours": 72,         # 72h lookback (1 - 3 days)
     },
     "long": {
-        "half_life_hours": 24.0,    # 24h half-life: policy regime
-        "window_hours": 48,         # 48h lookback
+        "half_life_hours": 648.0,   # 27-day half-life (~10% weight after 3 months)
+        "window_hours": 4320,       # 180 days lookback (~6 months)
     },
 }
 
