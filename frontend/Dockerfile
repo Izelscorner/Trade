@@ -27,4 +27,4 @@ USER nginx
 
 EXPOSE 3000
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["sh", "-c", "mkdir -p /tmp/nginx && nginx -g 'daemon off;'"]

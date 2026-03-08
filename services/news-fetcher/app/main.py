@@ -3,6 +3,10 @@
 Fetches macro news (markets, politics, conflict) and asset-specific news
 from Yahoo Finance and Google News. Articles are stored with
 ollama_processed=false and picked up by the llm-processor service.
+
+Two fetch loops:
+  - Main loop (10s): all macro feeds + asset-specific feeds
+  - Slow loop (30s): high-volume feeds (StockTitan, MarketWatch)
 """
 
 import asyncio
@@ -11,7 +15,7 @@ import urllib.parse
 
 from sqlalchemy import text
 
-from .feeds import FEEDS, MACRO_CATEGORIES
+from .feeds import MAIN_FEEDS, SLOW_FEEDS, MACRO_CATEGORIES
 from .fetcher import fetch_feed
 from .store import upsert_articles, cleanup_old_macro_news, cleanup_old_asset_news
 from .instruments import get_instruments
@@ -23,8 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("news-fetcher")
 
-MACRO_INTERVAL = 300         # 5 minutes
-ASSET_INTERVAL = 900         # 15 minutes
+MAIN_INTERVAL = 10           # 10 seconds
+SLOW_INTERVAL = 30           # 30 seconds
 CLEANUP_INTERVAL = 900       # 15 minutes
 NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
 
@@ -50,14 +54,13 @@ async def fetch_instrument_news(inst: dict) -> int:
     name = inst["name"]
     yf_symbol = inst["yfinance_symbol"]
 
-    logger.info("Fetching specific news for %s (%s)", symbol, name)
     yf_url = f"https://finance.yahoo.com/rss/headline?s={yf_symbol}"
-    encoded_name = urllib.parse.quote(name)
-    gf_url = f"https://news.google.com/rss/search?q={encoded_name}&hl=en-US&gl=US&ceid=US:en"
+    encoded_query = urllib.parse.quote(f"{symbol} stock")
+    gn_url = f"https://news.google.com/rss/search?q={encoded_query}"
 
     feeds = [
-        {"url": yf_url, "source": "Yahoo Finance (Asset)"},
-        {"url": gf_url, "source": "Google Finance (Asset)"}
+        {"url": yf_url, "source": f"Yahoo Finance ({symbol})"},
+        {"url": gn_url, "source": f"Google News ({symbol})"},
     ]
 
     count = await fetch_category("asset_specific", feeds, instrument_id=inst["id"], asset_name=name)
@@ -66,18 +69,55 @@ async def fetch_instrument_news(inst: dict) -> int:
     return count
 
 
-async def macro_loop() -> None:
-    """Fetch all macro news categories on a regular interval."""
+async def main_loop() -> None:
+    """Main fetch loop — macro feeds + asset-specific feeds every 10 seconds."""
+    sem = asyncio.Semaphore(5)
+
+    async def fetch_with_semaphore(inst: dict) -> int:
+        async with sem:
+            return await fetch_instrument_news(inst)
+
     while True:
         try:
+            # Fetch all macro categories
             for category in sorted(MACRO_CATEGORIES):
-                feeds = FEEDS[category]
+                feeds = MAIN_FEEDS.get(category, [])
+                if feeds:
+                    count = await fetch_category(category, feeds)
+                    if count > 0:
+                        logger.info("[%s] Stored %d new articles", category, count)
+
+            # Check for prioritized instrument and fetch it first
+            priority = await get_prioritized_instrument()
+            if priority:
+                logger.info("Priority fetch for %s", priority["symbol"])
+                await fetch_instrument_news(priority)
+
+            # Fetch all instrument-specific feeds concurrently
+            instruments = await get_instruments()
+            tasks = [fetch_with_semaphore(inst) for inst in instruments]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for inst, result in zip(instruments, results):
+                if isinstance(result, Exception):
+                    logger.error("Error fetching news for %s: %s", inst["symbol"], result)
+
+        except Exception:
+            logger.exception("Error in main fetch loop")
+        await asyncio.sleep(MAIN_INTERVAL)
+
+
+async def slow_loop() -> None:
+    """Slow fetch loop — high-volume feeds (StockTitan, MarketWatch) every 30 seconds."""
+    await asyncio.sleep(5)  # Stagger start
+    while True:
+        try:
+            for category, feeds in SLOW_FEEDS.items():
                 count = await fetch_category(category, feeds)
                 if count > 0:
-                    logger.info("[%s] Stored %d new articles", category, count)
+                    logger.info("[slow/%s] Stored %d new articles", category, count)
         except Exception:
-            logger.exception("Error in macro fetch loop")
-        await asyncio.sleep(MACRO_INTERVAL)
+            logger.exception("Error in slow fetch loop")
+        await asyncio.sleep(SLOW_INTERVAL)
 
 
 async def get_prioritized_instrument() -> dict | None:
@@ -96,41 +136,6 @@ async def get_prioritized_instrument() -> dict | None:
         if row:
             return {"id": str(row.id), "symbol": row.symbol, "name": row.name, "yfinance_symbol": row.yfinance_symbol}
     return None
-
-
-async def instruments_loop() -> None:
-    """Fetch instrument-specific news from Yahoo Finance and Google News.
-
-    Checks for prioritized instruments first and fetches those before
-    the regular cycle through all instruments. All instruments are fetched
-    concurrently (up to 3 at a time) to reduce cycle time.
-    """
-    sem = asyncio.Semaphore(3)
-
-    async def fetch_with_semaphore(inst: dict) -> int:
-        async with sem:
-            return await fetch_instrument_news(inst)
-
-    while True:
-        try:
-            # Check for prioritized instrument and fetch it first
-            priority = await get_prioritized_instrument()
-            if priority:
-                logger.info("Priority fetch for %s", priority["symbol"])
-                await fetch_instrument_news(priority)
-
-            instruments = await get_instruments()
-
-            # Fetch all instruments concurrently with a semaphore limit
-            tasks = [fetch_with_semaphore(inst) for inst in instruments]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for inst, result in zip(instruments, results):
-                if isinstance(result, Exception):
-                    logger.error("Error fetching news for %s: %s", inst["symbol"], result)
-
-        except Exception:
-            logger.exception("Error in instruments fetch loop")
-        await asyncio.sleep(ASSET_INTERVAL)
 
 
 async def new_asset_news_loop() -> None:
@@ -173,8 +178,8 @@ async def cleanup_loop() -> None:
 async def main() -> None:
     logger.info("News Fetcher Service starting...")
     await asyncio.gather(
-        macro_loop(),
-        instruments_loop(),
+        main_loop(),
+        slow_loop(),
         new_asset_news_loop(),
         cleanup_loop(),
     )

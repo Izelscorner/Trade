@@ -10,7 +10,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./services/postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -18,13 +18,26 @@ services:
       retries: 5
     networks:
       - internal
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: "1.0"
-    security_opt:
-      - no-new-privileges:true
+          pids: 100
 
   news-fetcher:
     build:
@@ -51,6 +64,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   llm-processor:
     build:
@@ -65,8 +79,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8003:8003"
     networks:
       - internal
       - egress
@@ -82,6 +94,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   technical-analysis:
     build:
@@ -107,6 +120,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   price-fetcher:
     build:
@@ -135,6 +149,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   grading:
     build:
@@ -160,6 +175,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   backend:
     build:
@@ -175,7 +191,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     networks:
       - internal
       - egress
@@ -191,6 +207,7 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+          pids: 100
 
   frontend:
     build:
@@ -198,12 +215,21 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - backend
     networks:
       - internal
       - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx:uid=101,gid=101
+      - /run:uid=101,gid=101
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     deploy:
@@ -211,6 +237,7 @@ services:
         limits:
           memory: 256M
           cpus: "0.5"
+          pids: 50
 
 volumes:
   postgres-data:

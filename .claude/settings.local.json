@@ -1,6 +1,36 @@
 {
   "permissions": {
-    "allow": ["Bash(docker *)", "Bash(docker-compose *)"],
-    "deny": ["Read(./.env)"]
+    "allow": [
+      "Bash(docker *)",
+      "Bash(docker-compose *)",
+      "Read(//Users/main/Projects/Trade/**)",
+      "Bash(bash /tmp/test_feeds.sh)",
+      "Bash(echo \"items with <item> tag\")",
+      "Bash(__NEW_LINE_b0b7b69a2fc6d526__ curl -s -L --max-time 10 \"https://news.google.com/rss/search?q=global%20economy&hl=en-GB&gl=GB&ceid=GB:en\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(__NEW_LINE_2614c4085e8aa652__ echo \"=== Google News full items count ===\")",
+      "Bash(curl -s -L --max-time 10 \"https://news.google.com/rss/search?q=global%20economy&hl=en-GB&gl=GB&ceid=GB:en\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(__NEW_LINE_0ac8c30488869970__ echo \"\")",
+      "Bash(curl -s -L --max-time 10 \"https://www.stocktitan.net/rss\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(tr '>' '>\\\\n')",
+      "Bash(__NEW_LINE_a43d52ee8e526d51__ echo \"\")",
+      "Read(//private/tmp/**)",
+      "Bash(__NEW_LINE_bd8bf703888fd3a1__ echo \"\")",
+      "Bash(__NEW_LINE_1839d9741206ae9b__ echo \"\")",
+      "Bash(__NEW_LINE_ca62ed34e318ef4f__ echo \"\")",
+      "Bash(tr '<' '\\\\n<')",
+      "Bash(__NEW_LINE_7e5d80e4c87e15c4__ echo \"\")",
+      "Bash(curl -s -L --max-time 10 \"https://www.ft.com/global-economy?format=rss\" -H \"User-Agent: Mozilla/5.0 \\(compatible; TradeSignal/1.0\\)\")",
+      "Bash(__NEW_LINE_57c3d9eaa65e4372__ echo \"\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -L --max-time 15 \"https://www.nasdaqtrader.com/trader.aspx?id=newsrss\" -H \"User-Agent: Mozilla/5.0 \\(compatible; TradeSignal/1.0\\)\")",
+      "Bash(echo \" <- HTTP status\")",
+      "WebFetch(domain:www.nasdaqtrader.com)",
+      "Bash(__NEW_LINE_ec87c8ccb7770ed6__ echo \"=== NASDAQ IPO ===\")",
+      "Bash(curl -s -L --max-time 10 \"https://www.nasdaqtrader.com/rss.aspx?feed=currentheadlines&categorylist=19\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(__NEW_LINE_7e099c60d25ffdc0__ echo \"=== NASDAQ ETF ===\")",
+      "Bash(curl -s -L --max-time 10 \"https://www.nasdaqtrader.com/rss.aspx?feed=currentheadlines&categorylist=14\" -H \"User-Agent: Mozilla/5.0\")"
+    ],
+    "deny": [
+      "Read(./.env)"
+    ]
   }
 }

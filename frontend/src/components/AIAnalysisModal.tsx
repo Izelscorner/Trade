@@ -18,7 +18,7 @@ export default function AIAnalysisModal({
   analysis,
   isLoading,
   symbol,
-  title = "Gemini AI Deep Analysis",
+  title = "AI Deep Analysis",
   subtitle,
 }: AIAnalysisModalProps) {
   // Prevent scroll when open
@@ -45,11 +45,8 @@ export default function AIAnalysisModal({
               <Brain size={24} />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-text-primary flex items-center gap-2">
+              <h2 className="text-xl font-bold text-text-primary">
                 {title}
-                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-surface-3 text-text-muted border border-border-subtle uppercase tracking-widest">
-                  1.5 FLASH
-                </span>
               </h2>
               <p className="text-xs text-text-secondary mt-0.5">
                 {subtitle || (

@@ -1,5 +1,6 @@
 """TradeSignal Backend API Service."""
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -102,3 +103,8 @@ app.include_router(ws_router, prefix="/api/v1")
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/config")
+async def get_config():
+    return {"data": {"nim_model": os.getenv("NIM_MODEL", "qwen/qwen3.5-122b-a10b")}}

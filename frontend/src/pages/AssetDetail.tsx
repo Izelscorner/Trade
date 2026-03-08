@@ -13,7 +13,7 @@ import {
   instrumentIndependentAIAnalysisAtom,
   macroSentimentAtom,
 } from "../atoms";
-import { fetchInstrument, fetchLivePrice, prioritizeInstrument } from "../api/client";
+import { fetchInstrument, fetchLivePrice, prioritizeInstrument, fetchConfig } from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
@@ -74,6 +74,18 @@ export default function AssetDetail() {
   const [aiModalMode, setAiModalMode] = useState<
     "integrated" | "independent" | null
   >(null);
+
+  const { data: config } = useQuery({
+    queryKey: ["config"],
+    queryFn: fetchConfig,
+    staleTime: Infinity,
+  });
+
+  const modelDisplay = useMemo(() => {
+    const raw = config?.nim_model || "";
+    const name = raw.includes("/") ? raw.split("/").pop()! : raw;
+    return name.toUpperCase() || "AI";
+  }, [config]);
 
   // Subscribe WS to this specific instrument + prioritize its unprocessed news
   useEffect(() => {
@@ -168,7 +180,7 @@ export default function AssetDetail() {
                     if (!independentAnalysis) fetchIndependentAI();
                   }}
                   className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-violet/10 text-accent-violet border border-accent-violet/20 hover:bg-accent-violet/20 transition-all duration-200 group"
-                  title="Independent analysis based on Gemini's general knowledge"
+                  title={`Independent analysis based on ${modelDisplay} general knowledge`}
                 >
                   <Network
                     size={14}
@@ -250,12 +262,12 @@ export default function AssetDetail() {
         symbol={instrument.symbol}
         title={
           aiModalMode === "independent"
-            ? "Gemini Independent Analysis"
-            : "Gemini System Analysis"
+            ? `${modelDisplay} Independent Analysis`
+            : `${modelDisplay} System Analysis`
         }
         subtitle={
           aiModalMode === "independent"
-            ? "Based on Gemini's global knowledge base"
+            ? `Based on ${modelDisplay} global knowledge base`
             : undefined
         }
       />

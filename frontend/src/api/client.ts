@@ -127,6 +127,10 @@ export const fetchAIAnalysis = (instrument_id: string) =>
 export const fetchIndependentAIAnalysis = (instrument_id: string) =>
   fetchAPI<{ analysis: string }>(`/ai-analysis/independent/${instrument_id}`);
 
+// Config
+export const fetchConfig = () =>
+  fetchAPI<{ nim_model: string }>("/config");
+
 // Add Instruments
 export const addInstruments = (symbols: string) =>
   postAPI<{ created: Instrument[]; skipped: string[] }>("/instruments", {

@@ -375,6 +375,7 @@ async def broadcast_latest_grades():
                     "technical_score": float(r.technical_score),
                     "sentiment_score": float(r.sentiment_score),
                     "macro_score": float(r.macro_score),
+                    "details": json.loads(r.details) if isinstance(r.details, str) else r.details,
                     "graded_at": r.graded_at.isoformat()
                 }
                 for r in rows

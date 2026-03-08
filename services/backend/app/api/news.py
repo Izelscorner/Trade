@@ -26,10 +26,12 @@ async def list_news(
     params: dict = {"limit": min(limit, 200)}
 
     if instrument_id:
+        # Asset page: show asset-perspective sentiment from sentiment_scores
         query = """
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
-                   s.positive, s.negative, s.neutral, s.label
+                   s.positive, s.negative, s.neutral, s.label,
+                   a.macro_sentiment_label
             FROM news_articles a
             JOIN news_instrument_map m ON m.article_id = a.id
             JOIN sentiment_scores s ON s.article_id = a.id
@@ -39,12 +41,13 @@ async def list_news(
             LIMIT :limit
         """
         params["iid"] = instrument_id
+        use_asset_sentiment = True
     elif category:
         if category == "macro":
             query = """
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
-                       a.macro_sentiment_label as label
+                       a.macro_sentiment_label
                 FROM news_articles a
                 WHERE a.is_macro = true
                 AND a.ollama_processed = true
@@ -52,36 +55,45 @@ async def list_news(
                 ORDER BY a.published_at DESC
                 LIMIT :limit
             """
+            use_asset_sentiment = False
         else:
+            # Category view: return both sentiments, use macro for macro articles
             query = """
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
-                       s.positive, s.negative, s.neutral, s.label
+                       s.positive, s.negative, s.neutral, s.label,
+                       a.macro_sentiment_label
                 FROM news_articles a
-                JOIN sentiment_scores s ON s.article_id = a.id
+                LEFT JOIN sentiment_scores s ON s.article_id = a.id
                 WHERE a.category = :cat
                 AND a.ollama_processed = true
+                AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
                 ORDER BY a.published_at DESC
                 LIMIT :limit
             """
             params["cat"] = category
+            use_asset_sentiment = False
     else:
+        # All news: return both sentiments, use macro for macro articles
         query = """
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
-                   s.positive, s.negative, s.neutral, s.label
+                   s.positive, s.negative, s.neutral, s.label,
+                   a.macro_sentiment_label
             FROM news_articles a
-            JOIN sentiment_scores s ON s.article_id = a.id
+            LEFT JOIN sentiment_scores s ON s.article_id = a.id
             WHERE a.ollama_processed = true
+            AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
             ORDER BY a.published_at DESC
             LIMIT :limit
         """
+        use_asset_sentiment = False
 
     async with async_session() as session:
         result = await session.execute(text(query), params)
         rows = result.fetchall()
 
-    # Macro label to probability mapping (for macro queries that use macro_sentiment_label)
+    # Macro label to probability mapping
     _MACRO_PROBS = {
         "very positive": (0.90, 0.02, 0.08),
         "positive": (0.70, 0.05, 0.25),
@@ -89,24 +101,36 @@ async def list_news(
         "negative": (0.05, 0.70, 0.25),
         "very negative": (0.02, 0.90, 0.08),
     }
-    is_macro_query = category == "macro"
 
     articles = []
     for r in rows:
         sentiment = None
-        if r.label is not None:
-            if is_macro_query:
-                pos, neg, neu = _MACRO_PROBS.get(r.label, (0.15, 0.15, 0.70))
-                sentiment = SentimentSchema(
-                    positive=pos, negative=neg, neutral=neu, label=r.label,
-                )
-            else:
+        macro_label = getattr(r, "macro_sentiment_label", None)
+        score_label = getattr(r, "label", None)
+
+        if use_asset_sentiment:
+            # Asset page: always use asset-perspective sentiment_scores
+            if score_label is not None:
                 sentiment = SentimentSchema(
                     positive=float(r.positive),
                     negative=float(r.negative),
                     neutral=float(r.neutral),
-                    label=r.label,
+                    label=score_label,
                 )
+        elif r.is_macro and macro_label:
+            # Macro article in general view: use macro perspective
+            pos, neg, neu = _MACRO_PROBS.get(macro_label, (0.15, 0.15, 0.70))
+            sentiment = SentimentSchema(
+                positive=pos, negative=neg, neutral=neu, label=macro_label,
+            )
+        elif score_label is not None:
+            # Non-macro article: use asset-perspective sentiment
+            sentiment = SentimentSchema(
+                positive=float(r.positive),
+                negative=float(r.negative),
+                neutral=float(r.neutral),
+                label=score_label,
+            )
 
         articles.append(
             NewsArticleSchema(
