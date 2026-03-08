@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     name VARCHAR(255) NOT NULL,
     category VARCHAR(50) NOT NULL CHECK (category IN ('stock', 'etf', 'commodity')),
     yfinance_symbol VARCHAR(20) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -169,11 +170,22 @@ CREATE INDEX idx_intraday_prices_instrument_ts ON intraday_prices(instrument_id,
 
 -- Seed instruments
 INSERT INTO instruments (symbol, name, category, yfinance_symbol) VALUES
+    -- Stocks
     ('RTX', 'RTX Corporation', 'stock', 'RTX'),
     ('NVDA', 'NVIDIA Corporation', 'stock', 'NVDA'),
     ('GOOGL', 'Alphabet Inc.', 'stock', 'GOOGL'),
     ('AAPL', 'Apple Inc.', 'stock', 'AAPL'),
+    ('TSLA', 'Tesla, Inc.', 'stock', 'TSLA'),
+    ('PLTR', 'Palantir Technologies Inc.', 'stock', 'PLTR'),
+    ('LLY', 'Eli Lilly and Company', 'stock', 'LLY'),
+    ('NVO', 'Novo Nordisk A/S', 'stock', 'NVO'),
+    ('WMT', 'Walmart Inc.', 'stock', 'WMT'),
+    ('XOM', 'Exxon Mobil Corporation', 'stock', 'XOM'),
+    -- ETFs
     ('IITU', 'iShares US Technology ETF', 'etf', 'IITU.L'),
+    ('SMH', 'VanEck Semiconductor ETF', 'etf', 'SMH'),
+    ('VOO', 'Vanguard S&P 500 ETF', 'etf', 'VOO'),
+    -- Commodities
     ('GOLD', 'Gold Futures', 'commodity', 'GC=F'),
     ('OIL', 'Crude Oil Futures', 'commodity', 'CL=F')
 ON CONFLICT (symbol) DO NOTHING;

@@ -10,6 +10,25 @@ from dateutil import parser as dateparser
 
 logger = logging.getLogger(__name__)
 
+# Shared HTTP session — reused across all feed fetches to avoid
+# creating/destroying TCP connections every cycle.
+_shared_session: aiohttp.ClientSession | None = None
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; TradeSignal/1.0)",
+    "Accept": "application/rss+xml, application/xml, text/xml",
+}
+
+
+def _get_session() -> aiohttp.ClientSession:
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        timeout = aiohttp.ClientTimeout(total=30)
+        connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+        _shared_session = aiohttp.ClientSession(
+            timeout=timeout, headers=_HEADERS, connector=connector
+        )
+    return _shared_session
+
 
 async def fetch_feed(
     url: str,
@@ -20,17 +39,12 @@ async def fetch_feed(
 ) -> list[dict]:
     """Fetch a single RSS feed and return parsed articles (title + description only)."""
     try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; TradeSignal/1.0)",
-                "Accept": "application/rss+xml, application/xml, text/xml",
-            }
-            async with session.get(url, headers=headers, ssl=False) as resp:
-                if resp.status != 200:
-                    logger.warning("Feed %s returned status %d", source, resp.status)
-                    return []
-                body = await resp.text()
+        session = _get_session()
+        async with session.get(url, ssl=False) as resp:
+            if resp.status != 200:
+                logger.warning("Feed %s returned status %d", source, resp.status)
+                return []
+            body = await resp.text()
     except Exception:
         logger.exception("Failed to fetch feed %s", source)
         return []

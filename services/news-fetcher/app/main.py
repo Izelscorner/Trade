@@ -27,8 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("news-fetcher")
 
-MAIN_INTERVAL = 10           # 10 seconds
-SLOW_INTERVAL = 30           # 30 seconds
+MAIN_INTERVAL = 120          # 2 minutes — RSS feeds rarely update faster
+SLOW_INTERVAL = 180          # 3 minutes
 CLEANUP_INTERVAL = 900       # 15 minutes
 NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
 
@@ -70,8 +70,10 @@ async def fetch_instrument_news(inst: dict) -> int:
 
 
 async def main_loop() -> None:
-    """Main fetch loop — macro feeds + asset-specific feeds every 10 seconds."""
+    """Main fetch loop — macro feeds + asset-specific feeds."""
     sem = asyncio.Semaphore(5)
+    _cached_instruments: list[dict] = []
+    _instrument_refresh_counter = 0
 
     async def fetch_with_semaphore(inst: dict) -> int:
         async with sem:
@@ -100,11 +102,16 @@ async def main_loop() -> None:
                         for const_inst in constituents:
                             await fetch_instrument_news(const_inst)
 
+            # Refresh instrument list every 10 cycles (~20 min) instead of every cycle
+            _instrument_refresh_counter += 1
+            if not _cached_instruments or _instrument_refresh_counter % 10 == 0:
+                _cached_instruments = await get_instruments()
+                logger.info("Refreshed instrument list: %d instruments", len(_cached_instruments))
+
             # Fetch all instrument-specific feeds concurrently
-            instruments = await get_instruments()
-            tasks = [fetch_with_semaphore(inst) for inst in instruments]
+            tasks = [fetch_with_semaphore(inst) for inst in _cached_instruments]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for inst, result in zip(instruments, results):
+            for inst, result in zip(_cached_instruments, results):
                 if isinstance(result, Exception):
                     logger.error("Error fetching news for %s: %s", inst["symbol"], result)
 
@@ -163,7 +170,7 @@ async def get_etf_constituent_instruments(etf_instrument_id: str) -> list[dict]:
         ]
 
 
-ETF_CONSTITUENT_INTERVAL = 300  # 5 minutes
+ETF_CONSTITUENT_INTERVAL = 600  # 10 minutes — constituents don't change often
 
 
 async def get_all_etf_constituents() -> list[dict]:

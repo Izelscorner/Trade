@@ -304,15 +304,23 @@ Trade/
 
 ## Tracked Instruments
 
-| Symbol | Name                      | Category  | yfinance |
-|--------|---------------------------|-----------|----------|
-| RTX    | RTX Corporation           | Stock     | RTX      |
-| NVDA   | NVIDIA Corporation        | Stock     | NVDA     |
-| GOOGL  | Alphabet Inc.             | Stock     | GOOGL    |
-| AAPL   | Apple Inc.                | Stock     | AAPL     |
-| IITU   | iShares US Technology ETF | ETF       | IITU.L   |
-| GOLD   | Gold Futures              | Commodity | GC=F     |
-| OIL    | Crude Oil Futures         | Commodity | CL=F     |
+| Symbol | Name                       | Category  | yfinance |
+|--------|----------------------------|-----------|----------|
+| RTX    | RTX Corporation            | Stock     | RTX      |
+| NVDA   | NVIDIA Corporation         | Stock     | NVDA     |
+| GOOGL  | Alphabet Inc.              | Stock     | GOOGL    |
+| AAPL   | Apple Inc.                 | Stock     | AAPL     |
+| TSLA   | Tesla, Inc.                | Stock     | TSLA     |
+| PLTR   | Palantir Technologies Inc. | Stock     | PLTR     |
+| LLY    | Eli Lilly and Company      | Stock     | LLY      |
+| NVO    | Novo Nordisk A/S           | Stock     | NVO      |
+| WMT    | Walmart Inc.               | Stock     | WMT      |
+| XOM    | Exxon Mobil Corporation    | Stock     | XOM      |
+| IITU   | iShares US Technology ETF  | ETF       | IITU.L   |
+| SMH    | VanEck Semiconductor ETF   | ETF       | SMH      |
+| VOO    | Vanguard S&P 500 ETF       | ETF       | VOO      |
+| GOLD   | Gold Futures               | Commodity | GC=F     |
+| OIL    | Crude Oil Futures          | Commodity | CL=F     |
 
 New instruments can be added dynamically via `POST /api/v1/instruments`.
 

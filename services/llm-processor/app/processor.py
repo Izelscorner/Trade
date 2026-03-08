@@ -38,15 +38,16 @@ logger = logging.getLogger(__name__)
 PROCESS_INTERVAL = 3  # seconds between processing cycles
 BATCH_SIZE = 30
 
-# Sub-batch sizes for LLM calls (keep prompts from getting too long)
-CLASSIFY_BATCH = 8    # articles per classify API call
-SENTIMENT_BATCH = 6   # articles per sentiment API call (per instrument)
-MACRO_BATCH = 3       # macro articles per macro-sentiment API call (small = avoids truncation)
+# Sub-batch sizes for LLM calls — larger batches = fewer API calls.
+# Qwen 122B handles these sizes well with structured JSON output.
+CLASSIFY_BATCH = 12   # articles per classify API call (was 8 — 33% fewer calls)
+SENTIMENT_BATCH = 8   # articles per sentiment API call per instrument (was 6 — 25% fewer calls)
+MACRO_BATCH = 5       # macro articles per macro-sentiment API call (was 3 — 40% fewer calls)
 
 # Token budgets per article (generous to avoid truncation → fallback burst)
-CLASSIFY_TOKENS_PER_ARTICLE = 130   # {"id","type","instruments","is_macro"} × N
-SENTIMENT_TOKENS_PER_ARTICLE = 80   # increased: dual-horizon {"id","short_sentiment","short_confidence","long_sentiment","long_confidence"} × N
-MACRO_TOKENS_PER_ARTICLE = 140      # increased: dual-horizon macro
+CLASSIFY_TOKENS_PER_ARTICLE = 100   # {"id","type","instruments","is_macro"} × N — trimmed, actual ~60 tokens each
+SENTIMENT_TOKENS_PER_ARTICLE = 70   # dual-horizon {"id","short_sentiment","short_confidence","long_sentiment","long_confidence"} — actual ~45 each
+MACRO_TOKENS_PER_ARTICLE = 80       # dual-horizon macro — same structure as sentiment
 TOKENS_OVERHEAD = 150               # wrapper object + whitespace slack
 
 # Small sleep between consecutive sub-batch chunks to smooth rate-limit pressure
@@ -78,6 +79,47 @@ SENTIMENT_LABEL_MAP = {
     "negative": "negative",
     "very_negative": "very negative",
 }
+
+# --- Deterministic pre-processing: low-quality filter ---
+
+
+def is_low_quality_article(title: str, summary: str, content: str) -> bool:
+    """Pre-filter articles that are too low-quality for meaningful sentiment analysis.
+
+    Saves API calls and prevents noise from polluting the signal.
+    """
+    # Title is required and must have substance
+    if not title or len(title.strip()) < 15:
+        return True
+
+    # Combined text must have enough substance for analysis
+    text = f"{title} {summary} {content}".strip()
+    if len(text) < 40:
+        return True
+
+    # Title is just the summary repeated (aggregator filler)
+    if summary and title.strip().lower() == summary.strip().lower():
+        # Only title available, no additional content — borderline but allow if title is substantial
+        if not content and len(title) < 60:
+            return True
+
+    # SEO/auto-generated patterns
+    _LOW_QUALITY_PATTERNS = re.compile(
+        r"""(?ix)
+        (?:
+            ^(?:stock|share)s?\s+to\s+(?:watch|keep\s+an\s+eye\s+on|follow)\s+(?:today|this\s+week|right\s+now)
+            | ^(?:top|best|worst)\s+\d+\s+(?:stock|share|etf|fund)s?\s+(?:to|for)\b
+            | \bhigh\s+accuracy\s+investment\s+signals\b
+            | \bnaître\s+et\s+grandir\b
+            | ^how\s+.*\s+stock\s+responds?\s+to\s+policy\s+changes\b
+        )
+        """
+    )
+    if _LOW_QUALITY_PATTERNS.search(title):
+        return True
+
+    return False
+
 
 # --- Deterministic post-processing rules ---
 
@@ -120,8 +162,12 @@ _MACRO_PATTERNS = re.compile(
 
 # Commodity-specific price keywords
 _COMMODITY_PRICE_KEYWORDS = {
-    "gold": ["gold price", "gold futures", "gold market", "gold rally", "gold surge", "gold drop", "bullion"],
-    "oil": ["oil price", "crude oil", "oil futures", "oil market", "brent", "wti"],
+    "gold": ["gold price", "gold futures", "gold market", "gold rally", "gold surge", "gold drop", "bullion",
+             "safe haven", "safe-haven", "flight to safety"],
+    "oil": ["oil price", "crude oil", "oil futures", "oil market", "brent", "wti",
+            "oil surge", "oil output", "oil supply", "oil depots", "oil disruption",
+            "barrel", "opec", "strait of hormuz", "fuel depots", "oil and gas",
+            "energy crisis", "petrol"],
     "silver": ["silver price", "silver futures", "silver market"],
     "natural gas": ["natural gas price", "gas futures", "henry hub"],
     "copper": ["copper price", "copper futures"],
@@ -149,7 +195,21 @@ async def get_instruments() -> list[dict]:
 
 
 def build_name_lookup(instruments: list[dict]) -> dict[str, list[str]]:
-    """Build a symbol -> [search names] map dynamically from instrument data."""
+    """Build a symbol -> [search names] map dynamically from instrument data.
+
+    Uses MULTI-WORD PHRASES (not individual words) to avoid false positives.
+    Single common words like "and", "500", "semiconductor" caused mass-mistagging.
+    """
+    # Words too generic to use as standalone search terms
+    _STOP_WORDS = {
+        "and", "the", "of", "inc", "corp", "ltd", "llc", "plc", "etf",
+        "futures", "co", "company", "group", "holdings", "technologies",
+        "a", "an", "in", "on", "at", "to", "for", "by", "with", "from",
+        "us", "s&p", "500", "100", "50", "vanguard", "ishares", "vaneck",
+        "trust", "fund", "index", "technology", "semiconductor", "energy",
+        "financial", "global", "international", "capital", "resources",
+        "a/s",
+    }
     lookup = {}
     for inst in instruments:
         symbol = inst["symbol"]
@@ -159,13 +219,32 @@ def build_name_lookup(instruments: list[dict]) -> dict[str, list[str]]:
         if category == "commodity":
             lookup[symbol] = []
         else:
-            clean = re.sub(r'\b(inc\.?|corp\.?|corporation|ltd\.?|llc|plc|etf|futures|co\.?)\b', '', name, flags=re.I)
-            clean = clean.strip().strip(',').strip()
-            names = [n.strip() for n in clean.split() if len(n.strip()) > 2]
+            # Clean corporate suffixes and punctuation
+            clean = re.sub(r'\b(inc\.?|corp\.?|corporation|ltd\.?|llc|plc|etf|futures|co\.?|a/s)\b', '', name, flags=re.I)
+            clean = re.sub(r'[.,]+', ' ', clean)
+            clean = re.sub(r'\s+', ' ', clean).strip()
+
             search_names = []
-            if clean and len(clean) > 2:
-                search_names.append(clean)
-            search_names.extend(names)
+
+            # For multi-word names, extract significant words first
+            words = [w for w in clean.split() if w and w.lower() not in _STOP_WORDS and len(w) > 1]
+
+            if len(words) >= 2:
+                # Full multi-word phrase (e.g. "eli lilly", "exxon mobil", "novo nordisk")
+                full_phrase = " ".join(words)
+                if len(full_phrase) > 4:
+                    search_names.append(full_phrase)
+                # Also add consecutive word pairs for partial matching
+                for i in range(len(words) - 1):
+                    pair = f"{words[i]} {words[i+1]}"
+                    if len(pair) > 5:
+                        search_names.append(pair)
+            elif len(words) == 1 and len(words[0]) >= 4:
+                # Single distinctive word (e.g. "nvidia", "alphabet", "apple", "walmart", "tesla", "palantir")
+                search_names.append(words[0])
+            # If no significant words extracted (e.g. "RTX Corporation" -> "rtx" is too short),
+            # that's OK — the ticker symbol check in _check_direct_mention handles it.
+
             seen = set()
             unique = []
             for n in search_names:
@@ -179,14 +258,19 @@ def build_name_lookup(instruments: list[dict]) -> dict[str, list[str]]:
 
 
 def _check_direct_mention(title: str, content: str, name_lookup: dict[str, list[str]], instruments: list[dict]) -> set[str]:
-    """Check which tracked instruments are directly mentioned by name in text."""
+    """Check which tracked instruments are directly mentioned by name in text.
+
+    Uses word-boundary matching to avoid false positives (e.g. 'and' in 'demand').
+    """
     combined = f"{title} {content[:500]}".lower()
     mentioned = set()
 
     for symbol, names in name_lookup.items():
-        if symbol.lower() in combined:
+        # Check ticker symbol with word boundary (avoids matching "gold" in "Goldman")
+        if re.search(r'\b' + re.escape(symbol.lower()) + r'\b', combined):
             mentioned.add(symbol)
             continue
+        # Check name phrases — these are already multi-word so substring is safer
         if any(n in combined for n in names):
             mentioned.add(symbol)
 
@@ -218,8 +302,19 @@ def postprocess_classification(
     combined = f"{title} {content[:300]}"
 
     _MACRO_CATEGORIES = {"macro_markets", "macro_politics", "macro_conflict"}
+
+    # For macro feed articles: trust LLM if it says NOT macro AND the content
+    # is clearly about a specific company (stock patterns). Otherwise default to macro.
     if source_category in _MACRO_CATEGORIES:
-        llm_is_macro = True
+        if not llm_is_macro and _ASSET_SPECIFIC_PATTERNS.search(title) and not _MACRO_PATTERNS.search(combined):
+            # LLM correctly identified this as company-specific despite being in a macro feed
+            llm_is_macro = False
+        elif _MACRO_PATTERNS.search(combined):
+            # Has actual macro content — force macro
+            llm_is_macro = True
+        else:
+            # From macro feed but no strong signals either way — trust LLM
+            pass
 
     if source_category == "asset_specific":
         if llm_is_macro and not _MACRO_PATTERNS.search(combined):
@@ -229,6 +324,7 @@ def postprocess_classification(
         if not _MACRO_PATTERNS.search(combined):
             llm_is_macro = False
 
+    # Force macro=true if strong macro patterns present regardless of source
     if not llm_is_macro and _MACRO_PATTERNS.search(combined):
         llm_is_macro = True
 
@@ -475,6 +571,23 @@ async def process_batch(
     if not articles:
         return
 
+    # --- Step 0: Pre-filter low-quality articles ---
+    low_quality_ids = []
+    quality_articles = []
+    for art in articles:
+        if is_low_quality_article(art["title"], art.get("summary", ""), art.get("content", "")):
+            logger.info("Filtered low-quality: '%s'", art["title"][:60])
+            low_quality_ids.append(art["id"])
+        else:
+            quality_articles.append(art)
+
+    for art_id in low_quality_ids:
+        await delete_article(art_id)
+
+    articles = quality_articles
+    if not articles:
+        return
+
     # --- Step 1: Batch classify ---
     classify_results: dict[str, dict] = {}  # article_id -> classification
     for chunk_start in range(0, len(articles), CLASSIFY_BATCH):
@@ -585,8 +698,6 @@ async def process_batch(
                         etf_relevance.get(etf_symbol, 0),
                         weight_relevance
                     )
-
-        # Update DB flags + instrument map (with ETF-aware relevance scores)
 
         # Update DB flags + instrument map (with ETF-aware relevance scores)
         await update_article_tags(art_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids, etf_relevance)

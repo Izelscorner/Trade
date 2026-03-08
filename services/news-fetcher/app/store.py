@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 _migrated = False
 
+# In-memory cache of known URL hashes — avoids DB round-trip for every article.
+# Populated once from DB on first call, then kept in sync as new articles arrive.
+_known_hashes: set[str] = set()
+_hash_cache_loaded = False
+
 
 async def ensure_schema():
     """Migrate news_articles table to new schema if needed."""
@@ -68,6 +73,27 @@ async def ensure_schema():
     logger.info("Schema migration complete")
 
 
+async def _ensure_hash_cache(session) -> None:
+    """Load recent URL hashes from DB on first call.
+
+    Only loads last 30 days — older articles are already deduped by the
+    DB UNIQUE constraint on (title, source). This keeps memory bounded
+    while still providing fast O(1) lookups for recent articles.
+    On restart, this reloads from DB so no hashes are lost.
+    """
+    global _known_hashes, _hash_cache_loaded
+    if _hash_cache_loaded:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    result = await session.execute(
+        text("SELECT url_hash FROM news_fetch_history WHERE fetched_at >= :cutoff"),
+        {"cutoff": cutoff},
+    )
+    _known_hashes = {r[0] for r in result.fetchall()}
+    _hash_cache_loaded = True
+    logger.info("Loaded %d URL hashes into memory cache (last 30 days)", len(_known_hashes))
+
+
 async def upsert_articles(articles: list[dict]) -> int:
     """Insert articles, skipping duplicates, and map to an instrument if provided.
 
@@ -85,11 +111,12 @@ async def upsert_articles(articles: list[dict]) -> int:
     inserted = 0
 
     async with async_session() as session:
-        # Load recent article titles from history to avoid fuzzy duplicates efficiently.
-        # This guarantees we don't refetch things that were already marked spam/deleted
+        await _ensure_hash_cache(session)
+
+        # Load recent titles for fuzzy dedup (only titles, not full rows)
         cutoff = datetime.now(timezone.utc) - timedelta(days=3)
         recent_res = await session.execute(
-            text("SELECT url_hash, title, '' FROM news_fetch_history WHERE fetched_at >= :cutoff ORDER BY fetched_at DESC LIMIT 1500"),
+            text("SELECT url_hash, title FROM news_fetch_history WHERE fetched_at >= :cutoff ORDER BY fetched_at DESC LIMIT 1500"),
             {"cutoff": cutoff}
         )
         recent_db_articles = [(r[0], (r[1] or "").lower(), "") for r in recent_res.fetchall()]
@@ -100,19 +127,14 @@ async def upsert_articles(articles: list[dict]) -> int:
             try:
                 title_lower = (article["title"] or "").lower()
                 summary_lower = (article["summary"] or "").lower()
-                
+
                 # Compute MD5 hash for the article using its link
                 link = article.get("link") or ""
                 hash_input = link if link else f"{title_lower}-{article.get('source', '')}"
                 url_hash = hashlib.md5(hash_input.encode('utf-8')).hexdigest()
 
-                # Check if we've ever fetched this hash
-                history_check = await session.execute(
-                    text("SELECT 1 FROM news_fetch_history WHERE url_hash = :h"),
-                    {"h": url_hash}
-                )
-                if history_check.fetchone():
-                    logger.debug("Skipping already fetched article (hash present): %s", title_lower[:80])
+                # Fast in-memory hash check — no DB round-trip
+                if url_hash in _known_hashes:
                     continue
 
                 # Fuzzy duplicate detection
@@ -170,7 +192,8 @@ async def upsert_articles(articles: list[dict]) -> int:
 
                 if matched_id:
                     logger.debug("Skipping fuzzy duplicate article: %s", title_lower[:80])
-                    # Ensure we record this URL hash too so we don't even fuzzy-match it next time
+                    # Record hash so we skip it instantly next time (memory + DB)
+                    _known_hashes.add(url_hash)
                     await session.execute(
                         text("INSERT INTO news_fetch_history (url_hash, title) VALUES (:h, :t) ON CONFLICT DO NOTHING"),
                         {"h": url_hash, "t": article["title"][:500]}
@@ -208,7 +231,8 @@ async def upsert_articles(articles: list[dict]) -> int:
                     logger.info("Stored new article: %s", article["title"][:80])
                     seen_in_batch.append((row[0], title_lower, summary_lower))
                 
-                # Record to fetch history so we never fetch it again
+                # Record to fetch history so we never fetch it again (memory + DB)
+                _known_hashes.add(url_hash)
                 await session.execute(
                     text("""
                         INSERT INTO news_fetch_history (url_hash, title)

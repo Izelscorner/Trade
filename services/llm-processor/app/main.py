@@ -140,14 +140,16 @@ async def process_loop() -> None:
     while True:
         try:
             refresh_counter += 1
-            if refresh_counter % 1 == 0:
+            # Refresh instruments every 100 cycles (~5 minutes) instead of every cycle.
+            # Instruments rarely change — no need to query DB every 3 seconds.
+            if refresh_counter % 100 == 0:
                 instruments = await get_instruments()
                 instrument_ids = {inst["symbol"]: inst["id"] for inst in instruments}
                 instruments_by_symbol = {inst["symbol"]: inst for inst in instruments}
                 valid_symbols = set(instrument_ids.keys())
                 symbol_mapping, valid_symbols_str = build_instrument_context(instruments)
                 name_lookup = build_name_lookup(instruments)
-                
+
                 # Populate ETF constituent data for new ETFs
                 etf_instruments = [i for i in instruments if i["category"] == "etf"]
                 if etf_instruments:
