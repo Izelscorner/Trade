@@ -27,7 +27,8 @@
       "Bash(__NEW_LINE_ec87c8ccb7770ed6__ echo \"=== NASDAQ IPO ===\")",
       "Bash(curl -s -L --max-time 10 \"https://www.nasdaqtrader.com/rss.aspx?feed=currentheadlines&categorylist=19\" -H \"User-Agent: Mozilla/5.0\")",
       "Bash(__NEW_LINE_7e099c60d25ffdc0__ echo \"=== NASDAQ ETF ===\")",
-      "Bash(curl -s -L --max-time 10 \"https://www.nasdaqtrader.com/rss.aspx?feed=currentheadlines&categorylist=14\" -H \"User-Agent: Mozilla/5.0\")"
+      "Bash(curl -s -L --max-time 10 \"https://www.nasdaqtrader.com/rss.aspx?feed=currentheadlines&categorylist=14\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(colima start)"
     ],
     "deny": [
       "Read(./.env)"

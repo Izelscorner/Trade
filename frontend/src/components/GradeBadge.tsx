@@ -1,84 +1,95 @@
-/** Grade badge component with color coding */
+/** Buy-confidence badge — shows percentage + action label instead of letter grade. */
+
+import { scoreToBuyConfidence, buyConfidenceToAction } from "../types";
 
 interface GradeBadgeProps {
-  grade: string | null;
+  grade: string | null;         // action label (or legacy letter grade)
+  score?: number | null;        // raw score [-3, 3] — used to derive confidence
+  confidence?: number | null;   // pre-computed confidence [0, 100]
   size?: "sm" | "md" | "lg";
   showLabel?: boolean;
   label?: string;
   gradedAt?: string | null;
 }
 
-const gradeColors: Record<string, string> = {
-  "A+": "bg-grade-a-plus/20 text-grade-a-plus border-grade-a-plus/30",
-  A: "bg-grade-a/20 text-grade-a border-grade-a/30",
-  "B+": "bg-grade-b-plus/20 text-grade-b-plus border-grade-b-plus/30",
-  B: "bg-grade-b/20 text-grade-b border-grade-b/30",
-  C: "bg-grade-c/20 text-grade-c border-grade-c/30",
-  D: "bg-grade-d/20 text-grade-d border-grade-d/30",
-  "D-": "bg-grade-d-minus/20 text-grade-d-minus border-grade-d-minus/30",
-  F: "bg-grade-f/20 text-grade-f border-grade-f/30",
-};
+/** Continuous hue: red (0 %) → amber (50 %) → emerald (100 %) */
+function confidenceColor(pct: number): { bg: string; text: string; border: string; bar: string } {
+  if (pct >= 78) return { bg: "bg-emerald-500/15", text: "text-emerald-400", border: "border-emerald-500/30", bar: "bg-emerald-500" };
+  if (pct >= 63) return { bg: "bg-green-500/15",   text: "text-green-400",   border: "border-green-500/30",   bar: "bg-green-500"   };
+  if (pct >= 54) return { bg: "bg-lime-500/15",    text: "text-lime-400",    border: "border-lime-500/30",    bar: "bg-lime-500"    };
+  if (pct >= 46) return { bg: "bg-slate-500/15",   text: "text-slate-400",   border: "border-slate-500/30",   bar: "bg-slate-500"   };
+  if (pct >= 37) return { bg: "bg-amber-500/15",   text: "text-amber-400",   border: "border-amber-500/30",   bar: "bg-amber-500"   };
+  if (pct >= 22) return { bg: "bg-orange-500/15",  text: "text-orange-400",  border: "border-orange-500/30",  bar: "bg-orange-500"  };
+  return              { bg: "bg-red-500/15",        text: "text-red-400",     border: "border-red-500/30",     bar: "bg-red-500"     };
+}
 
-const sizeClasses = {
-  sm: "text-xs px-2 py-0.5 min-w-[28px]",
-  md: "text-sm px-3 py-1 min-w-[36px]",
-  lg: "text-lg px-4 py-2 min-w-[48px] font-bold",
-};
-
-// Formatter for graded date
 function formatGradedAt(dateStr: string) {
   try {
     const d = new Date(dateStr);
     if (isNaN(d.getTime())) return "";
     return new Intl.DateTimeFormat("en-US", {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "numeric",
+      month: "short", day: "numeric",
+      hour: "numeric", minute: "numeric",
     }).format(d);
   } catch {
     return "";
   }
 }
 
+const sizeClasses = {
+  sm: { wrap: "min-w-[52px]", pct: "text-xs font-bold", lbl: "text-[9px]" },
+  md: { wrap: "min-w-[64px]", pct: "text-sm font-bold", lbl: "text-[10px]" },
+  lg: { wrap: "min-w-[80px]", pct: "text-xl font-bold", lbl: "text-xs" },
+};
+
 export default function GradeBadge({
   grade,
+  score,
+  confidence,
   size = "md",
   showLabel,
   label,
   gradedAt,
 }: GradeBadgeProps) {
-  if (!grade) {
+  // Resolve confidence: prefer pre-computed, else derive from score, else 50
+  const pct: number = confidence ?? (score !== undefined && score !== null ? scoreToBuyConfidence(score) : 50);
+  const action = grade && grade.length > 2
+    ? grade   // already an action label from new backend
+    : buyConfidenceToAction(pct);
+
+  const colors = confidenceColor(pct);
+  const sz = sizeClasses[size];
+
+  if (!grade && score === undefined && confidence === undefined) {
     return (
-      <span
-        className={`inline-flex items-center justify-center rounded-md border bg-surface-2/50 text-text-muted border-border-subtle ${sizeClasses[size]}`}
-      >
+      <span className="inline-flex items-center justify-center rounded-lg border bg-surface-2/50 text-text-muted border-border-subtle px-2 py-1 text-xs">
         —
       </span>
     );
   }
 
-  const colorClass =
-    gradeColors[grade] ||
-    "bg-surface-2/50 text-text-muted border-border-subtle";
-
   return (
     <div
-      className="inline-flex flex-col items-center gap-0.5"
+      className={`inline-flex flex-col items-center gap-0.5 ${sz.wrap}`}
       title={gradedAt ? `Calculated: ${formatGradedAt(gradedAt)}` : undefined}
     >
+      {/* Percentage pill */}
       <span
-        className={`inline-flex items-center justify-center rounded-md border font-semibold font-mono tracking-wide ${colorClass} ${sizeClasses[size]} transition-all duration-200 hover:scale-105`}
+        className={`inline-flex items-center justify-center rounded-lg border font-mono transition-all duration-200 hover:scale-105 px-2 py-0.5 gap-1 ${colors.bg} ${colors.text} ${colors.border} ${sz.pct} w-full`}
       >
-        {grade}
+        {pct.toFixed(0)}%
       </span>
+
+      {/* Action label */}
+      <span className={`${colors.text} ${sz.lbl} font-semibold tracking-tight leading-none text-center w-full`}>
+        {action}
+      </span>
+
       {showLabel && label && (
-        <span className="text-[10px] text-text-muted uppercase tracking-wider">
-          {label}
-        </span>
+        <span className="text-[9px] text-text-muted uppercase tracking-wider">{label}</span>
       )}
       {gradedAt && (
-        <span className="text-[9px] text-text-muted/60 tracking-tighter mt-0.5">
+        <span className="text-[8px] text-text-muted/50 tracking-tighter mt-0.5">
           {formatGradedAt(gradedAt)}
         </span>
       )}

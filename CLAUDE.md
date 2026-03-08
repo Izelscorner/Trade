@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-A Docker-based, multi-service trading signal and investment analysis platform that provides real-time and daily analysis for stocks, ETFs, and commodities. The system aggregates news sentiment, technical indicators, and live pricing into a unified grading system for investment instruments.
+A Docker-based, multi-service trading signal and investment analysis platform that provides real-time and daily analysis for stocks, ETFs, and commodities. The system aggregates news sentiment, technical indicators, and live pricing into a mathematically rigorous buy-confidence scoring system. Output is a sigmoid-scaled percentage (0-100%) per instrument, with actionable labels (Strong Buy to Strong Sell).
 
 ## Architecture
 
-All services run as Docker containers orchestrated via Docker Compose.
+All services run as Docker containers orchestrated via Docker Compose. Two isolated networks: `internal` (DB-only access) and `egress` (external API/feed access). All containers are hardened (non-root, read-only fs, cap-drop ALL, resource limits).
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
@@ -39,9 +39,15 @@ All services run as Docker containers orchestrated via Docker Compose.
 ### 1. PostgreSQL Database Service
 
 - **Port:** 5432
+- **Image:** `postgres:16-alpine`
 - **Purpose:** Central data store for all services.
-- **Key Tables:** instruments, news_articles, sentiment_scores, news_instrument_map, technical_indicators, grades, macro_sentiment, historical_prices, live_prices.
+- **Key Tables:** `instruments`, `news_articles`, `sentiment_scores`, `news_instrument_map`, `technical_indicators`, `grades`, `macro_sentiment`, `historical_prices`, `live_prices`, `intraday_prices`, `portfolio`, `processing_priority`.
 - **Key Flags:** `news_articles.ollama_processed` gates which articles are displayed and graded. `is_macro` and `is_asset_specific` classify article type.
+- **Schema Notes:**
+  - `grades.overall_grade` is `VARCHAR(20)` — stores action labels like "Strong Buy", "Neutral", "Sell".
+  - `grades.overall_score` is `NUMERIC(7,4)` — composite score in [-3, 3].
+  - `grades.details` is `JSONB` — contains `buy_confidence`, `action`, group scores, effective weights, confidence metrics.
+  - `macro_sentiment.label` CHECK constraint: `('positive', 'negative', 'neutral')`.
 
 ### 2. News Fetching Service (Python)
 
@@ -62,7 +68,7 @@ All services run as Docker containers orchestrated via Docker Compose.
 ### 3. LLM Processor Service (Python/FastAPI)
 
 - **Port:** 8003
-- **Purpose:** Unified AI pipeline that replaces the old Relevance (DistilBERT) and Sentiment (FinBERT) services. Polls the database for unprocessed articles and runs them through the highly capable Qwen 3.5 122B model via the NVIDIA API for classification and unrestrictive, context-aware sentiment analysis.
+- **Purpose:** Unified AI pipeline. Polls the database for unprocessed articles and runs them through the Qwen 3.5 122B model via the NVIDIA API for classification and context-aware sentiment analysis.
 - **Processing Pipeline (per article):**
   1. **Classification + Instrument Tagging** (single LLM call) — Returns `{type: "news"|"spam", instruments: ["AAPL", ...], is_macro: true|false}`. Spam articles are deleted.
   2. **Deterministic Post-Processing** — Regex-based rules correct LLM errors:
@@ -71,51 +77,136 @@ All services run as Docker containers orchestrated via Docker Compose.
      - Macro patterns (geopolitical conflicts, central banks) force `is_macro = true`
      - Foreign tickers in titles are validated against tracked instruments
      - Over-tagged instruments (>2) are filtered to only directly mentioned names
-  3. **Contextual Sentiment Analysis** (per-instrument LLM call) — Role-based prompting (e.g., "You are a quantitative analyst"). Relies 100% on the LLM's reasoning for price impact without any hardcoded deterministic rules. Returns `{sentiment, confidence}`.
-  4. **Macro Sentiment Aggregation** — After each batch, computes macro sentiment purely using LLM structured reasoning and stores in `macro_sentiment` table.
-- **API Call & Rate Limiting:** Uses the NVIDIA Hosted API for the `qwen/qwen3.5-122b-a10b` model. A strict global rate limiter (an `asyncio.Lock` enforcing a 1.5-second minimum delay between outgoing requests) guarantees the application never exceeds the hard limit of 40 Requests/Minute (RPM).
-- **Batch Processing Strategy:** Batch size 20, temperature 0.0 (deterministic), strict JSON formatting. Articles are grouped into sub-batches (8 for classify, 6 for sentiment, 3 for macro) and sent as single API prompts expecting JSON array responses to aggressively minimize total API calls.
-- **Sentiment Labels:** very_positive, positive, neutral, negative, very_negative — mapped to probability distributions (positive/negative/neutral) for compatibility with the grading system.
+  3. **Contextual Sentiment Analysis** (per-instrument LLM call) — Role-based prompting (e.g., "You are a quantitative analyst"). Returns `{sentiment, confidence}`.
+  4. **Macro Sentiment Aggregation** — After each batch, computes macro sentiment via LLM structured reasoning and stores in `macro_sentiment` table.
+- **API Call & Rate Limiting:** Uses the NVIDIA Hosted API for the `qwen/qwen3.5-122b-a10b` model. A strict global rate limiter (`asyncio.Lock` enforcing a 1.5-second minimum delay between outgoing requests) guarantees the app never exceeds the hard limit of 40 RPM.
+- **Batch Processing Strategy:** Batch size 20, temperature 0.0 (deterministic), strict JSON formatting. Articles are grouped into sub-batches (8 for classify, 6 for sentiment, 3 for macro) and sent as single API prompts expecting JSON array responses.
+- **Sentiment Labels:** `very_positive`, `positive`, `neutral`, `negative`, `very_negative`.
 
-### 5. Technical Analysis Service (Python/pandas)
+### 4. Technical Analysis Service (Python/pandas)
 
-- **Purpose:** Compute trend (SMA/MACD), momentum (RSI), and volatility signals per instrument.
+- **Purpose:** Compute 18 institutional-grade technical indicators from historical OHLCV data.
+- **Indicator Suite (grouped by function):**
+  - **Trend (6):** SMA_50, SMA_200, EMA_20, EMA_CROSS (Golden/Death Cross), MACD, ICHIMOKU
+  - **Momentum (4):** RSI (Wilder's smoothing), STOCHASTIC, WILLIAMS_R, CCI
+  - **Volume (3):** OBV, VWAP (20-day rolling), MFI (volume-weighted RSI)
+  - **Levels (2):** SUPPORT_RESISTANCE (20-day range), FIBONACCI (60-day retracement)
+  - **Volatility (1):** BOLLINGER Bands
+  - **Modifiers (2, not scored directly):** ADX (trend strength multiplier), ATR (volatility risk dampener)
+- **Signal Types:** `strong_buy`, `buy`, `neutral`, `sell`, `strong_sell`
 
-### 6. Live & Historical Price Services (yfinance)
+### 5. Live & Historical Price Services (yfinance)
 
 - **Purpose:** Manages market data. Historical data is incremental and never overwritten.
+- **Live Price Fetch Interval:** 60 seconds with dedup guard.
+- **Intraday:** 5-minute candles for 1-day charts.
 
-### 7. Grading Service (Python)
+### 6. Grading Service (Python) — Mathematical Model
 
-- **Purpose:** Aggregates technical, sentiment, and macro signals into investment grades.
-- **Update Frequency:** 60 seconds.
-- **Grade Scale:** A+ (strong bullish) to F (bearish), mapped from composite score [-1.0, 1.0].
-- **Weighting by category and term:**
-  - **Stocks:** Short (50% Tech, 30% Sentiment, 20% Macro) / Long (35% Tech, 30% Sentiment, 35% Macro)
-  - **ETFs:** Short (45% Tech, 25% Sentiment, 30% Macro) / Long (30% Tech, 25% Sentiment, 45% Macro)
-  - **Commodities:** Short (45% Tech, 30% Sentiment, 25% Macro) / Long (30% Tech, 30% Sentiment, 40% Macro)
-- **Sentiment Score:** 3-day rolling window, weighted by label. Falls back to macro category news if no instrument-specific sentiment exists.
-- **Macro Score:** Latest global macro sentiment from last 4 hours.
-- **Only uses articles where `ollama_processed = true`.**
+- **Purpose:** Synthesizes all signals into a buy-confidence percentage (0-100%) with actionable recommendation labels.
+- **Update Frequency:** Full regrade every 60 seconds; incremental on data changes every 10 seconds.
+- **Output:** `buy_confidence` in (0, 100), `action` label, composite score in [-3, 3].
 
-### 8. Backend API (FastAPI)
+#### 6a. Technical Score — Group-Based Weighted Average
+
+The 18 indicators are bucketed into 5 groups. Each group's score is the mean of its member indicator signals. Groups are then combined via category/term-specific weights to eliminate correlation bias (e.g., 4 momentum oscillators don't quadruple-count momentum).
+
+**Group weights (stock short-term example):** Trend 28%, Momentum 30%, Volume 20%, Levels 16%, Volatility 6%.
+
+**ADX modifier:** When ADX < 20 (no trend), Trend group dampened x0.70. When ADX > 40 (strong trend), amplified x1.25.
+
+**ATR risk dampener:** ATR% > 5% -> overall tech score x0.65. ATR% > 3.5% -> x0.80. Reflects that high volatility reduces signal reliability.
+
+**Data completeness:** Fraction of indicator slots with actual data -> used to reduce effective weight of sparse technicals.
+
+#### 6b. Sentiment Score — Exponential Time-Decay
+
+Articles from the last 7 days are weighted by `exp(-lambda * age_hours)` where lambda = ln(2)/48. This gives a **48-hour half-life**: a 2-day-old article has 50% the weight of a fresh one. Neutral articles are excluded from the directional mean. Confidence uses a **logarithmic ramp** `log(1+n)/log(11)` over the effective (decay-weighted) non-neutral article count:
+
+| Articles | Linear (old) | Log (new) |
+|----------|-------------|-----------|
+| 1        | 10%         | 30%       |
+| 3        | 30%         | 54%       |
+| 5        | 50%         | 68%       |
+| 10       | 100%        | 100%      |
+
+#### 6c. Macro Score — Time-Decayed Aggregate
+
+Aggregates up to 20 `macro_sentiment` records from the past 12 hours using a **6-hour half-life** exponential decay. Recent readings dominate but historical context modulates the signal. Confidence is log-scaled over total article count.
+
+#### 6d. Composite Weighting — Confidence-Adjusted
+
+Nominal weights per category and term:
+
+| Category  | Term  | Technical | Sentiment | Macro |
+|-----------|-------|-----------|-----------|-------|
+| Stock     | Short | 50%       | 30%       | 20%   |
+| Stock     | Long  | 35%       | 30%       | 35%   |
+| ETF       | Short | 45%       | 25%       | 30%   |
+| ETF       | Long  | 30%       | 25%       | 45%   |
+| Commodity | Short | 45%       | 30%       | 25%   |
+| Commodity | Long  | 30%       | 30%       | 40%   |
+
+**Confidence adjustment:** Each sub-signal's effective weight is `nominal_weight * (0.5 + 0.5 * confidence)`. When sentiment has zero articles (confidence=0), its weight drops to 50% of nominal instead of anchoring the composite at zero. Weights are then renormalized.
+
+#### 6e. Sigmoid Buy-Confidence
+
+The composite score in [-3, 3] is mapped to buy-confidence in (0, 100) via sigmoid:
+
+```
+buy_confidence = 100 / (1 + e^(-1.5 * score))
+```
+
+| Score | Buy Confidence | Action      |
+|-------|---------------|-------------|
+| +3.0  | 95%           | Strong Buy  |
+| +1.5  | 82%           | Strong Buy  |
+| +0.7  | 65%           | Buy         |
+| 0.0   | 50%           | Neutral     |
+| -0.7  | 35%           | Slight Sell |
+| -1.5  | 18%           | Sell        |
+| -3.0  | 5%            | Strong Sell |
+
+**Action thresholds:** >=78% Strong Buy, >=63% Buy, >=54% Slight Buy, >=46% Neutral, >=37% Slight Sell, >=22% Sell, <22% Strong Sell.
+
+### 7. Backend API (FastAPI)
 
 - **Port:** 8000
 - **Key Endpoints:**
-  - `GET /api/v1/dashboard` — All instruments with prices, grades
-  - `GET /api/v1/dashboard/macro` — Global macro sentiment (single entry, `region = 'global'`)
+  - `GET /api/v1/dashboard` — All instruments with prices, grades (includes `short_term_score`, `long_term_score`)
+  - `GET /api/v1/dashboard/macro` — Global macro sentiment
   - `GET /api/v1/dashboard/macro/news` — Recent macro news with sentiment
-  - `GET /api/v1/news` — Filtered news (by category, instrument_id). Only returns Ollama-processed articles with sentiment scores (uses `JOIN sentiment_scores`, not `LEFT JOIN`).
-  - `GET /api/v1/ai-analysis/{id}` — Gemini-powered deep analysis using system grades + news context
-  - `GET /api/v1/ai-analysis/independent/{id}` — Pure Gemini knowledge-based analysis
-- **WebSocket:** Real-time updates for prices, news, grades, macro sentiment.
+  - `GET /api/v1/news` — Filtered news (by category, instrument_id). Only returns `ollama_processed=true` articles with sentiment scores (`JOIN`, not `LEFT JOIN`).
+  - `GET /api/v1/grades?instrument_id=&term=` — Latest grades with details JSON
+  - `GET /api/v1/grades/history/{id}?term=&limit=` — Grade history
+  - `GET /api/v1/ai-analysis/{id}` — On-demand deep analysis using system grades + news context
+  - `GET /api/v1/ai-analysis/independent/{id}` — Pure LLM knowledge-based analysis
+  - `GET /api/v1/config` — Returns NIM model name
+  - `POST /api/v1/instruments` — Add new instruments dynamically
+  - `GET/POST/DELETE /api/v1/portfolio` — User portfolio/watchlist management
+  - `POST /api/v1/news/prioritize/{id}` — Priority-process an instrument's unprocessed news
+- **WebSocket (`/api/v1/ws/updates`):** Subscription-based real-time updates.
+  - Clients send `{"subscribe": {"page": "dashboard"|"asset_detail"|"asset_list"|"portfolio"|"news", "instrument_ids": [...], "category": "..."}}`
+  - Server pushes: `live_prices`, `news_updates`, `grade_updates`, `technical_updates`, `macro_sentiment_updates` — filtered per subscription.
+  - Navigating to asset_detail auto-writes to `processing_priority` table to fast-track that instrument's news through the LLM pipeline.
 
-### 9. Frontend (React/Vite/Tailwind 4)
+### 8. Frontend (React/Vite/Tailwind 4)
 
-- **Port:** 3000
-- **News Categories:** Markets, Politics, Conflict, Asset (no US/UK split — single global view)
+- **Port:** 3000 (nginx proxy to backend at :8000)
+- **Buy-Confidence Display:** Primary metric is a percentage (0-100%) with sigmoid-derived action labels. Radial SVG gauge on asset detail, percentage pills on dashboard cards.
+- **Technical Panel:** Indicators grouped by category (Trend, Momentum, Volume, Levels, Volatility, Modifiers) with per-group average scores. ADX/ATR called out as modifiers, not directly scored.
+- **Grade Detail:** Center-origin score bars (red/green from midpoint), confidence metrics per sub-signal, effective weight display, ATR risk factor annotation, technical group breakdown grid.
+- **News Categories:** Markets, Politics, Conflict, Asset (single global view).
 - **Macro Sentiment:** Displayed as single global indicator.
-- **State Management:** Jotai + Jotai Query for atomic state.
+- **State Management:** Jotai + Jotai Query for atomic state. `@tanstack/react-query` for some data.
+- **Key Components:**
+  - `GradeBadge` — Percentage pill + action label, continuous color gradient (emerald to amber to red).
+  - `GradeDetail` — SVG confidence gauge, sub-score bars, group breakdown, effective weights.
+  - `InstrumentCard` — Confidence pills for short/long term, composite confidence bar.
+  - `TechnicalPanel` — Grouped indicator list with group score summary row.
+  - `AIAnalysisModal` — LLM-powered analysis (system-integrated and independent modes).
+  - `MacroSentimentCard` — Global macro sentiment display.
+  - `PriceChart` — Historical OHLCV chart with day selector (1D/5D/1M/3M/1Y).
 
 ---
 
@@ -124,10 +215,10 @@ All services run as Docker containers orchestrated via Docker Compose.
 The system operates as a **unidirectional predictive pipeline**:
 
 1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds, `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`.
-2. **AI Processing Layer:** `llm-processor` polls for unprocessed articles, batch-classifies them (N articles → 1 NVIDIA API call → JSON array), applies deterministic post-processing for tagging, and batch-scores sentiment purely via LLM. Articles marked `ollama_processed = true`.
-3. **Signal Layer:** `technical-analysis` computes trend/momentum/volatility indicators from price data.
-4. **Synthesis Layer:** `grading` combines sentiment, technical, and macro signals into weighted investment grades (A+ to F).
-5. **Presentation Layer:** `backend` API serves only processed/scored articles. `frontend` displays grades, news, and macro sentiment.
+2. **AI Processing Layer:** `llm-processor` polls for unprocessed articles, batch-classifies them (N articles -> 1 NVIDIA API call -> JSON array), applies deterministic post-processing for tagging, and batch-scores sentiment purely via LLM. Articles marked `ollama_processed = true`.
+3. **Signal Layer:** `technical-analysis` computes 18 indicators (trend/momentum/volume/levels/volatility) from price data.
+4. **Synthesis Layer:** `grading` combines signals via group-based weighted averaging, time-decayed sentiment, sigmoid buy-confidence output. Result: percentage + action label per instrument per term.
+5. **Presentation Layer:** `backend` API serves only processed/scored articles. `frontend` displays buy-confidence percentages, group breakdowns, and macro sentiment.
 
 ## Project Structure
 
@@ -135,40 +226,101 @@ The system operates as a **unidirectional predictive pipeline**:
 Trade/
 ├── CLAUDE.md
 ├── docker-compose.yml
+├── .env                             # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY
 ├── services/
-│   ├── postgres/                    # Database init scripts
-│   ├── backend/                     # FastAPI REST API + Gemini AI analysis
+│   ├── postgres/init/01_init.sql    # Full DB schema + seed instruments
+│   ├── backend/                     # FastAPI REST API + WebSocket + AI analysis
+│   │   └── app/
+│   │       ├── main.py              # Lifespan, routes, WS background tasks
+│   │       ├── api/                 # Endpoint routers (dashboard, grades, news, prices, technical, ai_analysis, portfolio, ws)
+│   │       ├── core/db.py           # async SQLAlchemy session
+│   │       └── schemas.py           # Pydantic response schemas
 │   ├── news-fetcher/                # RSS/search feed ingestion
+│   │   └── app/
+│   │       ├── main.py              # Async loop orchestration
+│   │       ├── fetcher.py           # Feed parsing, content scraping, dedup
+│   │       └── feeds.py             # Feed URL definitions
 │   ├── llm-processor/               # Unified AI classification + sentiment (NVIDIA API / Qwen 122B)
-│   ├── technical-analysis/          # SMA/MACD/RSI computation
-│   ├── price-fetcher/               # yfinance live + historical prices
-│   └── grading/                     # Signal aggregation into grades
+│   ├── technical-analysis/          # 18-indicator suite
+│   │   └── app/
+│   │       ├── main.py              # Polling loop
+│   │       ├── indicators.py        # All indicator calculations (pandas/numpy)
+│   │       └── db.py
+│   ├── price-fetcher/               # yfinance live + historical + intraday
+│   └── grading/                     # Signal synthesis -> buy-confidence
+│       └── app/
+│           ├── main.py              # Polling loop with change detection
+│           ├── scorer.py            # Mathematical model (group scoring, time-decay, sigmoid)
+│           └── db.py
 └── frontend/                        # React/Vite/Tailwind UI
+    └── src/
+        ├── main.tsx
+        ├── App.tsx                  # Router
+        ├── types/index.ts           # TypeScript types + scoreToBuyConfidence() + buyConfidenceToAction()
+        ├── api/client.ts            # Centralized fetch/post/delete wrappers
+        ├── ws.ts                    # WebSocket subscription manager
+        ├── atoms/index.ts           # Jotai atoms + jotai-query atoms
+        ├── hooks/usePortfolio.ts
+        ├── pages/
+        │   ├── Dashboard.tsx
+        │   ├── AssetList.tsx
+        │   ├── AssetDetail.tsx      # Main instrument page
+        │   ├── News.tsx
+        │   └── Portfolio.tsx
+        └── components/
+            ├── GradeBadge.tsx        # Percentage pill + action label
+            ├── GradeDetail.tsx       # SVG gauge, sub-score bars, group breakdown
+            ├── InstrumentCard.tsx    # Dashboard card with confidence badges
+            ├── TechnicalPanel.tsx    # Grouped indicator display
+            ├── SignalBadge.tsx       # buy/sell/neutral signal pill
+            ├── NewsFeed.tsx
+            ├── PriceChart.tsx
+            ├── PriceChange.tsx
+            ├── MacroSentimentCard.tsx
+            ├── AIAnalysisModal.tsx
+            ├── CategoryFilter.tsx
+            ├── Navbar.tsx
+            └── Skeletons.tsx
 ```
 
 ## Tracked Instruments
 
-| Symbol | Name                      | Category  |
-| ------ | ------------------------- | --------- |
-| RTX    | RTX Corporation           | Stock     |
-| NVDA   | NVIDIA Corporation        | Stock     |
-| GOOGL  | Alphabet Inc.             | Stock     |
-| AAPL   | Apple Inc.                | Stock     |
-| IITU   | iShares US Technology ETF | ETF       |
-| GC=F   | Gold Futures              | Commodity |
-| CL=F   | Crude Oil Futures         | Commodity |
+| Symbol | Name                      | Category  | yfinance |
+|--------|---------------------------|-----------|----------|
+| RTX    | RTX Corporation           | Stock     | RTX      |
+| NVDA   | NVIDIA Corporation        | Stock     | NVDA     |
+| GOOGL  | Alphabet Inc.             | Stock     | GOOGL    |
+| AAPL   | Apple Inc.                | Stock     | AAPL     |
+| IITU   | iShares US Technology ETF | ETF       | IITU.L   |
+| GOLD   | Gold Futures              | Commodity | GC=F     |
+| OIL    | Crude Oil Futures         | Commodity | CL=F     |
+
+New instruments can be added dynamically via `POST /api/v1/instruments`.
+
+## Docker & Security
+
+- **Networks:** `internal` (bridge, internal-only — DB access), `egress` (bridge — internet access for APIs/feeds).
+- **All containers:** `read_only: true`, `cap_drop: ALL`, `security_opt: no-new-privileges:true`, resource limits (512M/1CPU typical).
+- **Frontend:** nginx, `cap_add: NET_BIND_SERVICE` only, 256M/0.5CPU.
+- **Postgres:** `cap_add: CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID`, tmpfs for `/tmp` and `/run/postgresql`.
+- **Environment:** All secrets via `.env` file (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY).
 
 ## Key Technical Decisions
 
-- **NVIDIA Hosted API (NIM)** for classification and sentiment — using `qwen/qwen3.5-122b-a10b`. Temperature 0. Uses advanced batch processing (N articles per call) and a global `asyncio.Lock` rate limiter (1.5s delay) to stay strictly below the 40 RPM limit while processing hundreds of articles efficiently.
-- **100% LLM-driven Sentiment** — With the highly capable Qwen 122B model, deterministic rigid sentiment mapping was abandoned. The LLM is trusted to quantitatively evaluate price impacts directly based on future cash flows and macro environments without hardcoded biases.
+- **Sigmoid buy-confidence** replaces letter grades — mathematically honest probability representation that asymptotically approaches but never reaches 0% or 100%.
+- **Group-based indicator averaging** eliminates correlation bias — 4 momentum oscillators get one collective vote, not 4x weight.
+- **ADX/ATR as modifiers** — ADX amplifies/dampens trend signals based on trend strength; ATR reduces overall confidence in high-volatility environments. Neither is scored as a directional signal.
+- **Exponential time-decay** on sentiment (48h half-life) and macro (6h half-life) — recent signals dominate, old signals fade correctly.
+- **Logarithmic confidence** — diminishing returns on article count, more information-theoretically sound than linear ramp.
+- **Confidence-adjusted composite weights** — sub-signals with low data reduce to 50% nominal weight instead of anchoring composite at zero.
+- **NVIDIA Hosted API (NIM)** for classification and sentiment — `qwen/qwen3.5-122b-a10b`, temperature 0, batch processing with 1.5s rate limiter for 40 RPM.
+- **100% LLM-driven Sentiment** — The LLM is trusted to quantitatively evaluate price impacts directly based on future cash flows and macro environments without hardcoded biases.
 - **Deterministic Classification Correction** — Regex rules still override basic model tagging hallucinations (e.g., classifying a company specific article as macro, or making up non-tracked tags).
 - **yfinance** for all market data (live + historical) — free, no API key required.
-- **Gemini API** for deep AI analysis — used only in backend for on-demand instrument analysis, not for batch processing.
-- **Jotai + Jotai Query** over Redux/React Query — lighter, atomic state management.
-- **Tailwind 4+** — latest version with CSS-first configuration.
+- **Jotai + Jotai Query** + `@tanstack/react-query` for state management.
+- **Tailwind 4+** with CSS-first configuration.
 - **FastAPI** for all Python HTTP services — async, fast, auto-docs.
-- **pandas** as core data manipulation library for technical analysis.
+- **pandas/numpy** for technical analysis indicator calculations.
 - **rapidfuzz** for fuzzy deduplication in news fetcher — C++ backend for performance.
 
 ## Improvement Roadmap
@@ -177,3 +329,6 @@ Trade/
 - [ ] **Message Broker:** Introduce Redis/RabbitMQ for news processing to replace DB polling for better scalability.
 - [ ] **Caching:** Add Redis caching layer in the Backend API for high-traffic assets.
 - [ ] **Testing:** Implement cross-service integration tests for the grading logic.
+- [ ] **Divergence Detection:** OBV/price divergence detection (price up + OBV down = bearish divergence) as a separate signal.
+- [ ] **Regime Detection:** Volatility regime detection (low-vol to breakout prediction) using ATR trends.
+- [ ] **Grade History Charting:** Time-series chart of buy-confidence % over days/weeks on asset detail page.

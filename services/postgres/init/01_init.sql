@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS grades (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
     term VARCHAR(10) NOT NULL CHECK (term IN ('short', 'long')),
-    overall_grade VARCHAR(2) NOT NULL,
+    overall_grade VARCHAR(20) NOT NULL,
     overall_score NUMERIC(7, 4) NOT NULL,
     technical_score NUMERIC(7, 4) NOT NULL,
     sentiment_score NUMERIC(7, 4) NOT NULL,
