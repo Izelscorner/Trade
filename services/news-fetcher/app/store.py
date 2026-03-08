@@ -112,7 +112,7 @@ async def upsert_articles(articles: list[dict]) -> int:
                     {"h": url_hash}
                 )
                 if history_check.fetchone():
-                    logger.info("Skipping already fetched article (hash present): %s", title_lower[:80])
+                    logger.debug("Skipping already fetched article (hash present): %s", title_lower[:80])
                     continue
 
                 # Fuzzy duplicate detection
@@ -169,7 +169,7 @@ async def upsert_articles(articles: list[dict]) -> int:
                                 break
 
                 if matched_id:
-                    logger.info("Skipping fuzzy duplicate article: %s", title_lower[:80])
+                    logger.debug("Skipping fuzzy duplicate article: %s", title_lower[:80])
                     # Ensure we record this URL hash too so we don't even fuzzy-match it next time
                     await session.execute(
                         text("INSERT INTO news_fetch_history (url_hash, title) VALUES (:h, :t) ON CONFLICT DO NOTHING"),
@@ -205,6 +205,7 @@ async def upsert_articles(articles: list[dict]) -> int:
                 row = result.fetchone()
                 if row:
                     inserted += 1
+                    logger.info("Stored new article: %s", article["title"][:80])
                     seen_in_batch.append((row[0], title_lower, summary_lower))
                 
                 # Record to fetch history so we never fetch it again
