@@ -148,7 +148,7 @@ export default function AssetList() {
       {/* Table */}
       <div className="rounded-xl bg-surface-1 border border-border-subtle overflow-hidden animate-slide-up">
         {/* Table Header */}
-        <div className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
+        <div className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
           <span />
           <SortHeader
             label="Symbol"
@@ -201,6 +201,11 @@ export default function AssetList() {
         ) : (
           <div className="px-5 py-12 text-center text-text-muted text-sm">
             No instruments found
+            {instruments && (
+              <div className="mt-2 text-[10px] opacity-30">
+                Instruments count: {instruments.length}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -259,7 +264,7 @@ function InstrumentRow({
 
   return (
     <div
-      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_100px_100px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
+      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
       style={{ animationDelay: `${index * 30}ms` }}
     >
       <button
@@ -280,13 +285,8 @@ function InstrumentRow({
         />
       </button>
 
-      <Link
-        to={`/asset/${instrument.id}`}
-        className="flex items-center gap-2"
-      >
-        <div
-          className={`w-1.5 h-1.5 rounded-full ${statusColor} bg-current`}
-        />
+      <Link to={`/asset/${instrument.id}`} className="flex items-center gap-2">
+        <div className={`w-1.5 h-1.5 rounded-full ${statusColor} bg-current`} />
         <span className="font-semibold text-text-primary group-hover:text-accent-cyan transition-colors font-mono">
           {instrument.symbol}
         </span>
@@ -331,6 +331,7 @@ function InstrumentRow({
       <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
           grade={instrument.short_term_grade}
+          score={instrument.short_term_score}
           size="sm"
           gradedAt={instrument.graded_at}
         />
@@ -339,6 +340,7 @@ function InstrumentRow({
       <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
           grade={instrument.long_term_grade}
+          score={instrument.long_term_score}
           size="sm"
           gradedAt={instrument.graded_at}
         />
@@ -419,7 +421,10 @@ function AddAssetModal({
           <div className="mt-3 space-y-2">
             {result.created.length > 0 && (
               <div className="p-3 rounded-lg bg-accent-emerald/10 border border-accent-emerald/30 text-accent-emerald text-sm">
-                Added: {result.created.map((c) => `${c.symbol} (${c.name})`).join(", ")}
+                Added:{" "}
+                {result.created
+                  .map((c) => `${c.symbol} (${c.name})`)
+                  .join(", ")}
               </div>
             )}
             {result.skipped.length > 0 && (

@@ -232,25 +232,14 @@ def postprocess_classification(
     if not llm_is_macro and _MACRO_PATTERNS.search(combined):
         llm_is_macro = True
 
-    foreign_tickers = re.findall(r'\$([A-Z]{1,5})\b', title)
-    if foreign_tickers:
-        foreign_tickers_set = set(foreign_tickers)
-        tracked_in_title = foreign_tickers_set & valid_symbols
-        if not tracked_in_title and foreign_tickers_set:
-            direct = _check_direct_mention(title, content, name_lookup, instruments)
-            llm_instruments = [s for s in llm_instruments if s in direct]
+    # Instead of filtering DOWN the LLM's instruments, we trust the LLM
+    # if it identified them. We simply ADD any instruments that were missed
+    # but found via direct keyword mentions.
+    direct = _check_direct_mention(title, content, name_lookup, instruments)
+    for sym in direct:
+        if sym not in llm_instruments:
+            llm_instruments.append(sym)
 
-    if llm_instruments:
-        direct = _check_direct_mention(title, content, name_lookup, instruments)
-        validated = [s for s in llm_instruments if s in direct]
-        if validated != llm_instruments:
-            logger.debug("Post-proc: filtered instruments %s -> %s for: '%s'", llm_instruments, validated, title[:60])
-            llm_instruments = validated
-
-    if not llm_instruments:
-        direct = _check_direct_mention(title, "", name_lookup, instruments)
-        if direct:
-            llm_instruments = list(direct)
 
     # --- ETF constituent propagation ---
     # If a tagged instrument is a constituent of a tracked ETF, also tag the ETF
@@ -493,17 +482,22 @@ async def process_batch(
         raw_instruments = clf.get("instruments", [])
         is_macro = clf.get("is_macro", False)
 
+        # Build complete set of recognized symbols: explicitly tracked + all ETF constituents
+        recognized_symbols = set(valid_symbols)
+        for etf_sym, constituents in _ETF_CONSTITUENTS.items():
+            recognized_symbols.update(constituents.keys())
+
         # Extract symbols
         tagged_instruments = []
         for inst in raw_instruments:
             if isinstance(inst, dict):
                 for key in inst.keys():
                     sym = key.strip().upper()
-                    if sym in valid_symbols:
+                    if sym in recognized_symbols:
                         tagged_instruments.append(sym)
             elif isinstance(inst, str):
                 symbol = inst.split(" ")[0].split("-")[0].strip().upper()
-                if symbol in valid_symbols:
+                if symbol in recognized_symbols:
                     tagged_instruments.append(symbol)
         tagged_instruments = list(dict.fromkeys(tagged_instruments))
 

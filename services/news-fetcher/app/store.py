@@ -55,6 +55,14 @@ async def ensure_schema():
             ON news_articles(ollama_processed, fetched_at DESC)
             WHERE ollama_processed = false
         """))
+        # Create fetch history table to prevent refetching filtered articles
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS news_fetch_history (
+                url_hash VARCHAR(32) PRIMARY KEY,
+                title VARCHAR(500),
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
         await session.commit()
     _migrated = True
     logger.info("Schema migration complete")
@@ -69,18 +77,22 @@ async def upsert_articles(articles: list[dict]) -> int:
     if not articles:
         return 0
 
+    import hashlib
+    import re
+
     await ensure_schema()
 
     inserted = 0
 
     async with async_session() as session:
-        # Load recent articles to avoid fuzzy duplicates efficiently
+        # Load recent article titles from history to avoid fuzzy duplicates efficiently.
+        # This guarantees we don't refetch things that were already marked spam/deleted
         cutoff = datetime.now(timezone.utc) - timedelta(days=3)
         recent_res = await session.execute(
-            text("SELECT id, title, summary FROM news_articles WHERE published_at >= :cutoff ORDER BY id DESC LIMIT 1500"),
+            text("SELECT url_hash, title, '' FROM news_fetch_history WHERE fetched_at >= :cutoff ORDER BY fetched_at DESC LIMIT 1500"),
             {"cutoff": cutoff}
         )
-        recent_db_articles = [(r[0], (r[1] or "").lower(), (r[2] or "").lower()) for r in recent_res.fetchall()]
+        recent_db_articles = [(r[0], (r[1] or "").lower(), "") for r in recent_res.fetchall()]
 
         seen_in_batch = []
 
@@ -88,6 +100,20 @@ async def upsert_articles(articles: list[dict]) -> int:
             try:
                 title_lower = (article["title"] or "").lower()
                 summary_lower = (article["summary"] or "").lower()
+                
+                # Compute MD5 hash for the article using its link
+                link = article.get("link") or ""
+                hash_input = link if link else f"{title_lower}-{article.get('source', '')}"
+                url_hash = hashlib.md5(hash_input.encode('utf-8')).hexdigest()
+
+                # Check if we've ever fetched this hash
+                history_check = await session.execute(
+                    text("SELECT 1 FROM news_fetch_history WHERE url_hash = :h"),
+                    {"h": url_hash}
+                )
+                if history_check.fetchone():
+                    logger.info("Skipping already fetched article (hash present): %s", title_lower[:80])
+                    continue
 
                 # Fuzzy duplicate detection
                 matched_id = None
@@ -95,7 +121,11 @@ async def upsert_articles(articles: list[dict]) -> int:
                 all_to_check = seen_in_batch + recent_db_articles
 
                 for rid, rtitle, rsummary in all_to_check:
-                    if title_lower == rtitle:
+                    # Clean publisher suffixes for a pure comparison
+                    clean_title = re.sub(r'\s+[-|]\s+[a-zA-Z\s\.]+$', '', title_lower).strip()
+                    clean_rtitle = re.sub(r'\s+[-|]\s+[a-zA-Z\s\.]+$', '', rtitle).strip()
+
+                    if title_lower == rtitle or clean_title == clean_rtitle:
                         matched_id = rid
                         break
 
@@ -105,14 +135,14 @@ async def upsert_articles(articles: list[dict]) -> int:
                     try:
                         from rapidfuzz import fuzz
 
-                        title_ratio = fuzz.ratio(title_lower, rtitle)
+                        title_ratio = fuzz.ratio(clean_title, clean_rtitle)
 
-                        if title_ratio > 90:
+                        if title_ratio > 85:
                             matched_id = rid
                             break
 
-                        if len(title_lower) > 50 and len(rtitle) > 50:
-                            if fuzz.partial_ratio(title_lower, rtitle) > 95:
+                        if len(clean_title) > 30 and len(clean_rtitle) > 30:
+                            if fuzz.partial_ratio(clean_title, clean_rtitle) > 90:
                                 matched_id = rid
                                 break
 
@@ -139,38 +169,53 @@ async def upsert_articles(articles: list[dict]) -> int:
                                 break
 
                 if matched_id:
-                    row = [matched_id]
-                    seen_in_batch.append((matched_id, title_lower, summary_lower))
-                else:
-                    # Determine initial flags based on category
-                    is_macro = article["category"] in ("macro_markets", "macro_politics", "macro_conflict")
-                    is_asset = article["category"] == "asset_specific"
-
-                    result = await session.execute(
-                        text("""
-                            INSERT INTO news_articles (title, link, summary, content, source, category,
-                                                       is_macro, is_asset_specific, ollama_processed, published_at)
-                            VALUES (:title, :link, :summary, :content, :source, :category,
-                                    :is_macro, :is_asset_specific, false, :published_at)
-                            ON CONFLICT (title, source) DO NOTHING
-                            RETURNING id
-                        """),
-                        {
-                            "title": article["title"],
-                            "link": article["link"],
-                            "summary": article["summary"],
-                            "content": article.get("content"),
-                            "source": article["source"],
-                            "category": article["category"],
-                            "is_macro": is_macro,
-                            "is_asset_specific": is_asset,
-                            "published_at": article["published_at"],
-                        }
+                    logger.info("Skipping fuzzy duplicate article: %s", title_lower[:80])
+                    # Ensure we record this URL hash too so we don't even fuzzy-match it next time
+                    await session.execute(
+                        text("INSERT INTO news_fetch_history (url_hash, title) VALUES (:h, :t) ON CONFLICT DO NOTHING"),
+                        {"h": url_hash, "t": article["title"][:500]}
                     )
-                    row = result.fetchone()
-                    if row:
-                        inserted += 1
-                        seen_in_batch.append((row[0], title_lower, summary_lower))
+                    continue
+
+                # Determine initial flags based on category
+                is_macro = article["category"] in ("macro_markets", "macro_politics", "macro_conflict")
+                is_asset = article["category"] == "asset_specific"
+
+                result = await session.execute(
+                    text("""
+                        INSERT INTO news_articles (title, link, summary, content, source, category,
+                                                   is_macro, is_asset_specific, ollama_processed, published_at)
+                        VALUES (:title, :link, :summary, :content, :source, :category,
+                                :is_macro, :is_asset_specific, false, :published_at)
+                        ON CONFLICT (title, source) DO NOTHING
+                        RETURNING id
+                    """),
+                    {
+                        "title": article["title"],
+                        "link": article["link"],
+                        "summary": article["summary"],
+                        "content": article.get("content"),
+                        "source": article["source"],
+                        "category": article["category"],
+                        "is_macro": is_macro,
+                        "is_asset_specific": is_asset,
+                        "published_at": article["published_at"],
+                    }
+                )
+                row = result.fetchone()
+                if row:
+                    inserted += 1
+                    seen_in_batch.append((row[0], title_lower, summary_lower))
+                
+                # Record to fetch history so we never fetch it again
+                await session.execute(
+                    text("""
+                        INSERT INTO news_fetch_history (url_hash, title)
+                        VALUES (:url_hash, :title)
+                        ON CONFLICT (url_hash) DO NOTHING
+                    """),
+                    {"url_hash": url_hash, "title": article["title"][:500]}
+                )
 
                 # Map to instrument — also for duplicates so existing articles link to new instruments
                 if row and article.get("instrument_id"):

@@ -13,7 +13,13 @@ import {
   instrumentIndependentAIAnalysisAtom,
   macroSentimentAtom,
 } from "../atoms";
-import { fetchInstrument, fetchLivePrice, prioritizeInstrument, fetchConfig, fetchETFConstituents } from "../api/client";
+import {
+  fetchInstrument,
+  fetchLivePrice,
+  prioritizeInstrument,
+  fetchConfig,
+  fetchETFConstituents,
+} from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
@@ -137,9 +143,11 @@ export default function AssetDetail() {
 
   const shortGrade = grades?.find((g: Grade) => g.term === "short") || null;
   const longGrade = grades?.find((g: Grade) => g.term === "long") || null;
+
   // Prefer WS-updated price, fall back to initial fetch
   const currentPrice = wsLivePrice || livePrice;
-  const statusConfig = marketStatusConfig[currentPrice?.market_status || "closed"];
+  const statusConfig =
+    marketStatusConfig[currentPrice?.market_status || "closed"];
 
   return (
     <div className="max-w-[1400px] mx-auto px-6 py-8 space-y-8">
@@ -234,59 +242,65 @@ export default function AssetDetail() {
       </div>
 
       {/* ETF Constituents */}
-      {instrument.category === "etf" && etfConstituents && etfConstituents.length > 0 && (
-        <div className="animate-slide-up" style={{ animationDelay: "175ms" }}>
-          <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Layers size={18} className="text-accent-cyan" />
-              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
-                ETF Holdings
-              </h2>
-              <span className="text-xs text-text-muted ml-auto">
-                {etfConstituents.length} constituents
-              </span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {etfConstituents.map((c) => (
-                <div
-                  key={c.symbol}
-                  className="flex items-center justify-between p-2.5 rounded-lg bg-surface-2/50 hover:bg-surface-2 transition-colors"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    {c.tracked_instrument_id ? (
-                      <Link
-                        to={`/asset/${c.tracked_instrument_id}`}
-                        className="text-sm font-semibold text-accent-cyan hover:underline"
-                      >
-                        {c.symbol}
-                      </Link>
-                    ) : (
-                      <span className="text-sm font-semibold text-text-primary">
-                        {c.symbol}
+      {instrument.category === "etf" &&
+        etfConstituents &&
+        etfConstituents.length > 0 && (
+          <div className="animate-slide-up" style={{ animationDelay: "175ms" }}>
+            <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Layers size={18} className="text-accent-cyan" />
+                <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
+                  ETF Holdings
+                </h2>
+                <span className="text-xs text-text-muted ml-auto">
+                  {etfConstituents.length} constituents
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {etfConstituents.map((c) => (
+                  <div
+                    key={c.symbol}
+                    className="flex items-center justify-between p-2.5 rounded-lg bg-surface-2/50 hover:bg-surface-2 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {c.tracked_instrument_id ? (
+                        <Link
+                          to={`/asset/${c.tracked_instrument_id}`}
+                          className="text-sm font-semibold text-accent-cyan hover:underline"
+                        >
+                          {c.symbol}
+                        </Link>
+                      ) : (
+                        <span className="text-sm font-semibold text-text-primary">
+                          {c.symbol}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-text-muted truncate">
+                        {c.name}
                       </span>
-                    )}
-                    <span className="text-[10px] text-text-muted truncate">
-                      {c.name}
-                    </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <span
+                        className={`text-[10px] font-mono ${c.article_count > 0 ? "text-accent-amber" : "text-text-muted/40"}`}
+                      >
+                        {c.article_count} art
+                      </span>
+                      <div
+                        className="h-1.5 rounded-full bg-accent-cyan/30"
+                        style={{
+                          width: `${Math.max(12, c.weight_percent * 2)}px`,
+                        }}
+                      />
+                      <span className="text-xs font-mono font-medium text-text-secondary">
+                        {c.weight_percent.toFixed(1)}%
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-2">
-                    <span className={`text-[10px] font-mono ${c.article_count > 0 ? "text-accent-amber" : "text-text-muted/40"}`}>
-                      {c.article_count} art
-                    </span>
-                    <div
-                      className="h-1.5 rounded-full bg-accent-cyan/30"
-                      style={{ width: `${Math.max(12, c.weight_percent * 2)}px` }}
-                    />
-                    <span className="text-xs font-mono font-medium text-text-secondary">
-                      {c.weight_percent.toFixed(1)}%
-                    </span>
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* Chart + Technicals */}
       <div

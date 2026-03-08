@@ -130,6 +130,13 @@ async def process_loop() -> None:
     if etf_instruments:
         await populate_etf_constituents(etf_instruments)
 
+    # Append constituents to valid_symbols_str so the LLM is allowed to tag them
+    from .processor import _ETF_CONSTITUENTS
+    all_syms = set(valid_symbols)
+    for constituents in _ETF_CONSTITUENTS.values():
+        all_syms.update(constituents.keys())
+    valid_symbols_str = ", ".join(sorted(all_syms))
+
     while True:
         try:
             refresh_counter += 1
@@ -140,7 +147,14 @@ async def process_loop() -> None:
                 valid_symbols = set(instrument_ids.keys())
                 symbol_mapping, valid_symbols_str = build_instrument_context(instruments)
                 name_lookup = build_name_lookup(instruments)
-                logger.info("Refreshed instruments: %s", ", ".join(sorted(valid_symbols)))
+                
+                # Append constituents again after refresh
+                all_syms = set(valid_symbols)
+                for constituents in _ETF_CONSTITUENTS.values():
+                    all_syms.update(constituents.keys())
+                valid_symbols_str = ", ".join(sorted(all_syms))
+
+                logger.info("Refreshed instruments: %s", valid_symbols_str)
 
             articles = await get_unprocessed_articles()
 
