@@ -13,7 +13,6 @@ import {
   fetchTechnicalIndicators,
   fetchGradeHistory,
   fetchAIAnalysis,
-  fetchIndependentAIAnalysis,
 } from "../api/client";
 import type {
   Category,
@@ -115,12 +114,4 @@ export const instrumentAIAnalysisAtom = (instrumentId: string) =>
     queryFn: () => fetchAIAnalysis(instrumentId),
     enabled: false, // Only trigger on demand
     staleTime: 300_000, // Cache for 5 mins
-  }));
-
-export const instrumentIndependentAIAnalysisAtom = (instrumentId: string) =>
-  atomWithQuery<{ analysis: string }>(() => ({
-    queryKey: ["independent-ai-analysis", instrumentId],
-    queryFn: () => fetchIndependentAIAnalysis(instrumentId),
-    enabled: false,
-    staleTime: 600_000, // Longer cache for independent knowledge
   }));

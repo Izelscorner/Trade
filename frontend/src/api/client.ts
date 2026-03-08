@@ -123,12 +123,8 @@ export const fetchHistoricalPrices = (instrumentId: string, days = 365) =>
 export const fetchTechnicalIndicators = (instrumentId: string) =>
   fetchAPI<TechnicalIndicator[]>(`/technical/${instrumentId}`);
 
-// AI Analysis
 export const fetchAIAnalysis = (instrument_id: string) =>
   fetchAPI<{ analysis: string }>(`/ai-analysis/${instrument_id}`);
-
-export const fetchIndependentAIAnalysis = (instrument_id: string) =>
-  fetchAPI<{ analysis: string }>(`/ai-analysis/independent/${instrument_id}`);
 
 // Config
 export const fetchConfig = () => fetchAPI<{ nim_model: string }>("/config");

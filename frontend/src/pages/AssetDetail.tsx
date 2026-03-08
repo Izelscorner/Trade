@@ -10,7 +10,6 @@ import {
   instrumentNewsAtom,
   instrumentGradesAtom,
   instrumentAIAnalysisAtom,
-  instrumentIndependentAIAnalysisAtom,
   macroSentimentAtom,
 } from "../atoms";
 import {
@@ -29,7 +28,7 @@ import MacroSentimentCard from "../components/MacroSentimentCard";
 import NewsFeed from "../components/NewsFeed";
 import AIAnalysisModal from "../components/AIAnalysisModal";
 import { PageSkeleton } from "../components/Skeletons";
-import { ArrowLeft, CircleDot, Brain, Network, Layers } from "lucide-react";
+import { ArrowLeft, CircleDot, Brain, Layers } from "lucide-react";
 import type { Instrument, LivePrice, Grade, ETFConstituent } from "../types";
 import { useEffect, useState } from "react";
 
@@ -57,10 +56,6 @@ export default function AssetDetail() {
   const newsAtom = useMemo(() => instrumentNewsAtom(id || ""), [id]);
   const gradesAtom = useMemo(() => instrumentGradesAtom(id || ""), [id]);
   const aiAtom = useMemo(() => instrumentAIAnalysisAtom(id || ""), [id]);
-  const independentAiAtom = useMemo(
-    () => instrumentIndependentAIAnalysisAtom(id || ""),
-    [id],
-  );
 
   const [{ data: historical }] = useAtom(historicalAtom);
   const [{ data: technical }] = useAtom(technicalAtom);
@@ -69,17 +64,8 @@ export default function AssetDetail() {
   const [{ data: macroSentiments }] = useAtom(macroSentimentAtom);
   const [{ data: aiAnalysis, isFetching: aiLoading, refetch: fetchAI }] =
     useAtom(aiAtom);
-  const [
-    {
-      data: independentAnalysis,
-      isFetching: independentLoading,
-      refetch: fetchIndependentAI,
-    },
-  ] = useAtom(independentAiAtom);
 
-  const [aiModalMode, setAiModalMode] = useState<
-    "integrated" | "independent" | null
-  >(null);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
 
   const { data: config } = useQuery({
     queryKey: ["config"],
@@ -174,7 +160,7 @@ export default function AssetDetail() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    setAiModalMode("integrated");
+                    setAiModalOpen(true);
                     if (!aiAnalysis) fetchAI();
                   }}
                   className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/20 hover:bg-accent-cyan/20 transition-all duration-200 group"
@@ -185,24 +171,7 @@ export default function AssetDetail() {
                     className="group-hover:scale-110 transition-transform"
                   />
                   <span className="text-[10px] font-bold uppercase tracking-wider">
-                    System AI
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => {
-                    setAiModalMode("independent");
-                    if (!independentAnalysis) fetchIndependentAI();
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent-violet/10 text-accent-violet border border-accent-violet/20 hover:bg-accent-violet/20 transition-all duration-200 group"
-                  title={`Independent analysis based on ${modelDisplay} general knowledge`}
-                >
-                  <Network
-                    size={14}
-                    className="group-hover:scale-110 transition-transform"
-                  />
-                  <span className="text-[10px] font-bold uppercase tracking-wider">
-                    Independent AI
+                    AI Analysis
                   </span>
                 </button>
               </div>
@@ -325,27 +294,12 @@ export default function AssetDetail() {
       </div>
 
       <AIAnalysisModal
-        isOpen={!!aiModalMode}
-        onClose={() => setAiModalMode(null)}
-        analysis={
-          aiModalMode === "integrated"
-            ? aiAnalysis?.analysis || null
-            : independentAnalysis?.analysis || null
-        }
-        isLoading={
-          aiModalMode === "integrated" ? aiLoading : independentLoading
-        }
+        isOpen={aiModalOpen}
+        onClose={() => setAiModalOpen(false)}
+        analysis={aiAnalysis?.analysis || null}
+        isLoading={aiLoading}
         symbol={instrument.symbol}
-        title={
-          aiModalMode === "independent"
-            ? `${modelDisplay} Independent Analysis`
-            : `${modelDisplay} System Analysis`
-        }
-        subtitle={
-          aiModalMode === "independent"
-            ? `Based on ${modelDisplay} global knowledge base`
-            : undefined
-        }
+        title={`${modelDisplay} AI Analysis`}
       />
     </div>
   );
