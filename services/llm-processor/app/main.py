@@ -140,7 +140,7 @@ async def process_loop() -> None:
     while True:
         try:
             refresh_counter += 1
-            if refresh_counter % 50 == 0:
+            if refresh_counter % 1 == 0:
                 instruments = await get_instruments()
                 instrument_ids = {inst["symbol"]: inst["id"] for inst in instruments}
                 instruments_by_symbol = {inst["symbol"]: inst for inst in instruments}

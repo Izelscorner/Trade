@@ -35,8 +35,8 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
-PROCESS_INTERVAL = 15  # seconds between processing cycles
-BATCH_SIZE = 20
+PROCESS_INTERVAL = 3  # seconds between processing cycles
+BATCH_SIZE = 30
 
 # Sub-batch sizes for LLM calls (keep prompts from getting too long)
 CLASSIFY_BATCH = 8    # articles per classify API call
@@ -340,6 +340,10 @@ async def populate_etf_constituents(etf_instruments: list[dict]) -> None:
         for etf in etf_instruments:
             etf_id = etf["id"]
             etf_symbol = etf["symbol"]
+            
+            if etf_symbol in _ETF_CONSTITUENTS:
+                continue
+                
             etf_name = etf["name"]
 
             # Check if already populated
@@ -349,8 +353,12 @@ async def populate_etf_constituents(etf_instruments: list[dict]) -> None:
             )
             rows = result.fetchall()
             if rows:
-                _ETF_CONSTITUENTS[etf_symbol] = {r.constituent_symbol: float(r.weight_percent) for r in rows}
+                constituent_map = {r.constituent_symbol: float(r.weight_percent) for r in rows}
+                _ETF_CONSTITUENTS[etf_symbol] = constituent_map
                 logger.info("ETF %s: loaded %d constituents from DB", etf_symbol, len(rows))
+                
+                # Backfill mappings for existing articles of constituents
+                await backfill_etf_mappings(etf_id, constituent_map)
                 continue
 
             # Use LLM to identify constituents
@@ -397,8 +405,42 @@ async def populate_etf_constituents(etf_instruments: list[dict]) -> None:
                 await session.commit()
                 _ETF_CONSTITUENTS[etf_symbol] = etf_cache
                 logger.info("ETF %s: stored %d constituents", etf_symbol, len(etf_cache))
+                
+                # Backfill mappings for existing articles of constituents
+                await backfill_etf_mappings(etf_id, etf_cache)
             else:
                 logger.warning("ETF %s: LLM failed to provide constituents", etf_symbol)
+
+
+async def backfill_etf_mappings(etf_id: str, constituents: dict[str, float]) -> None:
+    """Retroactively map already-processed articles of constituents to the parent ETF.
+    
+    This ensures newly added ETFs immediately have historical news and sentiment
+    without needing to re-process (re-score) any articles.
+    """
+    if not constituents:
+        return
+        
+    logger.info("Backfilling ETF mappings for instrument %s...", etf_id)
+    async with async_session() as session:
+        try:
+            # Efficiently insert mappings for all articles associated with any tracked constituent
+            result = await session.execute(
+                text("""
+                    INSERT INTO news_instrument_map (article_id, instrument_id, relevance_score)
+                    SELECT m.article_id, :eid, (ec.weight_percent / 100.0)
+                    FROM news_instrument_map m
+                    JOIN instruments i_const ON i_const.id = m.instrument_id
+                    JOIN etf_constituents ec ON (UPPER(ec.constituent_symbol) = UPPER(i_const.symbol))
+                    WHERE ec.etf_instrument_id = :eid
+                    ON CONFLICT (article_id, instrument_id) DO NOTHING
+                """),
+                {"eid": etf_id}
+            )
+            await session.commit()
+            logger.info("Backfill complete for ETF %s", etf_id)
+        except Exception as e:
+            logger.error("Failed to backfill ETF mappings: %s", e)
 
 
 async def get_etf_constituents() -> dict[str, dict[str, float]]:
@@ -530,14 +572,21 @@ async def process_batch(
 
         # Compute ETF relevance scores for instrument map
         etf_relevance: dict[str, float] = {}
-        for symbol in tagged_instruments:
+        for symbol in list(tagged_instruments):
+            # Propagate constituent tags to parent ETFs deterministically
             for etf_symbol, constituents in _ETF_CONSTITUENTS.items():
-                if symbol in constituents and etf_symbol in tagged_instruments:
-                    # This tag was propagated from constituent; use weight as relevance
+                if symbol in constituents:
+                    if etf_symbol not in tagged_instruments:
+                        tagged_instruments.append(etf_symbol)
+                    
+                    # Store relevance based on weight
+                    weight_relevance = constituents[symbol] / 100.0
                     etf_relevance[etf_symbol] = max(
                         etf_relevance.get(etf_symbol, 0),
-                        constituents[symbol] / 100.0  # Convert percentage to 0-1
+                        weight_relevance
                     )
+
+        # Update DB flags + instrument map (with ETF-aware relevance scores)
 
         # Update DB flags + instrument map (with ETF-aware relevance scores)
         await update_article_tags(art_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids, etf_relevance)
