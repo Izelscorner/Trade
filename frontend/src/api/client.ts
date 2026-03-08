@@ -60,8 +60,8 @@ export const fetchDashboard = () =>
   fetchAPI<DashboardInstrument[]>("/dashboard");
 export const fetchMacroSentiment = () =>
   fetchAPI<MacroSentiment[]>("/dashboard/macro");
-export const fetchMacroNews = (limit = 100) =>
-  fetchAPI<NewsArticle[]>(`/dashboard/macro/news?limit=${limit}`);
+export const fetchMacroNews = () =>
+  fetchAPI<NewsArticle[]>("/dashboard/macro/news");
 
 // Instruments
 export const fetchInstruments = (category?: string) =>
@@ -94,12 +94,10 @@ export const fetchGradeHistory = (
 export const fetchNews = (opts?: {
   category?: string;
   instrumentId?: string;
-  limit?: number;
 }) => {
   const params = new URLSearchParams();
   if (opts?.category) params.set("category", opts.category);
   if (opts?.instrumentId) params.set("instrument_id", opts.instrumentId);
-  if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return fetchAPI<NewsArticle[]>(`/news${qs ? `?${qs}` : ""}`);
 };

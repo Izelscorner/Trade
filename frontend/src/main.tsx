@@ -91,7 +91,6 @@ function connectWS() {
           const mergeNews = (
             incoming: NewsArticle[],
             existing: NewsArticle[],
-            limit: number,
           ) => {
             const merged = [
               ...incoming,
@@ -100,13 +99,11 @@ function connectWS() {
             const unique = Array.from(
               new Map(merged.map((a) => [a.id, a])).values(),
             );
-            return unique
-              .sort(
-                (a, b) =>
-                  new Date(b.published_at || 0).getTime() -
-                  new Date(a.published_at || 0).getTime(),
-              )
-              .slice(0, limit);
+            return unique.sort(
+              (a, b) =>
+                new Date(b.published_at || 0).getTime() -
+                new Date(a.published_at || 0).getTime(),
+            );
           };
 
           // Update global news latest feed
@@ -114,7 +111,7 @@ function connectWS() {
             ["news-latest"],
             (old: NewsArticle[] | undefined) => {
               if (!old) return data;
-              return mergeNews(data, old, 50);
+              return mergeNews(data, old);
             },
           );
 
@@ -133,7 +130,7 @@ function connectWS() {
               ["macro-news"],
               (old: NewsArticle[] | undefined) => {
                 if (!old) return macroOnly;
-                return mergeNews(macroOnly, old, 20);
+                return mergeNews(macroOnly, old);
               },
             );
           }
@@ -163,7 +160,7 @@ function connectWS() {
                 query.queryKey,
                 (old: NewsArticle[] | undefined) => {
                   if (!old) return filtered;
-                  return mergeNews(filtered, old, 200);
+                  return mergeNews(filtered, old);
                 },
               );
             });
@@ -175,7 +172,7 @@ function connectWS() {
                 ["news", article.instrument_id],
                 (old: NewsArticle[] | undefined) => {
                   if (!old) return [article];
-                  return mergeNews([article], old, 100);
+                  return mergeNews([article], old);
                 },
               );
             }

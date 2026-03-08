@@ -109,11 +109,11 @@ async def get_macro_sentiment():
 
 
 @router.get("/macro/news", response_model=APIResponse)
-async def get_macro_news(limit: int = 100):
-    """Get latest macro news that drives macro sentiment.
+async def get_macro_news():
+    """Get all non-neutral macro news used to calculate macro sentiment.
 
     Returns macro-tagged news articles with their sentiment scores,
-    ordered by recency. Only includes Ollama-processed articles.
+    ordered by recency. Excludes neutral-only articles.
     """
     from ..schemas import NewsArticleSchema, SentimentSchema
 
@@ -127,11 +127,12 @@ async def get_macro_news(limit: int = 100):
                 FROM news_articles a
                 WHERE a.is_macro = true
                 AND a.ollama_processed = true
-                AND a.published_at >= NOW() - INTERVAL '72 hours'
+                AND (
+                    COALESCE(a.macro_sentiment_label, 'neutral') != 'neutral'
+                    OR COALESCE(a.macro_long_term_label, 'neutral') != 'neutral'
+                )
                 ORDER BY a.published_at DESC
-                LIMIT :limit
-            """),
-            {"limit": limit},
+            """)
         )
         rows = result.fetchall()
 

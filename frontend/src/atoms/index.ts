@@ -45,7 +45,7 @@ export const macroSentimentAtom = atomWithQuery<MacroSentiment[]>(() => ({
 
 export const macroNewsAtom = atomWithQuery<NewsArticle[]>(() => ({
   queryKey: ["macro-news"],
-  queryFn: () => fetchMacroNews(20),
+  queryFn: fetchMacroNews,
   refetchInterval: 120_000,
 }));
 
@@ -66,7 +66,7 @@ export const gradesAtom = atomWithQuery<Grade[]>(() => ({
 // --- News ---
 export const latestNewsAtom = atomWithQuery<NewsArticle[]>(() => ({
   queryKey: ["news-latest"],
-  queryFn: () => fetchNews({ limit: 100 }),
+  queryFn: () => fetchNews(),
   refetchInterval: 120_000,
 }));
 
@@ -88,7 +88,7 @@ export const instrumentTechnicalAtom = (instrumentId: string) =>
 export const instrumentNewsAtom = (instrumentId: string) =>
   atomWithQuery<NewsArticle[]>(() => ({
     queryKey: ["news", instrumentId],
-    queryFn: () => fetchNews({ instrumentId, limit: 100 }),
+    queryFn: () => fetchNews({ instrumentId }),
     enabled: !!instrumentId,
   }));
 

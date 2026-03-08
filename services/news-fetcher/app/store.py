@@ -195,12 +195,6 @@ async def upsert_articles(articles: list[dict]) -> int:
     return inserted
 
 
-# Rolling window caps — keep only the N most recent articles per bucket.
-# When new articles push past the cap, oldest are evicted automatically.
-MACRO_CAP_PER_CATEGORY = 75    # 75 × 3 categories = 225 macro articles max
-ASSET_CAP_PER_INSTRUMENT = 300  # 300 × 7 instruments = 2100 asset articles max
-
-
 async def _delete_articles(session, ids: list) -> int:
     """Cascade-delete articles by ID (scores → map → articles)."""
     if not ids:
@@ -213,59 +207,39 @@ async def _delete_articles(session, ids: list) -> int:
 
 
 async def cleanup_old_macro_news() -> int:
-    """Keep only the MACRO_CAP_PER_CATEGORY most recent articles per macro category.
-
-    Newer articles always displace older ones — true rolling window.
-    """
+    """Remove macro articles older than 30 days."""
     total_deleted = 0
-    categories = ("macro_markets", "macro_politics", "macro_conflict")
     async with async_session() as session:
-        for cat in categories:
-            result = await session.execute(
-                text("""
-                    SELECT id FROM news_articles
-                    WHERE category = :cat AND is_asset_specific = false
-                    ORDER BY published_at DESC
-                    OFFSET :cap
-                """),
-                {"cat": cat, "cap": MACRO_CAP_PER_CATEGORY},
-            )
-            old_ids = [str(r.id) for r in result.fetchall()]
-            deleted = await _delete_articles(session, old_ids)
-            if deleted:
-                logger.info("Trimmed %d old %s articles (cap=%d)", deleted, cat, MACRO_CAP_PER_CATEGORY)
-                total_deleted += deleted
+        result = await session.execute(
+            text("""
+                SELECT id FROM news_articles
+                WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
+                AND is_asset_specific = false
+                AND published_at < NOW() - INTERVAL '30 days'
+            """)
+        )
+        old_ids = [str(r.id) for r in result.fetchall()]
+        total_deleted = await _delete_articles(session, old_ids)
+        if total_deleted:
+            logger.info("Cleaned up %d macro articles older than 30 days", total_deleted)
         await session.commit()
     return total_deleted
 
 
 async def cleanup_old_asset_news() -> int:
-    """Keep only the ASSET_CAP_PER_INSTRUMENT most recent articles per instrument.
-
-    Newer articles always displace older ones — true rolling window.
-    """
+    """Remove asset-specific articles older than 90 days."""
     total_deleted = 0
     async with async_session() as session:
-        # Get all instrument IDs
-        inst_result = await session.execute(text("SELECT id FROM instruments"))
-        instrument_ids = [str(r.id) for r in inst_result.fetchall()]
-
-        for inst_id in instrument_ids:
-            result = await session.execute(
-                text("""
-                    SELECT a.id FROM news_articles a
-                    JOIN news_instrument_map m ON m.article_id = a.id
-                    WHERE m.instrument_id = :iid
-                    AND a.category = 'asset_specific'
-                    ORDER BY a.published_at DESC
-                    OFFSET :cap
-                """),
-                {"iid": inst_id, "cap": ASSET_CAP_PER_INSTRUMENT},
-            )
-            old_ids = [str(r.id) for r in result.fetchall()]
-            deleted = await _delete_articles(session, old_ids)
-            if deleted:
-                logger.info("Trimmed %d old asset articles for instrument %s (cap=%d)", deleted, inst_id, ASSET_CAP_PER_INSTRUMENT)
-                total_deleted += deleted
+        result = await session.execute(
+            text("""
+                SELECT id FROM news_articles
+                WHERE category = 'asset_specific'
+                AND published_at < NOW() - INTERVAL '90 days'
+            """)
+        )
+        old_ids = [str(r.id) for r in result.fetchall()]
+        total_deleted = await _delete_articles(session, old_ids)
+        if total_deleted:
+            logger.info("Cleaned up %d asset articles older than 90 days", total_deleted)
         await session.commit()
     return total_deleted

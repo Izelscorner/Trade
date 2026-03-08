@@ -15,18 +15,18 @@ router = APIRouter()
 async def list_news(
     category: str | None = None,
     instrument_id: str | None = None,
-    limit: int = 300,
 ):
-    """Get news articles with sentiment scores.
+    """Get non-neutral news articles with sentiment scores.
 
     Filter by category (macro_markets, macro_politics, macro_conflict, asset_specific)
     or by instrument_id for mapped articles.
     Only returns articles that have been processed by the LLM Processor.
+    Excludes neutral-only articles since they don't contribute to grades.
     """
-    params: dict = {"limit": limit}
+    params: dict = {}
 
     if instrument_id:
-        # Asset page: show asset-perspective sentiment from sentiment_scores
+        # Asset page: show non-neutral asset-perspective sentiment
         query = """
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
@@ -38,8 +38,8 @@ async def list_news(
             JOIN sentiment_scores s ON s.article_id = a.id
             WHERE m.instrument_id = :iid
             AND a.ollama_processed = true
+            AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral')
             ORDER BY a.published_at DESC
-            LIMIT :limit
         """
         params["iid"] = instrument_id
         use_asset_sentiment = True
@@ -48,13 +48,14 @@ async def list_news(
             query = """
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
-                       a.macro_sentiment_label
+                       a.macro_sentiment_label,
+                       a.macro_long_term_label
                 FROM news_articles a
                 WHERE a.is_macro = true
                 AND a.ollama_processed = true
                 AND a.macro_sentiment_label IS NOT NULL
+                AND (a.macro_sentiment_label != 'neutral' OR COALESCE(a.macro_long_term_label, 'neutral') != 'neutral')
                 ORDER BY a.published_at DESC
-                LIMIT :limit
             """
             use_asset_sentiment = False
         else:
@@ -70,13 +71,16 @@ async def list_news(
                 WHERE a.category = :cat
                 AND a.ollama_processed = true
                 AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
+                AND (
+                    (s.label IS NOT NULL AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral'))
+                    OR (a.is_macro AND a.macro_sentiment_label IS NOT NULL AND a.macro_sentiment_label != 'neutral')
+                )
                 ORDER BY a.published_at DESC
-                LIMIT :limit
             """
             params["cat"] = category
             use_asset_sentiment = False
     else:
-        # All news: return both sentiments, use macro for macro articles
+        # All news: return both sentiments, exclude neutral
         query = """
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
@@ -87,8 +91,11 @@ async def list_news(
             LEFT JOIN sentiment_scores s ON s.article_id = a.id
             WHERE a.ollama_processed = true
             AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
+            AND (
+                (s.label IS NOT NULL AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral'))
+                OR (a.is_macro AND a.macro_sentiment_label IS NOT NULL AND a.macro_sentiment_label != 'neutral')
+            )
             ORDER BY a.published_at DESC
-            LIMIT :limit
         """
         use_asset_sentiment = False
 
@@ -124,9 +131,11 @@ async def list_news(
                 )
         elif r.is_macro and macro_label:
             # Macro article in general view: use macro perspective
+            lt_label = getattr(r, "macro_long_term_label", None) if hasattr(r, "macro_long_term_label") else None
             pos, neg, neu = _MACRO_PROBS.get(macro_label, (0.15, 0.15, 0.70))
             sentiment = SentimentSchema(
                 positive=pos, negative=neg, neutral=neu, label=macro_label,
+                long_term_label=lt_label,
             )
         elif score_label is not None:
             # Non-macro article: use asset-perspective sentiment

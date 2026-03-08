@@ -93,9 +93,7 @@ export default function News() {
   const { data: rawArticles = [], isLoading } = useQuery<NewsArticle[]>({
     queryKey: ["news-page", categoryType],
     queryFn: () => {
-      const opts: { category?: string; limit: number } = {
-        limit: 200,
-      };
+      const opts: { category?: string } = {};
       if (categoryType !== "all") {
         opts.category = categoryType;
       }

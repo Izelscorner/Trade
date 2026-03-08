@@ -236,7 +236,7 @@ def _row_to_article(r, instrument_id=None) -> dict:
 
 
 async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
-    """Fetch news specifically for given instrument IDs (targeted query)."""
+    """Fetch non-neutral news for given instrument IDs (targeted query)."""
     if not instrument_ids:
         return []
     async with async_session() as session:
@@ -254,8 +254,8 @@ async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
                 JOIN news_instrument_map m ON n.id = m.article_id
                 WHERE m.instrument_id IN ({placeholders})
                 AND n.ollama_processed = true
+                AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral')
                 ORDER BY n.published_at DESC
-                LIMIT 100
             """),
             params,
         )
@@ -263,7 +263,7 @@ async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
 
 
 async def _fetch_general_news() -> list[dict]:
-    """Fetch latest news globally for dashboard/news page."""
+    """Fetch non-neutral news globally for dashboard/news page."""
     async with async_session() as session:
         result = await session.execute(
             text("""
@@ -272,16 +272,14 @@ async def _fetch_general_news() -> list[dict]:
                        s.positive, s.negative, s.neutral, s.label,
                        s.long_term_label,
                        nim.instrument_id
-                FROM (
-                    SELECT * FROM news_articles
-                    WHERE ollama_processed = true
-                    ORDER BY published_at DESC
-                    LIMIT 100
-                ) n
+                FROM news_articles n
                 JOIN sentiment_scores s ON n.id = s.article_id
                 LEFT JOIN LATERAL (
                     SELECT instrument_id FROM news_instrument_map WHERE article_id = n.id LIMIT 1
                 ) nim ON true
+                WHERE n.ollama_processed = true
+                AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral')
+                ORDER BY n.published_at DESC
             """)
         )
         return [_row_to_article(r) for r in result.fetchall()]
@@ -321,7 +319,7 @@ async def broadcast_latest_news():
                 instrument_news = await _fetch_instrument_news(list(all_iids))
 
                 for ws, sub in asset_clients:
-                    filtered = [n for n in instrument_news if n["instrument_id"] in sub.instrument_ids][:100]
+                    filtered = [n for n in instrument_news if n["instrument_id"] in sub.instrument_ids]
                     if filtered:
                         msg = json.dumps({
                             "type": "news_updates",
@@ -343,11 +341,8 @@ async def broadcast_latest_news():
                                 filtered = [n for n in filtered if n["category"] in macro_categories or n.get("is_macro")]
                             else:
                                 filtered = [n for n in filtered if n["category"] == sub.category]
-                        filtered = filtered[:100]
-                    elif sub.page == "dashboard":
-                        filtered = all_news[:50]
                     else:
-                        filtered = all_news[:50]
+                        filtered = all_news
 
                     if filtered:
                         msg = json.dumps({
