@@ -53,12 +53,12 @@ async def list_instruments(category: str | None = None):
     async with async_session() as session:
         if category:
             result = await session.execute(
-                text("SELECT id, symbol, name, category FROM instruments WHERE category = :cat ORDER BY symbol"),
+                text("SELECT id, symbol, name, category FROM instruments WHERE category = :cat AND is_active = true ORDER BY symbol"),
                 {"cat": category},
             )
         else:
             result = await session.execute(
-                text("SELECT id, symbol, name, category FROM instruments ORDER BY symbol")
+                text("SELECT id, symbol, name, category FROM instruments WHERE is_active = true ORDER BY symbol")
             )
         rows = result.fetchall()
 
@@ -102,10 +102,10 @@ async def add_instruments(body: CreateInstrumentsRequest):
             async with async_session() as session:
                 result = await session.execute(
                     text("""
-                        INSERT INTO instruments (symbol, name, category, yfinance_symbol)
-                        VALUES (:symbol, :name, :category, :yf_symbol)
-                        ON CONFLICT (symbol) DO NOTHING
-                        RETURNING id, symbol, name, category
+                        INSERT INTO instruments (symbol, name, category, yfinance_symbol, is_active)
+                        VALUES (:symbol, :name, :category, :yf_symbol, true)
+                        ON CONFLICT (symbol) DO UPDATE SET is_active = true
+                        RETURNING id, symbol, name, category, (xmax = 0) as inserted
                     """),
                     {
                         "symbol": display_symbol,
@@ -118,13 +118,24 @@ async def add_instruments(body: CreateInstrumentsRequest):
                 await session.commit()
 
                 if row:
-                    created.append({
-                        "id": str(row.id),
-                        "symbol": row.symbol,
-                        "name": row.name,
-                        "category": row.category,
-                    })
-                    logger.info("Created instrument: %s (%s) [%s]", display_symbol, name, category)
+                    if row.inserted:
+                        created.append({
+                            "id": str(row.id),
+                            "symbol": row.symbol,
+                            "name": row.name,
+                            "category": row.category,
+                        })
+                        logger.info("Created instrument: %s (%s) [%s]", display_symbol, name, category)
+                    else:
+                        # If it was an update, it means it already existed.
+                        # We just ensured is_active = true.
+                        created.append({
+                            "id": str(row.id),
+                            "symbol": row.symbol,
+                            "name": row.name,
+                            "category": row.category,
+                        })
+                        logger.info("Reactivated existing instrument: %s", display_symbol)
                 else:
                     skipped.append(display_symbol)
                     logger.info("Skipped existing instrument: %s", display_symbol)
@@ -144,7 +155,7 @@ async def get_instrument(instrument_id: str):
     """Get a single instrument by ID."""
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category FROM instruments WHERE id = :iid"),
+            text("SELECT id, symbol, name, category FROM instruments WHERE id = :iid AND is_active = true"),
             {"iid": instrument_id},
         )
         row = result.fetchone()
@@ -203,3 +214,56 @@ async def get_etf_constituents(instrument_id: str):
         for r in rows
     ]
     return APIResponse(data=constituents, timestamp=datetime.now(timezone.utc))
+
+
+@router.delete("/{instrument_id}", response_model=APIResponse)
+async def remove_instrument(instrument_id: str):
+    """Remove instrument from the active list.
+    
+    Wipes price and technical data but preserves the instrument entry (is_active=false)
+    to keep news and sentiment associations intact.
+    """
+    async with async_session() as session:
+        # 1. Verify existence
+        result = await session.execute(
+            text("SELECT id, symbol FROM instruments WHERE id = :iid"),
+            {"iid": instrument_id},
+        )
+        row = result.fetchone()
+        if not row:
+            return APIResponse(error="Instrument not found", timestamp=datetime.now(timezone.utc))
+
+        # 2. Delete price and technical data explicitly
+        # Cascade on DELETE is set in DB, but since we are doing a soft-delete on the instrument table,
+        # we must manually clear the related data we no longer want.
+        await session.execute(
+            text("DELETE FROM live_prices WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+        await session.execute(
+            text("DELETE FROM intraday_prices WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+        await session.execute(
+            text("DELETE FROM technical_indicators WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+        await session.execute(
+            text("DELETE FROM technical_analysis WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+        await session.execute(
+            text("DELETE FROM grades WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+
+        # 3. Mark as inactive
+        await session.execute(
+            text("UPDATE instruments SET is_active = false WHERE id = :iid"),
+            {"iid": instrument_id},
+        )
+        
+        await session.commit()
+    
+    logger.info("Removed instrument (soft-delete): %s (%s)", row.symbol, instrument_id)
+    return APIResponse(data={"success": True}, timestamp=datetime.now(timezone.utc))

@@ -72,6 +72,8 @@ export const fetchInstrument = (id: string) =>
   fetchAPI<Instrument>(`/instruments/${id}`);
 export const fetchETFConstituents = (id: string) =>
   fetchAPI<ETFConstituent[]>(`/instruments/${id}/constituents`);
+export const removeInstrument = (id: string) =>
+  deleteAPI<{ success: boolean }>(`/instruments/${id}`);
 
 // Grades
 export const fetchGrades = (instrumentId?: string, term?: string) => {
@@ -129,8 +131,7 @@ export const fetchIndependentAIAnalysis = (instrument_id: string) =>
   fetchAPI<{ analysis: string }>(`/ai-analysis/independent/${instrument_id}`);
 
 // Config
-export const fetchConfig = () =>
-  fetchAPI<{ nim_model: string }>("/config");
+export const fetchConfig = () => fetchAPI<{ nim_model: string }>("/config");
 
 // Add Instruments
 export const addInstruments = (symbols: string) =>

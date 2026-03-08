@@ -148,6 +148,11 @@ async def process_loop() -> None:
                 symbol_mapping, valid_symbols_str = build_instrument_context(instruments)
                 name_lookup = build_name_lookup(instruments)
                 
+                # Populate ETF constituent data for new ETFs
+                etf_instruments = [i for i in instruments if i["category"] == "etf"]
+                if etf_instruments:
+                    await populate_etf_constituents(etf_instruments)
+
                 # Append constituents again after refresh
                 all_syms = set(valid_symbols)
                 for constituents in _ETF_CONSTITUENTS.values():

@@ -41,6 +41,7 @@ async def get_dashboard():
                     FROM grades WHERE instrument_id = i.id AND term = 'long'
                     ORDER BY graded_at DESC LIMIT 1
                 ) gl ON true
+                WHERE i.is_active = true
                 ORDER BY i.symbol
             """)
         )

@@ -21,8 +21,10 @@ import {
   Plus,
   Search,
   Star,
+  Trash2,
   X,
 } from "lucide-react";
+import { removeInstrument } from "../api/client";
 
 type SortKey = "symbol" | "price" | "change" | "short_grade" | "long_grade";
 type SortDir = "asc" | "desc";
@@ -148,7 +150,7 @@ export default function AssetList() {
       {/* Table */}
       <div className="rounded-xl bg-surface-1 border border-border-subtle overflow-hidden animate-slide-up">
         {/* Table Header */}
-        <div className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
+        <div className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px_40px] gap-4 items-center px-5 py-3 border-b border-border-subtle bg-surface-2/30">
           <span />
           <SortHeader
             label="Symbol"
@@ -183,6 +185,7 @@ export default function AssetList() {
             currentSortKey={sortKey}
             onSort={handleSort}
           />
+          <span />
         </div>
 
         {/* Rows */}
@@ -196,6 +199,24 @@ export default function AssetList() {
               index={index}
               starred={isInPortfolio(inst.id)}
               onToggleStar={() => togglePortfolio(inst.id)}
+              onRemove={async () => {
+                if (
+                  window.confirm(
+                    `Are you sure you want to remove ${inst.symbol}? This will wipe price history and technical indicators.`,
+                  )
+                ) {
+                  try {
+                    await removeInstrument(inst.id);
+                    queryClient.refetchQueries({ queryKey: ["dashboard"] });
+                  } catch (e) {
+                    alert(
+                      e instanceof Error
+                        ? e.message
+                        : "Failed to remove instrument",
+                    );
+                  }
+                }
+              }}
             />
           ))
         ) : (
@@ -254,11 +275,13 @@ function InstrumentRow({
   index,
   starred,
   onToggleStar,
+  onRemove,
 }: {
   instrument: DashboardInstrument;
   index: number;
   starred: boolean;
   onToggleStar: () => void;
+  onRemove: () => void;
 }) {
   const statusColor = marketStatusColors[instrument.market_status || "closed"];
 
@@ -345,6 +368,20 @@ function InstrumentRow({
           gradedAt={instrument.graded_at}
         />
       </Link>
+
+      <div className="flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="p-1.5 rounded-lg text-text-muted hover:text-accent-rose hover:bg-accent-rose/10 transition-all"
+          title="Remove asset"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
     </div>
   );
 }
