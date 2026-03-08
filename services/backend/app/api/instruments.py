@@ -159,3 +159,47 @@ async def get_instrument(instrument_id: str):
         category=row.category,
     )
     return APIResponse(data=inst.model_dump(), timestamp=datetime.now(timezone.utc))
+
+
+@router.get("/{instrument_id}/constituents", response_model=APIResponse)
+async def get_etf_constituents(instrument_id: str):
+    """Get ETF constituent holdings with percentage weights and article counts."""
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT ec.constituent_symbol, ec.constituent_name, ec.weight_percent,
+                       i.id as tracked_instrument_id,
+                       COALESCE(ac.article_count, 0) as article_count
+                FROM etf_constituents ec
+                LEFT JOIN instruments i ON UPPER(i.symbol) = UPPER(ec.constituent_symbol)
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) as article_count
+                    FROM news_articles na
+                    WHERE na.ollama_processed = true
+                    AND (
+                        na.title ILIKE '%%' || ec.constituent_symbol || '%%'
+                        OR EXISTS (
+                            SELECT 1 FROM news_instrument_map nim
+                            WHERE nim.article_id = na.id AND nim.instrument_id = i.id
+                        )
+                    )
+                    AND na.published_at >= NOW() - INTERVAL '7 days'
+                ) ac ON true
+                WHERE ec.etf_instrument_id = CAST(:iid AS uuid)
+                ORDER BY ec.weight_percent DESC
+            """),
+            {"iid": instrument_id},
+        )
+        rows = result.fetchall()
+
+    constituents = [
+        {
+            "symbol": r.constituent_symbol,
+            "name": r.constituent_name,
+            "weight_percent": float(r.weight_percent),
+            "tracked_instrument_id": str(r.tracked_instrument_id) if r.tracked_instrument_id else None,
+            "article_count": r.article_count,
+        }
+        for r in rows
+    ]
+    return APIResponse(data=constituents, timestamp=datetime.now(timezone.utc))

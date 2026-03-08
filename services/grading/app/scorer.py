@@ -9,13 +9,23 @@ Mathematical Model
    multiplier for the Trend group; ATR % acts as a volatility risk dampener on
    the overall technical score.
 
-2. Sentiment Score — exponential time-decay weighted mean.
-   Recent articles carry exponentially more weight (48-hour half-life).
-   Confidence uses a logarithmic ramp (not linear) so it saturates properly:
-   log(1+n) / log(1+N_full).
+2. Sentiment Score — DUAL-HORIZON, term-aware.
+   Short-term grades use short_term sentiment labels (label column).
+   Long-term grades use long_term sentiment labels (long_term_label column).
+   Each uses exponential time-decay with horizon-appropriate half-lives:
+     - Short-term: 24-hour half-life, 3-day window (captures immediate reaction)
+     - Long-term: 96-hour half-life, 14-day window (captures fundamental shifts)
+   Confidence uses a logarithmic ramp (not linear) so it saturates properly.
 
-3. Macro Score — time-decayed aggregate of up to 20 records from the last 12 h,
-   rather than a single point-in-time snapshot.
+   BEHAVIORAL SCIENCE EDGE CASES:
+   a) Contrarian dampening: When >80% of non-neutral articles agree on direction,
+      apply 0.85x dampener — herd behavior signals increased mean-reversion risk.
+   b) Priced-in detection: When consensus is extreme AND articles are >48h old on
+      average, the signal is likely already priced in — apply additional 0.9x.
+
+3. Macro Score — DUAL-HORIZON, term-aware.
+   Short-term: 6-hour half-life, 12h window (immediate risk-on/off).
+   Long-term: 24-hour half-life, 48h window (structural policy shifts).
 
 4. Final Buy Confidence — sigmoid transformation of the weighted composite score.
    score ∈ [-3, 3] → sigmoid(k·score) × 100 ∈ (0, 100).
@@ -114,16 +124,46 @@ COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Term-specific sentiment parameters
+# ---------------------------------------------------------------------------
+# From behavioral science: short-term sentiment reflects immediate market
+# psychology (recency bias, momentum), long-term reflects fundamental anchoring.
+
+SENTIMENT_PARAMS = {
+    "short": {
+        "half_life_hours": 24.0,    # 24h half-life: yesterday's news = 50% weight
+        "window_days": 3,           # 3-day lookback
+        "full_confidence_at": 20,   # 20 non-neutral articles = full confidence
+    },
+    "long": {
+        "half_life_hours": 96.0,    # 4-day half-life: week-old news still relevant
+        "window_days": 14,          # 14-day lookback
+        "full_confidence_at": 40,   # 40 non-neutral articles = full confidence
+    },
+}
+
+MACRO_PARAMS = {
+    "short": {
+        "half_life_hours": 6.0,     # 6h half-life: fast-moving macro
+        "window_hours": 12,         # 12h lookback
+    },
+    "long": {
+        "half_life_hours": 24.0,    # 24h half-life: policy regime
+        "window_hours": 48,         # 48h lookback
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
 
-def _log_confidence(count: int, full_at: int = 10) -> float:
+def _log_confidence(count: int, full_at: int = 20) -> float:
     """Logarithmic confidence ramp — better than linear for sparse data.
 
     log(1+n) / log(1+N) captures diminishing returns correctly:
-        n=1  →  30 %,  n=3  →  54 %,  n=5  →  68 %,  n=10  →  100 %
+        n=1  →  23 %,  n=5  →  54 %,  n=10  →  77 %,  n=20  →  100 %
     """
     if count <= 0:
         return 0.0
@@ -131,13 +171,7 @@ def _log_confidence(count: int, full_at: int = 10) -> float:
 
 
 def _sigmoid_confidence(score: float, k: float = 1.5) -> float:
-    """Map [-3, 3] composite score to (0, 100) buy-confidence via sigmoid.
-
-    The sigmoid ensures:
-    - Exactly 50 % at score = 0 (true neutral).
-    - Asymptotically approaches 0 % / 100 % at extremes.
-    - k = 1.5 keeps reasonable spread across the realistic [-2, 2] range.
-    """
+    """Map [-3, 3] composite score to (0, 100) buy-confidence via sigmoid."""
     return round(100.0 / (1.0 + math.exp(-k * score)), 1)
 
 
@@ -161,6 +195,53 @@ def _action_label(confidence: float) -> str:
 
 def _clip(value: float, lo: float = -3.0, hi: float = 3.0) -> float:
     return max(lo, min(hi, value))
+
+
+# ---------------------------------------------------------------------------
+# Behavioral science: consensus dampening
+# ---------------------------------------------------------------------------
+
+def _consensus_adjustment(labels: list[str], avg_age_hours: float) -> float:
+    """Apply behavioral science adjustments for herd behavior and priced-in signals.
+
+    Expert Trader: Markets are contrarian at extremes — unanimous bullishness
+    often precedes corrections (and vice versa).
+
+    Expert Behavioral Scientist: Herding bias means when everyone agrees,
+    the information is likely already reflected in price (EMH weak form).
+
+    Expert Mathematician: We model this as a dampening factor that activates
+    only at extreme consensus (>80% agreement), preserving signal linearity
+    in the normal range.
+
+    Returns a multiplier in [0.7, 1.0].
+    """
+    if not labels:
+        return 1.0
+
+    non_neutral = [l for l in labels if l != "neutral"]
+    if len(non_neutral) < 3:
+        return 1.0  # Too few articles to detect consensus
+
+    positive_count = sum(1 for l in non_neutral if "positive" in l)
+    negative_count = sum(1 for l in non_neutral if "negative" in l)
+    dominant = max(positive_count, negative_count)
+    agreement_ratio = dominant / len(non_neutral)
+
+    multiplier = 1.0
+
+    # Contrarian dampening: >80% agreement = herd signal
+    if agreement_ratio > 0.80:
+        multiplier *= 0.85
+        logger.debug("Consensus dampening: %.0f%% agreement → ×0.85", agreement_ratio * 100)
+
+    # Priced-in detection: high consensus + old average age
+    if agreement_ratio > 0.75 and avg_age_hours > 48:
+        multiplier *= 0.90
+        logger.debug("Priced-in dampening: %.0f%% agreement + %.0fh avg age → ×0.90",
+                      agreement_ratio * 100, avg_age_hours)
+
+    return max(0.7, multiplier)
 
 
 # ---------------------------------------------------------------------------
@@ -281,25 +362,37 @@ async def get_technical_score(
 
 
 # ---------------------------------------------------------------------------
-# Sentiment score — exponential time-decay weighted mean
+# Sentiment score — DUAL-HORIZON, term-aware
 # ---------------------------------------------------------------------------
 
-async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
-    """Compute instrument sentiment with exponential time-decay weighting.
+async def get_sentiment_score(instrument_id: str, term: str = "short") -> tuple[float, dict]:
+    """Compute instrument sentiment with term-appropriate parameters.
 
-    Half-life of 48 hours: an article from 2 days ago has 50 % the weight
-    of a fresh article.  Confidence uses a log ramp over non-neutral article
-    count (full confidence at 10 non-neutral articles).
+    Short-term grades use the `label` column (short-term sentiment).
+    Long-term grades use the `long_term_label` column (long-term sentiment).
+
+    Each horizon has its own decay rate and lookback window, reflecting
+    different behavioral dynamics:
+    - Short-term: recency bias dominates, fast decay, narrow window
+    - Long-term: anchoring bias dominates, slow decay, wide window
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    params = SENTIMENT_PARAMS.get(term, SENTIMENT_PARAMS["short"])
+    half_life_hours = params["half_life_hours"]
+    window_days = params["window_days"]
+    full_at = params["full_confidence_at"]
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     now = datetime.now(timezone.utc)
-    half_life_hours = 48.0
-    decay_lambda = math.log(2) / half_life_hours  # = ln(2) / T½
+    decay_lambda = math.log(2) / half_life_hours
+
+    # Choose the appropriate label column based on term
+    label_col = "s.label" if term == "short" else "COALESCE(s.long_term_label, s.label)"
 
     async with async_session() as session:
         result = await session.execute(
-            text("""
-                SELECT s.label, a.published_at
+            text(f"""
+                SELECT {label_col} AS sentiment_label, a.published_at,
+                       COALESCE(m.relevance_score, 1.0) AS relevance_score
                 FROM sentiment_scores s
                 JOIN news_instrument_map m ON m.article_id = s.article_id
                 JOIN news_articles a ON a.id = m.article_id
@@ -314,70 +407,88 @@ async def get_sentiment_score(instrument_id: str) -> tuple[float, dict]:
 
     total_articles = len(rows)
     if total_articles == 0:
-        return 0.0, {"articles": 0, "confidence": 0.0}
+        return 0.0, {"articles": 0, "confidence": 0.0, "term": term}
 
     # Count labels for display
     label_counts: dict[str, int] = {}
+    all_labels: list[str] = []
     for r in rows:
-        label_counts[r.label] = label_counts.get(r.label, 0) + 1
+        lbl = r.sentiment_label or "neutral"
+        label_counts[lbl] = label_counts.get(lbl, 0) + 1
+        all_labels.append(lbl)
 
     # Exponential time-decay weighted sentiment
+    # For ETFs, relevance_score (0-1) from constituent weight proportionally
+    # scales the impact: direct ETF news = 1.0, NVDA at 23.1% = 0.231
     weighted_sum = 0.0
     weight_total = 0.0
-    non_neutral_weighted_count = 0.0  # effective count for confidence
+    non_neutral_weighted_count = 0.0
+    total_age_hours = 0.0
+    non_neutral_count = 0
 
     for r in rows:
-        if r.label == "neutral":
+        lbl = r.sentiment_label or "neutral"
+        if lbl == "neutral":
             continue
-        score = SENTIMENT_SCORES.get(r.label, 0.0)
+        score = SENTIMENT_SCORES.get(lbl, 0.0)
+        relevance = float(r.relevance_score) if r.relevance_score else 1.0
         pub = r.published_at
         if pub is not None:
             if pub.tzinfo is None:
                 pub = pub.replace(tzinfo=timezone.utc)
             age_hours = max(0.0, (now - pub).total_seconds() / 3600.0)
         else:
-            age_hours = half_life_hours  # default to 1 half-life if unknown
+            age_hours = half_life_hours
 
-        decay_weight = math.exp(-decay_lambda * age_hours)
+        decay_weight = math.exp(-decay_lambda * age_hours) * relevance
         weighted_sum += score * decay_weight
         weight_total += decay_weight
         non_neutral_weighted_count += decay_weight
+        total_age_hours += age_hours
+        non_neutral_count += 1
 
     if weight_total == 0.0:
-        return 0.0, {"articles": total_articles, "labels": label_counts, "confidence": 0.0}
+        return 0.0, {"articles": total_articles, "labels": label_counts, "confidence": 0.0, "term": term}
 
     mean = weighted_sum / weight_total
+    avg_age_hours = total_age_hours / non_neutral_count if non_neutral_count > 0 else 0.0
 
-    # Effective article count: normalise weighted count by max single-article weight
-    effective_count = non_neutral_weighted_count  # sum of decay weights
-    # For confidence: treat each weight as fraction of a fresh article
-    # 10 fresh articles = full confidence
-    confidence = _log_confidence(min(round(effective_count * 2), 20), full_at=10)
+    # Effective article count for confidence
+    effective_count = non_neutral_weighted_count
+    confidence = _log_confidence(min(round(effective_count * 2), full_at * 2), full_at=full_at)
 
-    effective = _clip(mean * confidence)
+    # Behavioral science: consensus dampening
+    consensus_mult = _consensus_adjustment(all_labels, avg_age_hours)
+
+    effective = _clip(mean * confidence * consensus_mult)
 
     return round(effective, 4), {
         "articles": total_articles,
-        "non_neutral": sum(1 for r in rows if r.label != "neutral"),
+        "non_neutral": non_neutral_count,
         "labels": label_counts,
         "mean": round(mean, 4),
         "confidence": round(confidence, 4),
+        "consensus_adjustment": round(consensus_mult, 3),
+        "avg_age_hours": round(avg_age_hours, 1),
         "decay_half_life_h": half_life_hours,
+        "term": term,
     }
 
 
 # ---------------------------------------------------------------------------
-# Macro score — time-decayed aggregate of recent records
+# Macro score — DUAL-HORIZON, term-aware
 # ---------------------------------------------------------------------------
 
-async def get_macro_score() -> tuple[float, dict]:
-    """Aggregate macro sentiment from up to 20 records in the past 12 h.
+async def get_macro_score(term: str = "short") -> tuple[float, dict]:
+    """Aggregate macro sentiment with term-appropriate parameters.
 
-    Uses exponential time-decay (6-hour half-life) so the latest reading
-    dominates but historical context modulates the signal.  Confidence is
-    log-scaled on effective article coverage.
+    Short-term: 6h half-life, 12h window — captures immediate risk-on/off.
+    Long-term: 24h half-life, 48h window — captures structural policy shifts.
     """
-    half_life_hours = 6.0
+    params = MACRO_PARAMS.get(term, MACRO_PARAMS["short"])
+    half_life_hours = params["half_life_hours"]
+    window_hours = params["window_hours"]
+
     decay_lambda = math.log(2) / half_life_hours
     now = datetime.now(timezone.utc)
 
@@ -386,15 +497,17 @@ async def get_macro_score() -> tuple[float, dict]:
             text("""
                 SELECT score, article_count, calculated_at, label
                 FROM macro_sentiment
-                WHERE calculated_at >= NOW() - INTERVAL '12 hours'
+                WHERE term = :term
+                AND calculated_at >= NOW() - INTERVAL '1 hour' * :window_h
                 ORDER BY calculated_at DESC
                 LIMIT 20
-            """)
+            """),
+            {"term": term, "window_h": window_hours},
         )
         rows = result.fetchall()
 
     if not rows:
-        return 0.0, {"records": 0}
+        return 0.0, {"records": 0, "term": term}
 
     weighted_sum = 0.0
     weight_total = 0.0
@@ -413,7 +526,7 @@ async def get_macro_score() -> tuple[float, dict]:
         total_articles += row.article_count or 0
 
     if weight_total == 0.0:
-        return 0.0, {"records": len(rows), "articles": total_articles}
+        return 0.0, {"records": len(rows), "articles": total_articles, "term": term}
 
     macro_mean = weighted_sum / weight_total
     confidence = _log_confidence(min(total_articles, 30), full_at=10)
@@ -426,6 +539,7 @@ async def get_macro_score() -> tuple[float, dict]:
         "confidence": round(confidence, 4),
         "latest_label": rows[0].label,
         "decay_half_life_h": half_life_hours,
+        "term": term,
     }
 
 
@@ -441,6 +555,10 @@ async def grade_instrument(
 ) -> dict | None:
     """Compute a mathematically rigorous grade for one instrument.
 
+    Now term-aware: short-term grades use short-term sentiment/macro,
+    long-term grades use long-term sentiment/macro. This prevents
+    short-term noise from contaminating long-term views and vice versa.
+
     Returns a dict ready for DB insertion; also embeds buy_confidence and
     action_label in the details JSON so the frontend can display them.
     """
@@ -449,8 +567,8 @@ async def grade_instrument(
     technical_score, tech_details = await get_technical_score(
         instrument_id, lookback, category, term
     )
-    sentiment_score, sent_details = await get_sentiment_score(instrument_id)
-    macro_score, macro_details = await get_macro_score()
+    sentiment_score, sent_details = await get_sentiment_score(instrument_id, term)
+    macro_score, macro_details = await get_macro_score(term)
 
     # Composite weights
     profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])

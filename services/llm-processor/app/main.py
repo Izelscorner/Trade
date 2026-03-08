@@ -23,6 +23,7 @@ from .processor import (
     update_macro_sentiment,
     cleanup_priority,
     build_name_lookup,
+    populate_etf_constituents,
     PROCESS_INTERVAL,
 )
 from .prompts import build_instrument_context
@@ -53,10 +54,33 @@ async def ensure_schema():
         await session.execute(text(
             "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS macro_sentiment_label VARCHAR(30)"
         ))
+        await session.execute(text(
+            "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS macro_long_term_label VARCHAR(30)"
+        ))
+        await session.execute(text(
+            "ALTER TABLE sentiment_scores ADD COLUMN IF NOT EXISTS long_term_label VARCHAR(30)"
+        ))
+        await session.execute(text(
+            "ALTER TABLE sentiment_scores ADD COLUMN IF NOT EXISTS long_term_confidence NUMERIC(7,6) DEFAULT 0.5"
+        ))
+        await session.execute(text(
+            "ALTER TABLE macro_sentiment ADD COLUMN IF NOT EXISTS term VARCHAR(10) DEFAULT 'short'"
+        ))
         await session.execute(text("""
             CREATE TABLE IF NOT EXISTS processing_priority (
                 instrument_id UUID PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
                 requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS etf_constituents (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                etf_instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+                constituent_symbol VARCHAR(20) NOT NULL,
+                constituent_name VARCHAR(255) NOT NULL,
+                weight_percent NUMERIC(7, 4) NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(etf_instrument_id, constituent_symbol)
             )
         """))
         await session.execute(text("""
@@ -100,6 +124,11 @@ async def process_loop() -> None:
     refresh_counter = 0
 
     logger.info("Loaded %d instruments: %s", len(instruments), ", ".join(sorted(valid_symbols)))
+
+    # Populate ETF constituent data for ETF instruments
+    etf_instruments = [i for i in instruments if i["category"] == "etf"]
+    if etf_instruments:
+        await populate_etf_constituents(etf_instruments)
 
     while True:
         try:

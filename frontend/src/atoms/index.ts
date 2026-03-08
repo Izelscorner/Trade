@@ -66,7 +66,7 @@ export const gradesAtom = atomWithQuery<Grade[]>(() => ({
 // --- News ---
 export const latestNewsAtom = atomWithQuery<NewsArticle[]>(() => ({
   queryKey: ["news-latest"],
-  queryFn: () => fetchNews({ limit: 20 }),
+  queryFn: () => fetchNews({ limit: 100 }),
   refetchInterval: 120_000,
 }));
 
@@ -88,7 +88,7 @@ export const instrumentTechnicalAtom = (instrumentId: string) =>
 export const instrumentNewsAtom = (instrumentId: string) =>
   atomWithQuery<NewsArticle[]>(() => ({
     queryKey: ["news", instrumentId],
-    queryFn: () => fetchNews({ instrumentId, limit: 30 }),
+    queryFn: () => fetchNews({ instrumentId, limit: 100 }),
     enabled: !!instrumentId,
   }));
 

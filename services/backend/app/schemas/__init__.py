@@ -29,6 +29,7 @@ class SentimentSchema(BaseModel):
     negative: float
     neutral: float
     label: str
+    long_term_label: str | None = None
 
 
 # --- News ---
@@ -111,6 +112,7 @@ class DashboardInstrumentSchema(BaseModel):
 
 class MacroSentimentSchema(BaseModel):
     region: str
+    term: str = "short"
     score: float
     label: str
     article_count: int

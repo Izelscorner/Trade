@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS news_articles (
     is_asset_specific BOOLEAN NOT NULL DEFAULT false,
     ollama_processed BOOLEAN NOT NULL DEFAULT false,
     macro_sentiment_label VARCHAR(30),
+    macro_long_term_label VARCHAR(30),
     published_at TIMESTAMPTZ,
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (title, source)
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS news_instrument_map (
     UNIQUE (article_id, instrument_id)
 );
 
--- Sentiment scores (from Ollama/Llama 3.2)
+-- Sentiment scores — dual short-term / long-term from LLM
 CREATE TABLE IF NOT EXISTS sentiment_scores (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     article_id UUID NOT NULL REFERENCES news_articles(id) ON DELETE CASCADE,
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     negative NUMERIC(7, 6) NOT NULL,
     neutral NUMERIC(7, 6) NOT NULL,
     label VARCHAR(30) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral', 'very positive', 'very negative')),
+    long_term_label VARCHAR(30) CHECK (long_term_label IN ('positive', 'negative', 'neutral', 'very positive', 'very negative')),
+    long_term_confidence NUMERIC(7, 6) DEFAULT 0.5,
     analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (article_id)
 );
@@ -101,10 +104,11 @@ CREATE TABLE IF NOT EXISTS grades (
     graded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Macro sentiment (rolling, latest only)
+-- Macro sentiment (rolling, latest only) — term-aware (short/long)
 CREATE TABLE IF NOT EXISTS macro_sentiment (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     region VARCHAR(10) NOT NULL DEFAULT 'global',
+    term VARCHAR(10) NOT NULL DEFAULT 'short' CHECK (term IN ('short', 'long')),
     score NUMERIC(7, 6) NOT NULL,
     label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
     article_count INT NOT NULL DEFAULT 0,
@@ -132,6 +136,17 @@ CREATE TABLE IF NOT EXISTS portfolio (
     UNIQUE(instrument_id)
 );
 
+-- ETF constituent weights — maps ETFs to their underlying holdings with % weights
+CREATE TABLE IF NOT EXISTS etf_constituents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    etf_instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    constituent_symbol VARCHAR(20) NOT NULL,
+    constituent_name VARCHAR(255) NOT NULL,
+    weight_percent NUMERIC(7, 4) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(etf_instrument_id, constituent_symbol)
+);
+
 -- Processing priority (user-triggered, signals processor to prioritize an instrument's news)
 CREATE TABLE IF NOT EXISTS processing_priority (
     instrument_id UUID PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
@@ -147,7 +162,8 @@ CREATE INDEX idx_news_articles_unprocessed ON news_articles(ollama_processed, fe
 CREATE INDEX idx_sentiment_scores_article ON sentiment_scores(article_id);
 CREATE INDEX idx_technical_indicators_instrument_date ON technical_indicators(instrument_id, date DESC);
 CREATE INDEX idx_grades_instrument_term ON grades(instrument_id, term, graded_at DESC);
-CREATE INDEX idx_macro_sentiment_region_calc ON macro_sentiment(region, calculated_at DESC);
+CREATE INDEX idx_macro_sentiment_region_calc ON macro_sentiment(region, term, calculated_at DESC);
+CREATE INDEX idx_etf_constituents_etf ON etf_constituents(etf_instrument_id);
 CREATE INDEX idx_news_instrument_map_instrument ON news_instrument_map(instrument_id);
 CREATE INDEX idx_intraday_prices_instrument_ts ON intraday_prices(instrument_id, timestamp DESC);
 

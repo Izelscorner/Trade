@@ -79,7 +79,10 @@ export interface GradeDetails {
     labels?: Record<string, number>;
     mean?: number;
     confidence?: number;
+    consensus_adjustment?: number;
+    avg_age_hours?: number;
     decay_half_life_h?: number;
+    term?: string;
     [key: string]: unknown;
   };
   macro: {
@@ -89,6 +92,7 @@ export interface GradeDetails {
     confidence?: number;
     latest_label?: string;
     decay_half_life_h?: number;
+    term?: string;
     [key: string]: unknown;
   };
 }
@@ -103,6 +107,13 @@ export interface Sentiment {
     | "neutral"
     | "negative"
     | "very negative";
+  long_term_label?:
+    | "very positive"
+    | "positive"
+    | "neutral"
+    | "negative"
+    | "very negative"
+    | null;
 }
 
 export interface NewsArticle {
@@ -151,10 +162,19 @@ export interface TechnicalIndicator {
 
 export interface MacroSentiment {
   region: string;
+  term?: string;
   score: number;
   label: string;
   article_count: number;
   calculated_at: string;
+}
+
+export interface ETFConstituent {
+  symbol: string;
+  name: string;
+  weight_percent: number;
+  tracked_instrument_id: string | null;
+  article_count: number;
 }
 
 export interface APIResponse<T> {

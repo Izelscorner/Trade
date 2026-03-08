@@ -291,11 +291,26 @@ export default function News() {
                   </div>
                   <div className="flex flex-col items-end gap-1 shrink-0">
                     {article.sentiment && (
-                      <span
-                        className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${sentimentColors[article.sentiment.label]}`}
-                      >
-                        {article.sentiment.label}
-                      </span>
+                      <div className="flex flex-col items-end gap-0.5">
+                        <div className="flex items-center gap-1">
+                          <span className="text-[8px] text-text-muted/60 font-mono">ST</span>
+                          <span
+                            className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${sentimentColors[article.sentiment.label]}`}
+                          >
+                            {article.sentiment.label}
+                          </span>
+                        </div>
+                        {article.sentiment.long_term_label && article.sentiment.long_term_label !== article.sentiment.label && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-[8px] text-text-muted/60 font-mono">LT</span>
+                            <span
+                              className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${sentimentColors[article.sentiment.long_term_label]}`}
+                            >
+                              {article.sentiment.long_term_label}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
                     <ExternalLink
                       size={12}

@@ -61,7 +61,11 @@ class ConnectionManager:
             asyncio.create_task(self._write_priority(cs.instrument_ids[0]))
 
     async def _write_priority(self, instrument_id: str) -> None:
-        """Mark an instrument as priority for Ollama processing."""
+        """Mark an instrument as priority for Ollama processing.
+
+        For ETFs, also prioritize all tracked constituent instruments so
+        their news is fetched and processed first.
+        """
         try:
             async with async_session() as session:
                 await session.execute(
@@ -72,7 +76,29 @@ class ConnectionManager:
                     """),
                     {"iid": instrument_id},
                 )
+                # If this is an ETF, also prioritize its tracked constituent instruments
+                result = await session.execute(
+                    text("""
+                        SELECT i.id
+                        FROM etf_constituents ec
+                        JOIN instruments i ON UPPER(i.symbol) = UPPER(ec.constituent_symbol)
+                        WHERE ec.etf_instrument_id = :iid::uuid
+                    """),
+                    {"iid": instrument_id},
+                )
+                constituent_ids = [str(row.id) for row in result.fetchall()]
+                for cid in constituent_ids:
+                    await session.execute(
+                        text("""
+                            INSERT INTO processing_priority (instrument_id, requested_at)
+                            VALUES (:iid::uuid, NOW())
+                            ON CONFLICT (instrument_id) DO UPDATE SET requested_at = NOW()
+                        """),
+                        {"iid": cid},
+                    )
                 await session.commit()
+                if constituent_ids:
+                    logger.debug("Also prioritized %d ETF constituents for %s", len(constituent_ids), instrument_id)
         except Exception:
             logger.debug("Could not write processing priority for %s", instrument_id)
 
@@ -185,6 +211,15 @@ async def broadcast_live_prices():
 
 def _row_to_article(r, instrument_id=None) -> dict:
     """Convert a DB row to a news article dict for WS broadcast."""
+    sentiment: dict = {
+        "positive": float(r.positive) if r.positive is not None else 0,
+        "negative": float(r.negative) if r.negative is not None else 0,
+        "neutral": float(r.neutral) if r.neutral is not None else 0,
+        "label": r.label or "neutral",
+    }
+    lt_label = getattr(r, "long_term_label", None)
+    if lt_label:
+        sentiment["long_term_label"] = lt_label
     return {
         "id": str(r.id),
         "title": r.title,
@@ -196,12 +231,7 @@ def _row_to_article(r, instrument_id=None) -> dict:
         "is_asset_specific": r.is_asset_specific if hasattr(r, "is_asset_specific") else False,
         "instrument_id": str(instrument_id or (r.instrument_id if hasattr(r, "instrument_id") and r.instrument_id else None)) or None,
         "published_at": r.published_at.isoformat() if r.published_at else None,
-        "sentiment": {
-            "positive": float(r.positive) if r.positive is not None else 0,
-            "negative": float(r.negative) if r.negative is not None else 0,
-            "neutral": float(r.neutral) if r.neutral is not None else 0,
-            "label": r.label or "neutral"
-        }
+        "sentiment": sentiment,
     }
 
 
@@ -217,6 +247,7 @@ async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
                 SELECT n.id, n.title, n.link, n.summary, n.source, n.category,
                        n.is_macro, n.is_asset_specific, n.published_at,
                        s.positive, s.negative, s.neutral, s.label,
+                       s.long_term_label,
                        m.instrument_id
                 FROM news_articles n
                 JOIN sentiment_scores s ON n.id = s.article_id
@@ -224,7 +255,7 @@ async def _fetch_instrument_news(instrument_ids: list[str]) -> list[dict]:
                 WHERE m.instrument_id IN ({placeholders})
                 AND n.ollama_processed = true
                 ORDER BY n.published_at DESC
-                LIMIT 50
+                LIMIT 100
             """),
             params,
         )
@@ -239,6 +270,7 @@ async def _fetch_general_news() -> list[dict]:
                 SELECT n.id, n.title, n.link, n.summary, n.source, n.category,
                        n.is_macro, n.is_asset_specific, n.published_at,
                        s.positive, s.negative, s.neutral, s.label,
+                       s.long_term_label,
                        nim.instrument_id
                 FROM (
                     SELECT * FROM news_articles
@@ -289,7 +321,7 @@ async def broadcast_latest_news():
                 instrument_news = await _fetch_instrument_news(list(all_iids))
 
                 for ws, sub in asset_clients:
-                    filtered = [n for n in instrument_news if n["instrument_id"] in sub.instrument_ids][:30]
+                    filtered = [n for n in instrument_news if n["instrument_id"] in sub.instrument_ids][:100]
                     if filtered:
                         msg = json.dumps({
                             "type": "news_updates",
@@ -496,10 +528,9 @@ async def broadcast_macro_sentiment():
             async with async_session() as session:
                 result = await session.execute(
                     text("""
-                        SELECT *
+                        SELECT DISTINCT ON (term) region, term, score, label, article_count, calculated_at
                         FROM macro_sentiment
-                        ORDER BY calculated_at DESC
-                        LIMIT 1
+                        ORDER BY term, calculated_at DESC
                     """)
                 )
                 rows = result.fetchall()
@@ -517,6 +548,7 @@ async def broadcast_macro_sentiment():
                     label = "neutral"
                 sentiment.append({
                     "region": r.region,
+                    "term": r.term if r.term else "short",
                     "score": effective_score,
                     "label": label,
                     "article_count": r.article_count,

@@ -1,8 +1,8 @@
-/** Grade detail breakdown — percentage-first, math-transparent */
+/** Grade detail breakdown — percentage-first, math-transparent, dual-horizon sentiment */
 
 import type { Grade } from "../types";
 import { scoreToBuyConfidence, buyConfidenceToAction } from "../types";
-import { Award, TrendingUp, Newspaper, Globe, ShieldCheck, Zap } from "lucide-react";
+import { Award, TrendingUp, Newspaper, Globe, ShieldCheck, Zap, AlertTriangle } from "lucide-react";
 
 interface GradeDetailProps {
   shortGrade: Grade | null;
@@ -75,6 +75,7 @@ function ScoreBar({
   confidence,
   articles,
   extraInfo,
+  consensusAdj,
 }: {
   label: string;
   score: number;
@@ -82,6 +83,7 @@ function ScoreBar({
   confidence?: number;
   articles?: number;
   extraInfo?: string;
+  consensusAdj?: number;
 }) {
   // Score ∈ [-3, 3] → 0–100% for bar
   const barPct = Math.max(0, Math.min(100, ((score + 3) / 6) * 100));
@@ -105,6 +107,12 @@ function ScoreBar({
           )}
           {extraInfo && (
             <span className="text-[10px] text-text-muted/70 italic">{extraInfo}</span>
+          )}
+          {consensusAdj !== undefined && consensusAdj < 1.0 && (
+            <span className="text-[10px] text-amber-400/80 font-mono bg-amber-500/10 px-1 rounded flex items-center gap-0.5" title="Consensus dampening applied — herd behavior detected">
+              <AlertTriangle size={8} />
+              ×{consensusAdj.toFixed(2)}
+            </span>
           )}
         </div>
         <span className={`text-xs font-mono font-bold ${textColor}`}>
@@ -169,8 +177,11 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
   const action = grade.details?.action ?? buyConfidenceToAction(buyConf);
   const sentConf = grade.details?.sentiment?.confidence;
   const sentArticles = grade.details?.sentiment?.articles;
+  const sentConsensus = grade.details?.sentiment?.consensus_adjustment as number | undefined;
+  const sentDecay = grade.details?.sentiment?.decay_half_life_h;
   const macroConf = grade.details?.macro?.confidence;
   const macroArticles = grade.details?.macro?.articles;
+  const macroDecay = grade.details?.macro?.decay_half_life_h;
   const techCompleteness = grade.details?.technical?.data_completeness;
   const atrFactor = grade.details?.technical?.atr_risk_factor;
   const groups = grade.details?.technical?.group_scores as
@@ -186,6 +197,9 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
     buyConf >= 37 ? "text-amber-400" :
     buyConf >= 22 ? "text-orange-400" :
     "text-red-400";
+
+  const sentDecayLabel = sentDecay ? `${sentDecay}h decay` : undefined;
+  const macroDecayLabel = macroDecay ? `${macroDecay}h decay` : undefined;
 
   return (
     <div className="rounded-xl bg-surface-2/50 border border-border-subtle p-5 space-y-4">
@@ -221,7 +235,8 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           icon={Newspaper}
           confidence={sentConf}
           articles={typeof sentArticles === "number" ? sentArticles : undefined}
-          extraInfo="48h decay"
+          extraInfo={sentDecayLabel}
+          consensusAdj={sentConsensus}
         />
         <ScoreBar
           label="Macro"
@@ -229,7 +244,7 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           icon={Globe}
           confidence={macroConf}
           articles={typeof macroArticles === "number" ? macroArticles : undefined}
-          extraInfo="6h decay"
+          extraInfo={macroDecayLabel}
         />
       </div>
 

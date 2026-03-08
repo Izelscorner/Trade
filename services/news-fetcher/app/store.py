@@ -197,8 +197,8 @@ async def upsert_articles(articles: list[dict]) -> int:
 
 # Rolling window caps — keep only the N most recent articles per bucket.
 # When new articles push past the cap, oldest are evicted automatically.
-MACRO_CAP_PER_CATEGORY = 75   # 75 × 3 categories = 225 macro articles max
-ASSET_CAP_PER_INSTRUMENT = 50  # 50 × 7 instruments = 350 asset articles max
+MACRO_CAP_PER_CATEGORY = 75    # 75 × 3 categories = 225 macro articles max
+ASSET_CAP_PER_INSTRUMENT = 300  # 300 × 7 instruments = 2100 asset articles max
 
 
 async def _delete_articles(session, ids: list) -> int:

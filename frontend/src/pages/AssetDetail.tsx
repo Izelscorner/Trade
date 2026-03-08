@@ -13,7 +13,7 @@ import {
   instrumentIndependentAIAnalysisAtom,
   macroSentimentAtom,
 } from "../atoms";
-import { fetchInstrument, fetchLivePrice, prioritizeInstrument, fetchConfig } from "../api/client";
+import { fetchInstrument, fetchLivePrice, prioritizeInstrument, fetchConfig, fetchETFConstituents } from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
 import PriceChart from "../components/PriceChart";
@@ -23,8 +23,8 @@ import MacroSentimentCard from "../components/MacroSentimentCard";
 import NewsFeed from "../components/NewsFeed";
 import AIAnalysisModal from "../components/AIAnalysisModal";
 import { PageSkeleton } from "../components/Skeletons";
-import { ArrowLeft, CircleDot, Brain, Network } from "lucide-react";
-import type { Instrument, LivePrice, Grade } from "../types";
+import { ArrowLeft, CircleDot, Brain, Network, Layers } from "lucide-react";
+import type { Instrument, LivePrice, Grade, ETFConstituent } from "../types";
 import { useEffect, useState } from "react";
 
 const marketStatusConfig: Record<string, { label: string; color: string }> = {
@@ -79,6 +79,13 @@ export default function AssetDetail() {
     queryKey: ["config"],
     queryFn: fetchConfig,
     staleTime: Infinity,
+  });
+
+  const { data: etfConstituents } = useQuery<ETFConstituent[]>({
+    queryKey: ["etf-constituents", id],
+    queryFn: () => fetchETFConstituents(id!),
+    enabled: !!id && instrument?.category === "etf",
+    staleTime: 600_000,
   });
 
   const modelDisplay = useMemo(() => {
@@ -225,6 +232,61 @@ export default function AssetDetail() {
       <div className="animate-slide-up" style={{ animationDelay: "150ms" }}>
         <MacroSentimentCard sentiments={macroSentiments || []} />
       </div>
+
+      {/* ETF Constituents */}
+      {instrument.category === "etf" && etfConstituents && etfConstituents.length > 0 && (
+        <div className="animate-slide-up" style={{ animationDelay: "175ms" }}>
+          <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Layers size={18} className="text-accent-cyan" />
+              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
+                ETF Holdings
+              </h2>
+              <span className="text-xs text-text-muted ml-auto">
+                {etfConstituents.length} constituents
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {etfConstituents.map((c) => (
+                <div
+                  key={c.symbol}
+                  className="flex items-center justify-between p-2.5 rounded-lg bg-surface-2/50 hover:bg-surface-2 transition-colors"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {c.tracked_instrument_id ? (
+                      <Link
+                        to={`/asset/${c.tracked_instrument_id}`}
+                        className="text-sm font-semibold text-accent-cyan hover:underline"
+                      >
+                        {c.symbol}
+                      </Link>
+                    ) : (
+                      <span className="text-sm font-semibold text-text-primary">
+                        {c.symbol}
+                      </span>
+                    )}
+                    <span className="text-[10px] text-text-muted truncate">
+                      {c.name}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 ml-2">
+                    <span className={`text-[10px] font-mono ${c.article_count > 0 ? "text-accent-amber" : "text-text-muted/40"}`}>
+                      {c.article_count} art
+                    </span>
+                    <div
+                      className="h-1.5 rounded-full bg-accent-cyan/30"
+                      style={{ width: `${Math.max(12, c.weight_percent * 2)}px` }}
+                    />
+                    <span className="text-xs font-mono font-medium text-text-secondary">
+                      {c.weight_percent.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Chart + Technicals */}
       <div

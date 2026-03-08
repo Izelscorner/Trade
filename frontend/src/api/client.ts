@@ -3,6 +3,7 @@
 import type {
   APIResponse,
   DashboardInstrument,
+  ETFConstituent,
   Grade,
   HistoricalPrice,
   Instrument,
@@ -59,7 +60,7 @@ export const fetchDashboard = () =>
   fetchAPI<DashboardInstrument[]>("/dashboard");
 export const fetchMacroSentiment = () =>
   fetchAPI<MacroSentiment[]>("/dashboard/macro");
-export const fetchMacroNews = (limit = 30) =>
+export const fetchMacroNews = (limit = 100) =>
   fetchAPI<NewsArticle[]>(`/dashboard/macro/news?limit=${limit}`);
 
 // Instruments
@@ -69,6 +70,8 @@ export const fetchInstruments = (category?: string) =>
   );
 export const fetchInstrument = (id: string) =>
   fetchAPI<Instrument>(`/instruments/${id}`);
+export const fetchETFConstituents = (id: string) =>
+  fetchAPI<ETFConstituent[]>(`/instruments/${id}/constituents`);
 
 // Grades
 export const fetchGrades = (instrumentId?: string, term?: string) => {

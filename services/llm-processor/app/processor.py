@@ -1,7 +1,10 @@
 """Batch processing strategy:
   - Classification: N articles → 1 API call → JSON array of results
   - Sentiment: group articles by first instrument → 1 API call per instrument bucket → JSON array
+    * Now returns DUAL-HORIZON: short-term (1-7d) AND long-term (1-6mo) sentiment per article
   - Macro sentiment: N macro articles → 1 API call → JSON array of results
+    * Also dual-horizon
+  - ETF constituent awareness: news about ETF holdings auto-tags the parent ETF with weight-based relevance
 This dramatically reduces the number of API calls to NVIDIA NIM.
 """
 
@@ -24,6 +27,7 @@ from .prompts import (
     batch_macro_sentiment_prompt,
     sentiment_prompt,
     macro_sentiment_prompt,
+    etf_constituent_prompt,
     build_instrument_context,
     get_role,
     get_asset_description,
@@ -41,8 +45,8 @@ MACRO_BATCH = 3       # macro articles per macro-sentiment API call (small = avo
 
 # Token budgets per article (generous to avoid truncation → fallback burst)
 CLASSIFY_TOKENS_PER_ARTICLE = 130   # {"id","type","instruments","is_macro"} × N
-SENTIMENT_TOKENS_PER_ARTICLE = 55   # {"id","sentiment","confidence"} × N
-MACRO_TOKENS_PER_ARTICLE = 120      # generous: model uses verbose formatting (MIXED/BAD/GOOD + newlines)
+SENTIMENT_TOKENS_PER_ARTICLE = 80   # increased: dual-horizon {"id","short_sentiment","short_confidence","long_sentiment","long_confidence"} × N
+MACRO_TOKENS_PER_ARTICLE = 140      # increased: dual-horizon macro
 TOKENS_OVERHEAD = 150               # wrapper object + whitespace slack
 
 # Small sleep between consecutive sub-batch chunks to smooth rate-limit pressure
@@ -122,6 +126,9 @@ _COMMODITY_PRICE_KEYWORDS = {
     "natural gas": ["natural gas price", "gas futures", "henry hub"],
     "copper": ["copper price", "copper futures"],
 }
+
+# ETF constituent cache: etf_symbol -> {constituent_symbol: weight_percent}
+_ETF_CONSTITUENTS: dict[str, dict[str, float]] = {}
 
 
 async def get_instruments() -> list[dict]:
@@ -245,6 +252,20 @@ def postprocess_classification(
         if direct:
             llm_instruments = list(direct)
 
+    # --- ETF constituent propagation ---
+    # If a tagged instrument is a constituent of a tracked ETF, also tag the ETF
+    etf_tags_to_add: dict[str, float] = {}  # etf_symbol -> max relevance
+    for symbol in list(llm_instruments):
+        for etf_symbol, constituents in _ETF_CONSTITUENTS.items():
+            if symbol in constituents:
+                weight = constituents[symbol]
+                if etf_symbol not in etf_tags_to_add or weight > etf_tags_to_add[etf_symbol]:
+                    etf_tags_to_add[etf_symbol] = weight
+
+    for etf_symbol in etf_tags_to_add:
+        if etf_symbol not in llm_instruments:
+            llm_instruments.append(etf_symbol)
+
     return llm_instruments, llm_is_macro
 
 
@@ -300,6 +321,103 @@ async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# ETF Constituent Management
+# ---------------------------------------------------------------------------
+
+async def populate_etf_constituents(etf_instruments: list[dict]) -> None:
+    """Populate ETF constituent data using LLM if not already in DB.
+
+    Falls back to known hardcoded data for common ETFs if LLM fails.
+    """
+    global _ETF_CONSTITUENTS
+
+    # Hardcoded fallback for known ETFs
+    _KNOWN_ETF_CONSTITUENTS = {
+        "IITU": [
+            {"symbol": "NVDA", "name": "NVIDIA Corporation", "weight_percent": 23.06},
+            {"symbol": "AAPL", "name": "Apple Inc.", "weight_percent": 18.19},
+            {"symbol": "MSFT", "name": "Microsoft Corporation", "weight_percent": 16.13},
+            {"symbol": "AVGO", "name": "Broadcom Inc.", "weight_percent": 8.03},
+            {"symbol": "CRM", "name": "Salesforce Inc.", "weight_percent": 3.51},
+            {"symbol": "ORCL", "name": "Oracle Corporation", "weight_percent": 3.21},
+            {"symbol": "AMD", "name": "Advanced Micro Devices", "weight_percent": 2.89},
+            {"symbol": "NOW", "name": "ServiceNow Inc.", "weight_percent": 2.71},
+            {"symbol": "MU", "name": "Micron Technology", "weight_percent": 2.41},
+            {"symbol": "ADBE", "name": "Adobe Inc.", "weight_percent": 2.29},
+        ],
+    }
+
+    async with async_session() as session:
+        for etf in etf_instruments:
+            etf_id = etf["id"]
+            etf_symbol = etf["symbol"]
+            etf_name = etf["name"]
+
+            # Check if already populated
+            result = await session.execute(
+                text("SELECT constituent_symbol, weight_percent FROM etf_constituents WHERE etf_instrument_id = :eid"),
+                {"eid": etf_id},
+            )
+            rows = result.fetchall()
+            if rows:
+                _ETF_CONSTITUENTS[etf_symbol] = {r.constituent_symbol: float(r.weight_percent) for r in rows}
+                logger.info("ETF %s: loaded %d constituents from DB", etf_symbol, len(rows))
+                continue
+
+            # Use LLM to identify constituents
+            logger.info("ETF %s: fetching constituents via LLM...", etf_symbol)
+            prompt = etf_constituent_prompt(etf_name, etf_symbol)
+            result_data = await generate_json(prompt, system="You are a financial data expert. Always respond with valid JSON.", max_tokens=500)
+
+            # Fallback to hardcoded data if LLM fails or returns empty/invalid
+            has_valid = (
+                result_data
+                and "constituents" in result_data
+                and isinstance(result_data["constituents"], list)
+                and len(result_data["constituents"]) >= 3
+            )
+            if not has_valid:
+                logger.warning("ETF %s: LLM response invalid or insufficient, trying hardcoded fallback", etf_symbol)
+                if etf_symbol in _KNOWN_ETF_CONSTITUENTS:
+                    result_data = {"constituents": _KNOWN_ETF_CONSTITUENTS[etf_symbol]}
+                    logger.info("ETF %s: using hardcoded constituents", etf_symbol)
+
+            if result_data and "constituents" in result_data:
+                constituents = result_data["constituents"]
+                etf_cache = {}
+                for c in constituents:
+                    if not isinstance(c, dict):
+                        continue
+                    c_symbol = c.get("symbol", "").strip().upper()
+                    c_name = c.get("name", "").strip()
+                    c_weight = float(c.get("weight_percent", 0))
+                    if c_symbol and c_weight > 0:
+                        try:
+                            await session.execute(
+                                text("""
+                                    INSERT INTO etf_constituents (etf_instrument_id, constituent_symbol, constituent_name, weight_percent)
+                                    VALUES (:eid, :sym, :name, :weight)
+                                    ON CONFLICT (etf_instrument_id, constituent_symbol) DO UPDATE
+                                    SET weight_percent = :weight, constituent_name = :name, updated_at = NOW()
+                                """),
+                                {"eid": etf_id, "sym": c_symbol, "name": c_name, "weight": c_weight},
+                            )
+                            etf_cache[c_symbol] = c_weight
+                        except Exception as e:
+                            logger.warning("Failed to store ETF constituent %s: %s", c_symbol, e)
+                await session.commit()
+                _ETF_CONSTITUENTS[etf_symbol] = etf_cache
+                logger.info("ETF %s: stored %d constituents", etf_symbol, len(etf_cache))
+            else:
+                logger.warning("ETF %s: LLM failed to provide constituents", etf_symbol)
+
+
+async def get_etf_constituents() -> dict[str, dict[str, float]]:
+    """Get cached ETF constituents (populated at startup)."""
+    return _ETF_CONSTITUENTS
+
+
+# ---------------------------------------------------------------------------
 # Batch processing — the main public entry point
 # ---------------------------------------------------------------------------
 
@@ -317,10 +435,10 @@ async def process_batch(
 
     Steps:
       1. Batch-classify all articles (1 call per CLASSIFY_BATCH articles)
-      2. Apply deterministic post-processing per article
+      2. Apply deterministic post-processing per article (incl. ETF constituent propagation)
       3. Filter spam / irrelevant articles
-      4. Group remaining articles by first instrument, batch-sentiment per group
-      5. Batch macro-sentiment for all macro articles
+      4. Group remaining articles by first instrument, batch-sentiment per group (DUAL-HORIZON)
+      5. Batch macro-sentiment for all macro articles (DUAL-HORIZON)
       6. Mark all articles processed
     """
     if not articles:
@@ -416,8 +534,19 @@ async def process_batch(
         if is_macro:
             macro_articles.append(art)
 
-        # Update DB flags + instrument map
-        await update_article_tags(art_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids)
+        # Compute ETF relevance scores for instrument map
+        etf_relevance: dict[str, float] = {}
+        for symbol in tagged_instruments:
+            for etf_symbol, constituents in _ETF_CONSTITUENTS.items():
+                if symbol in constituents and etf_symbol in tagged_instruments:
+                    # This tag was propagated from constituent; use weight as relevance
+                    etf_relevance[etf_symbol] = max(
+                        etf_relevance.get(etf_symbol, 0),
+                        constituents[symbol] / 100.0  # Convert percentage to 0-1
+                    )
+
+        # Update DB flags + instrument map (with ETF-aware relevance scores)
+        await update_article_tags(art_id, is_macro, bool(tagged_instruments), tagged_instruments, instrument_ids, etf_relevance)
 
     # --- Step 3: Delete spam/irrelevant ---
     for art_id in to_delete:
@@ -426,7 +555,7 @@ async def process_batch(
     if not keep:
         return
 
-    # --- Step 4: Batch sentiment by instrument group ---
+    # --- Step 4: Batch DUAL-HORIZON sentiment by instrument group ---
     # Build per-instrument buckets (keyed by first tagged instrument symbol)
     instrument_buckets: dict[str, list[dict]] = {}
     no_instrument_articles: list[dict] = []
@@ -444,10 +573,8 @@ async def process_batch(
     for symbol, bucket in instrument_buckets.items():
         inst = instruments_by_symbol.get(symbol, {})
 
-        # Bypass deterministic pass - fully rely on LLM
         needs_llm = bucket
 
-        # Second pass: batch LLM sentiment
         role = get_role(inst) if inst else f"You predict {symbol} price direction."
         asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
 
@@ -466,28 +593,38 @@ async def process_batch(
                 for art in chunk:
                     result = await _sentiment_single(art, role, asset_desc)
                     if result:
-                        await store_sentiment(art["id"], result.get("sentiment", "neutral"),
-                                              float(result.get("confidence", 0.5)))
+                        short_label = result.get("short_sentiment", result.get("sentiment", "neutral"))
+                        short_conf = float(result.get("short_confidence", result.get("confidence", 0.5)))
+                        long_label = result.get("long_sentiment", "neutral")
+                        long_conf = float(result.get("long_confidence", 0.5))
+                        await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
                         sentiment_stored[art["id"]] = True
             else:
                 result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
                 for art in chunk:
                     item = result_map.get(art["id"])
                     if item:
-                        s_label = item.get("sentiment", "neutral")
-                        s_conf = float(item.get("confidence", 0.5))
-                        await store_sentiment(art["id"], s_label, s_conf)
-                        logger.info("Sentiment (batch) %s on '%s': %s (%.2f)", symbol, art["title"][:40], s_label, s_conf)
+                        # Extract dual-horizon sentiment
+                        short_label = item.get("short_sentiment", item.get("sentiment", "neutral"))
+                        short_conf = float(item.get("short_confidence", item.get("confidence", 0.5)))
+                        long_label = item.get("long_sentiment", "neutral")
+                        long_conf = float(item.get("long_confidence", 0.5))
+                        await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
+                        logger.info("Sentiment (batch) %s on '%s': short=%s(%.2f) long=%s(%.2f)",
+                                    symbol, art["title"][:40], short_label, short_conf, long_label, long_conf)
                         sentiment_stored[art["id"]] = True
                     else:
                         # Missing from batch response — fallback
                         result = await _sentiment_single(art, role, asset_desc)
                         if result:
-                            await store_sentiment(art["id"], result.get("sentiment", "neutral"),
-                                                  float(result.get("confidence", 0.5)))
+                            short_label = result.get("short_sentiment", result.get("sentiment", "neutral"))
+                            short_conf = float(result.get("short_confidence", result.get("confidence", 0.5)))
+                            long_label = result.get("long_sentiment", "neutral")
+                            long_conf = float(result.get("long_confidence", 0.5))
+                            await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
                             sentiment_stored[art["id"]] = True
 
-    # --- Step 5: Batch macro sentiment ---
+    # --- Step 5: Batch DUAL-HORIZON macro sentiment ---
     if macro_articles:
         for chunk_start in range(0, len(macro_articles), MACRO_BATCH):
             chunk = macro_articles[chunk_start:chunk_start + MACRO_BATCH]
@@ -520,22 +657,20 @@ async def _classify_single(article: dict, symbol_mapping: str, valid_symbols_str
 
 
 async def _sentiment_single(article: dict, role: str, asset_desc: str) -> dict | None:
-    """Fallback: sentiment for a single article."""
+    """Fallback: dual-horizon sentiment for a single article."""
     title = article["title"]
     content = article["content"] or article["summary"]
     prompt = sentiment_prompt(title, content, role, asset_desc)
-    result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+    result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=100)
     if not result:
-        result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=60)
+        result = await generate_json(prompt, system=SENTIMENT_SYSTEM, max_tokens=100)
     return result
 
 
 async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dict[str, bool]) -> None:
-    """Run macro sentiment in batch; fall back to deterministic + then individual LLM."""
-    # Fully rely on LLM for macro sentiment batch
+    """Run dual-horizon macro sentiment in batch; fall back to individual LLM."""
     needs_llm = articles
 
-    # Second pass: batch LLM
     prompt = batch_macro_sentiment_prompt(needs_llm)
     max_tok = MACRO_TOKENS_PER_ARTICLE * len(needs_llm) + TOKENS_OVERHEAD
     raw_results = await generate_json_array(
@@ -551,22 +686,35 @@ async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dic
     }
     valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
 
+    def _normalize_macro_label(raw: str) -> str:
+        raw = raw.strip().lower().strip("<>")
+        label = _MACRO_LABEL_MAP.get(raw, raw)
+        if label not in valid_labels:
+            label = "neutral"
+        return label
+
     if raw_results is not None:
         result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
         for art in needs_llm:
             item = result_map.get(art["id"])
             if item:
-                raw_label = item.get("sentiment", "neutral").strip().lower().strip("<>")
-                confidence = float(item.get("confidence", 0.5))
-                s_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
-                if s_label not in valid_labels:
-                    s_label = "neutral"
-                logger.info("Macro (batch) '%s': %s (%.2f)", art["title"][:40], s_label, confidence)
+                # Extract dual-horizon macro sentiment
+                raw_short = item.get("short_sentiment", item.get("sentiment", "neutral"))
+                short_conf = float(item.get("short_confidence", item.get("confidence", 0.5)))
+                raw_long = item.get("long_sentiment", "neutral")
+                long_conf = float(item.get("long_confidence", 0.5))
+
+                short_label = _normalize_macro_label(str(raw_short))
+                long_label = _normalize_macro_label(str(raw_long))
+
+                logger.info("Macro (batch) '%s': short=%s(%.2f) long=%s(%.2f)",
+                            art["title"][:40], short_label, short_conf, long_label, long_conf)
+
                 store_in_scores = not sentiment_stored.get(art["id"], False)
                 if store_in_scores:
-                    await store_sentiment(art["id"], s_label, confidence)
+                    await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
                     sentiment_stored[art["id"]] = True
-                await store_macro_label(art["id"], s_label)
+                await store_macro_label(art["id"], short_label, long_label)
             else:
                 # fallback individual
                 await run_macro_sentiment(
@@ -606,40 +754,43 @@ async def process_article(
     )
 
 
-# Removed _deterministic_instrument_sentiment and _deterministic_macro_sentiment
-
-
-
 async def run_macro_sentiment(article_id: str, title: str, content: str, store_in_scores: bool = True) -> None:
-    """Run macro-level sentiment analysis with Western market bias."""
-    deterministic = _deterministic_macro_sentiment(title, content)
-    if deterministic:
-        sentiment_label, confidence = deterministic
-        logger.info("Macro sentiment (deterministic) for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
-    else:
-        prompt = macro_sentiment_prompt(title, content)
-        sentiment_result = await generate_json(prompt, system=MACRO_SYSTEM, max_tokens=60)
+    """Run dual-horizon macro-level sentiment analysis (individual fallback)."""
+    prompt = macro_sentiment_prompt(title, content)
+    sentiment_result = await generate_json(prompt, system=MACRO_SYSTEM, max_tokens=100)
 
-        if sentiment_result:
-            raw_label = sentiment_result.get("sentiment", "neutral").strip().lower().strip("<>")
-            confidence = float(sentiment_result.get("confidence", 0.5))
-            _MACRO_LABEL_MAP = {
-                "good": "positive", "bad": "negative", "mixed": "neutral",
-                "very_good": "very_positive", "very_bad": "very_negative",
-                "very good": "very_positive", "very bad": "very_negative",
-            }
-            sentiment_label = _MACRO_LABEL_MAP.get(raw_label, raw_label)
-            valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
-            if sentiment_label not in valid_labels:
-                sentiment_label = "neutral"
-            logger.info("Macro sentiment (LLM) for '%s': %s (conf=%.2f)", title[:40], sentiment_label, confidence)
-        else:
-            sentiment_label = "neutral"
-            confidence = 0.3
+    _MACRO_LABEL_MAP = {
+        "good": "positive", "bad": "negative", "mixed": "neutral",
+        "very_good": "very_positive", "very_bad": "very_negative",
+        "very good": "very_positive", "very bad": "very_negative",
+    }
+    valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
+
+    if sentiment_result:
+        raw_short = sentiment_result.get("short_sentiment", sentiment_result.get("sentiment", "neutral"))
+        short_conf = float(sentiment_result.get("short_confidence", sentiment_result.get("confidence", 0.5)))
+        raw_long = sentiment_result.get("long_sentiment", "neutral")
+        long_conf = float(sentiment_result.get("long_confidence", 0.5))
+
+        short_label = _MACRO_LABEL_MAP.get(str(raw_short).strip().lower().strip("<>"), str(raw_short).strip().lower())
+        long_label = _MACRO_LABEL_MAP.get(str(raw_long).strip().lower().strip("<>"), str(raw_long).strip().lower())
+
+        if short_label not in valid_labels:
+            short_label = "neutral"
+        if long_label not in valid_labels:
+            long_label = "neutral"
+
+        logger.info("Macro sentiment (LLM) for '%s': short=%s(%.2f) long=%s(%.2f)",
+                    title[:40], short_label, short_conf, long_label, long_conf)
+    else:
+        short_label = "neutral"
+        long_label = "neutral"
+        short_conf = 0.3
+        long_conf = 0.3
 
     if store_in_scores:
-        await store_sentiment(article_id, sentiment_label, confidence)
-    await store_macro_label(article_id, sentiment_label)
+        await store_sentiment(article_id, short_label, short_conf, long_label, long_conf)
+    await store_macro_label(article_id, short_label, long_label)
 
 
 async def update_article_tags(
@@ -648,8 +799,12 @@ async def update_article_tags(
     is_asset_specific: bool,
     instruments: list[str],
     instrument_ids: dict[str, str],
+    etf_relevance: dict[str, float] | None = None,
 ) -> None:
-    """Update article flags and create instrument mappings."""
+    """Update article flags and create instrument mappings with ETF-aware relevance."""
+    if etf_relevance is None:
+        etf_relevance = {}
+
     async with async_session() as session:
         await session.execute(
             text("""
@@ -668,23 +823,38 @@ async def update_article_tags(
         for symbol in instruments:
             iid = instrument_ids.get(symbol)
             if iid:
+                # Use ETF-weighted relevance if this is a propagated ETF tag
+                relevance = etf_relevance.get(symbol, 1.0)
                 await session.execute(
                     text("""
                         INSERT INTO news_instrument_map (article_id, instrument_id, relevance_score)
-                        VALUES (:aid, :iid, 1.0)
+                        VALUES (:aid, :iid, :rel)
                     """),
-                    {"aid": article_id, "iid": iid},
+                    {"aid": article_id, "iid": iid, "rel": relevance},
                 )
 
         await session.commit()
 
 
-async def store_sentiment(article_id: str, sentiment_label: str, confidence: float) -> None:
-    """Store sentiment score in the database."""
+async def store_sentiment(
+    article_id: str,
+    sentiment_label: str,
+    confidence: float,
+    long_term_label: str = "neutral",
+    long_term_confidence: float = 0.5,
+) -> None:
+    """Store dual-horizon sentiment score in the database."""
+    # Normalize short-term label
     label = sentiment_label.lower().replace("_", " ").strip().strip("<>")
     if label not in SENTIMENT_LABEL_MAP.values():
         label = SENTIMENT_LABEL_MAP.get(sentiment_label.lower().replace(" ", "_"), "neutral")
 
+    # Normalize long-term label
+    lt_label = long_term_label.lower().replace("_", " ").strip().strip("<>")
+    if lt_label not in SENTIMENT_LABEL_MAP.values():
+        lt_label = SENTIMENT_LABEL_MAP.get(long_term_label.lower().replace(" ", "_"), "neutral")
+
+    # Compute probability distribution from short-term label (primary display)
     key = label.replace(" ", "_")
     probs = SENTIMENT_PROBABILITIES.get(key, SENTIMENT_PROBABILITIES["neutral"])
 
@@ -700,28 +870,40 @@ async def store_sentiment(article_id: str, sentiment_label: str, confidence: flo
         try:
             await session.execute(
                 text("""
-                    INSERT INTO sentiment_scores (article_id, positive, negative, neutral, label)
-                    VALUES (:aid, :pos, :neg, :neu, :label)
+                    INSERT INTO sentiment_scores (article_id, positive, negative, neutral, label,
+                                                  long_term_label, long_term_confidence)
+                    VALUES (:aid, :pos, :neg, :neu, :label, :lt_label, :lt_conf)
                     ON CONFLICT (article_id) DO UPDATE
-                    SET positive = :pos, negative = :neg, neutral = :neu, label = :label
+                    SET positive = :pos, negative = :neg, neutral = :neu, label = :label,
+                        long_term_label = :lt_label, long_term_confidence = :lt_conf
                 """),
-                {"aid": article_id, "pos": pos, "neg": neg, "neu": neu, "label": label},
+                {"aid": article_id, "pos": pos, "neg": neg, "neu": neu,
+                 "label": label, "lt_label": lt_label, "lt_conf": long_term_confidence},
             )
             await session.commit()
         except Exception as e:
             logger.warning("Could not store sentiment for article %s: %s", article_id, e)
 
 
-async def store_macro_label(article_id: str, sentiment_label: str) -> None:
-    """Store macro sentiment label directly on the article for macro aggregation."""
-    label = sentiment_label.lower().replace("_", " ").strip().strip("<>")
-    if label not in SENTIMENT_LABEL_MAP.values():
-        label = SENTIMENT_LABEL_MAP.get(sentiment_label.lower().replace(" ", "_"), "neutral")
+async def store_macro_label(article_id: str, short_label: str, long_label: str = "neutral") -> None:
+    """Store dual-horizon macro sentiment labels directly on the article."""
+    s_label = short_label.lower().replace("_", " ").strip().strip("<>")
+    if s_label not in SENTIMENT_LABEL_MAP.values():
+        s_label = SENTIMENT_LABEL_MAP.get(short_label.lower().replace(" ", "_"), "neutral")
+
+    l_label = long_label.lower().replace("_", " ").strip().strip("<>")
+    if l_label not in SENTIMENT_LABEL_MAP.values():
+        l_label = SENTIMENT_LABEL_MAP.get(long_label.lower().replace(" ", "_"), "neutral")
+
     async with async_session() as session:
         try:
             await session.execute(
-                text("UPDATE news_articles SET macro_sentiment_label = :label WHERE id = :id"),
-                {"id": article_id, "label": label},
+                text("""
+                    UPDATE news_articles
+                    SET macro_sentiment_label = :s_label, macro_long_term_label = :l_label
+                    WHERE id = :id
+                """),
+                {"id": article_id, "s_label": s_label, "l_label": l_label},
             )
             await session.commit()
         except Exception as e:
@@ -753,13 +935,17 @@ async def delete_article(article_id: str) -> None:
 
 
 async def update_macro_sentiment() -> None:
-    """Calculate aggregate global macro sentiment from macro_sentiment_label on articles."""
+    """Calculate aggregate global macro sentiment from dual-horizon labels on articles.
+
+    Produces BOTH short-term and long-term macro sentiment records.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
 
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT COALESCE(macro_sentiment_label, 'neutral') AS macro_sentiment_label
+                SELECT COALESCE(macro_sentiment_label, 'neutral') AS macro_sentiment_label,
+                       COALESCE(macro_long_term_label, 'neutral') AS macro_long_term_label
                 FROM news_articles
                 WHERE is_macro = true
                 AND ollama_processed = true
@@ -775,34 +961,45 @@ async def update_macro_sentiment() -> None:
 
         total_cnt = len(rows)
 
-        scores = [SENTIMENT_MULTIPLIERS.get(r.macro_sentiment_label, 0.0) for r in rows
-                  if r.macro_sentiment_label != "neutral"]
-        if not scores:
-            return
-        net_score = sum(scores) / len(scores)
-        net_score = max(-3.0, min(3.0, net_score))
+        # --- Short-term macro ---
+        short_scores = [SENTIMENT_MULTIPLIERS.get(r.macro_sentiment_label, 0.0) for r in rows
+                        if r.macro_sentiment_label != "neutral"]
+        if short_scores:
+            short_net = sum(short_scores) / len(short_scores)
+            short_net = max(-3.0, min(3.0, short_net))
+            short_label = "positive" if short_net > 0.75 else ("negative" if short_net < -0.75 else "neutral")
 
-        if net_score > 0.75:
-            label = "positive"
-        elif net_score < -0.75:
-            label = "negative"
-        else:
-            label = "neutral"
+            await session.execute(
+                text("""
+                    INSERT INTO macro_sentiment (region, term, score, label, article_count, calculated_at)
+                    VALUES ('global', 'short', :score, :label, :count, NOW())
+                """),
+                {"score": short_net, "label": short_label, "count": total_cnt},
+            )
 
-        await session.execute(
-            text("""
-                INSERT INTO macro_sentiment (region, score, label, article_count, calculated_at)
-                VALUES ('global', :score, :label, :count, NOW())
-            """),
-            {"score": net_score, "label": label, "count": total_cnt},
-        )
+        # --- Long-term macro ---
+        long_scores = [SENTIMENT_MULTIPLIERS.get(r.macro_long_term_label, 0.0) for r in rows
+                       if r.macro_long_term_label != "neutral"]
+        if long_scores:
+            long_net = sum(long_scores) / len(long_scores)
+            long_net = max(-3.0, min(3.0, long_net))
+            long_label = "positive" if long_net > 0.75 else ("negative" if long_net < -0.75 else "neutral")
 
+            await session.execute(
+                text("""
+                    INSERT INTO macro_sentiment (region, term, score, label, article_count, calculated_at)
+                    VALUES ('global', 'long', :score, :label, :count, NOW())
+                """),
+                {"score": long_net, "label": long_label, "count": total_cnt},
+            )
+
+        # Clean up old records (keep last 100 per term)
         await session.execute(
             text("""
                 DELETE FROM macro_sentiment
                 WHERE id NOT IN (
                     SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (ORDER BY calculated_at DESC) as rn
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY term ORDER BY calculated_at DESC) as rn
                         FROM macro_sentiment
                     ) ranked WHERE rn <= 100
                 )
@@ -810,7 +1007,7 @@ async def update_macro_sentiment() -> None:
         )
 
         await session.commit()
-    logger.info("Global macro sentiment updated (%d articles)", total_cnt)
+    logger.info("Global macro sentiment updated (%d articles, short+long)", total_cnt)
 
 
 async def cleanup_priority() -> None:

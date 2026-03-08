@@ -73,14 +73,13 @@ async def get_dashboard():
 
 @router.get("/macro", response_model=APIResponse)
 async def get_macro_sentiment():
-    """Get latest global macro sentiment."""
+    """Get latest global macro sentiment (both short-term and long-term)."""
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT region, score, label, article_count, calculated_at
+                SELECT DISTINCT ON (term) region, term, score, label, article_count, calculated_at
                 FROM macro_sentiment
-                ORDER BY calculated_at DESC
-                LIMIT 1
+                ORDER BY term, calculated_at DESC
             """)
         )
         rows = result.fetchall()
@@ -90,7 +89,6 @@ async def get_macro_sentiment():
         raw_score = float(r.score)
         confidence = min(1.0, r.article_count / 10)
         effective_score = round(raw_score * confidence, 4)
-        # Derive label from effective score, not raw score
         if effective_score > 0.25:
             label = "positive"
         elif effective_score < -0.25:
@@ -100,6 +98,7 @@ async def get_macro_sentiment():
         sentiments.append(
             MacroSentimentSchema(
                 region=r.region,
+                term=r.term if hasattr(r, "term") else "short",
                 score=effective_score,
                 label=label,
                 article_count=r.article_count,
@@ -110,7 +109,7 @@ async def get_macro_sentiment():
 
 
 @router.get("/macro/news", response_model=APIResponse)
-async def get_macro_news(limit: int = 30):
+async def get_macro_news(limit: int = 100):
     """Get latest macro news that drives macro sentiment.
 
     Returns macro-tagged news articles with their sentiment scores,
@@ -123,7 +122,8 @@ async def get_macro_news(limit: int = 30):
             text("""
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
-                       COALESCE(a.macro_sentiment_label, 'neutral') as macro_sentiment_label
+                       COALESCE(a.macro_sentiment_label, 'neutral') as macro_sentiment_label,
+                       a.macro_long_term_label
                 FROM news_articles a
                 WHERE a.is_macro = true
                 AND a.ollama_processed = true
@@ -131,7 +131,7 @@ async def get_macro_news(limit: int = 30):
                 ORDER BY a.published_at DESC
                 LIMIT :limit
             """),
-            {"limit": min(limit, 100)},
+            {"limit": limit},
         )
         rows = result.fetchall()
 
@@ -148,6 +148,7 @@ async def get_macro_news(limit: int = 30):
     for r in rows:
         sentiment = None
         label = r.macro_sentiment_label
+        lt_label = getattr(r, "macro_long_term_label", None)
         if label:
             pos, neg, neu = _MACRO_PROBS.get(label, (0.15, 0.15, 0.70))
             sentiment = SentimentSchema(
@@ -155,6 +156,7 @@ async def get_macro_news(limit: int = 30):
                 negative=neg,
                 neutral=neu,
                 label=label,
+                long_term_label=lt_label,
             )
         articles.append(
             NewsArticleSchema(

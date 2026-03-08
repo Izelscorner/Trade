@@ -175,7 +175,7 @@ function connectWS() {
                 ["news", article.instrument_id],
                 (old: NewsArticle[] | undefined) => {
                   if (!old) return [article];
-                  return mergeNews([article], old, 30);
+                  return mergeNews([article], old, 100);
                 },
               );
             }

@@ -15,7 +15,7 @@ router = APIRouter()
 async def list_news(
     category: str | None = None,
     instrument_id: str | None = None,
-    limit: int = 50,
+    limit: int = 300,
 ):
     """Get news articles with sentiment scores.
 
@@ -23,7 +23,7 @@ async def list_news(
     or by instrument_id for mapped articles.
     Only returns articles that have been processed by the LLM Processor.
     """
-    params: dict = {"limit": min(limit, 200)}
+    params: dict = {"limit": limit}
 
     if instrument_id:
         # Asset page: show asset-perspective sentiment from sentiment_scores
@@ -31,6 +31,7 @@ async def list_news(
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
                    s.positive, s.negative, s.neutral, s.label,
+                   s.long_term_label,
                    a.macro_sentiment_label
             FROM news_articles a
             JOIN news_instrument_map m ON m.article_id = a.id
@@ -62,6 +63,7 @@ async def list_news(
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
                        s.positive, s.negative, s.neutral, s.label,
+                       s.long_term_label,
                        a.macro_sentiment_label
                 FROM news_articles a
                 LEFT JOIN sentiment_scores s ON s.article_id = a.id
@@ -79,6 +81,7 @@ async def list_news(
             SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                    a.is_macro, a.is_asset_specific, a.published_at,
                    s.positive, s.negative, s.neutral, s.label,
+                   s.long_term_label,
                    a.macro_sentiment_label
             FROM news_articles a
             LEFT JOIN sentiment_scores s ON s.article_id = a.id
@@ -111,11 +114,13 @@ async def list_news(
         if use_asset_sentiment:
             # Asset page: always use asset-perspective sentiment_scores
             if score_label is not None:
+                lt_label = getattr(r, "long_term_label", None)
                 sentiment = SentimentSchema(
                     positive=float(r.positive),
                     negative=float(r.negative),
                     neutral=float(r.neutral),
                     label=score_label,
+                    long_term_label=lt_label,
                 )
         elif r.is_macro and macro_label:
             # Macro article in general view: use macro perspective
@@ -125,11 +130,13 @@ async def list_news(
             )
         elif score_label is not None:
             # Non-macro article: use asset-perspective sentiment
+            lt_label = getattr(r, "long_term_label", None)
             sentiment = SentimentSchema(
                 positive=float(r.positive),
                 negative=float(r.negative),
                 neutral=float(r.neutral),
                 label=score_label,
+                long_term_label=lt_label,
             )
 
         articles.append(
