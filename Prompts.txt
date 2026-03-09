@@ -1,0 +1,119 @@
+You are a finance & data expert and behavioural scientist, Currently we have many news fetched and graded in DB, you did one pass of data analysis and improved the prompts already
+Let reevaluate and test how did those improvements were in play , did they really work with current latest  dataset.
+
+Please analyse all this data,  We wanna fully optimise categorisation, sentiment analysis ,  we wanna make sure they are fully accurate.
+check if categorisation for this news are made absolutely correctly, check if news correctly relevant to asset or  correctly relevant for macro economics.
+Please analyse sentiments are accurate based on news and description, are they really indicating correct sentiment based on purely determenistcly for specific asset as well macro  economiclly.
+After analysing our existing data in the database , if needed please adjust prompts and system to work better , optimal and most importantly accurate . It’s absolutely crucial to be accurate when making financial decisions.
+
+
+
+Please optimise llm calls and news fetching calls as much as possible, avoid possible unnecessay llm calls for already categorised or graded news . 
+Please optimise news fetching where ever it’s possible to .
+
+
+MAKE IT LARGE SCALE  (make it optional to focus on fetching asset specific news , or all across other instruments , add a toggle to UI )
+Now consider this app as a large scale app towards analysing as much as instrument as quickly as possible , it will be used by 1 user on local machine but currently we have only 15 instruments but  consider there will be hunderds of instruments, we need all other instruments news sentiment to fill up as soon as one another this means for each instrument as long as it’s not focused fetch lower amounts of news , and if user focuses on that instrument , get even older news , this way we can scale up, do not override llm processing rate limits, we already keep getting 429 even though we have a lot of check, what’s need here is sentiment grading and sentiment news should be evenly distrubuted large number of investment instruments continuously.  So I need this app to scale for a lot larger instrument numbers , while not overridden llm request limits ,  important it will be a single user app , which will run locally.
+One thing to consider switching news fetching for next instrument might be once confidence level for long and short is high enough switch to next instrument, once all instruments are filled with enough sentiment data , repeat from the beginning to add more news .
+Create a new page showing all processing news, grading , qued items etc,  it should be like a system dashboard
+
+
+INTRODUCE SECTORS (Done)
+Introduce sectors for instrument and categorise them by sector using llm do this only once for instrument either seeded instrument or newly added instrument, in asset page we should have a sector filter for each sector displaying instruments related to that sector
+We should also fetch news regarding each sector, and make sentiment analysis for impact on that sector
+As a mathematician , data scientist and  We should introduce sector sentiment into instruments total grading and show sector sentiment grade in asset page as well. Mathematically correctly involve sector sentiment impact on instruments.
+
+
+Some possible news sources 1. Information Technology
+* Focus: Semiconductors, software, hardware, and AI infrastructure.
+* RSS: https://www.technologyreview.com/feed/ (MIT Technology Review)
+* RSS: https://rss.slashdot.org/Slashdot/slashdotMain (Slashdot - Good for "dev" sentiment)
+2. Financials
+* Focus: Banks, insurance, asset management, and mortgage finance.
+* RSS: https://www.americanbanker.com/feed (American Banker)
+* RSS: https://www.bis.org/about/rss_press.xml (Bank for International Settlements - Macro focus)
+3. Health Care
+* Focus: Pharmaceuticals, biotech, and managed care (insurers).
+* RSS: https://www.statnews.com/feed/ (STAT News - The gold standard for biotech)
+* RSS: https://www.fda.gov/about-fda/fda-newsroom/press-announcements/rss.xml (FDA Press Releases)
+4. Consumer Discretionary
+* Focus: Amazon, Tesla, luxury goods, and travel/hotels.
+* RSS: https://www.retaildive.com/feeds/news/ (Retail Dive)
+* RSS: https://www.skift.com/feed/ (Skift - Travel and hotel industry sentiment)
+5. Consumer Staples
+* Focus: Walmart, Coca-Cola, tobacco, and household products.
+* RSS: https://www.foodnavigator-usa.com/service/content/feed/84724 (Food Navigator)
+* RSS: https://www.beveragedaily.com/service/content/feed/84723 (Beverage Daily)
+6. Communication Services
+* Focus: Google, Meta, Disney, and telecommunications.
+* RSS: https://www.hollywoodreporter.com/c/business/feed/ (Media/Entertainment sentiment)
+* RSS: https://www.lightreading.com/rss.asp (Telecommunications infrastructure)
+7. Energy
+* Focus: Oil, gas, coal, and renewable energy.
+* RSS: https://oilprice.com/rss/main (OilPrice.com)
+* RSS: https://www.iea.org/newsroom/news/rss.xml (International Energy Agency)
+8. Industrials
+* Focus: Aerospace, defense, machinery, and logistics.
+* RSS: https://www.defensenews.com/arc/outboundfeeds/rss/ (Defense News)
+* RSS: https://www.supplychainbrain.com/rss/articles (Global logistics and trade)
+9. Materials
+* Focus: Chemicals, mining, gold, and construction materials.
+* RSS: https://www.mining.com/feed/ (Mining.com)
+* RSS: https://www.chemweek.com/rss/news (Chemical Week)
+10. Utilities
+* Focus: Electric, gas, and water companies.
+* RSS: https://www.utilitydive.com/feeds/news/ (Utility Dive)
+* RSS: https://www.eia.gov/about/rss/todayinenergy.xml (U.S. Energy Information Admin)
+11. Real Estate
+* Focus: REITs (Real Estate Investment Trusts) and property development.
+* RSS: https://www.reit.com/news/rss (Nareit - The main source for REIT sentiment)
+* RSS: https://www.therealdeal.com/feed/ (The Real Deal - Real estate market news)
+
+
+
+Breaking news  Service
+Detect breaking news, there can be such a breaking news and this can override all sentiment for that instrument which could be either very very positive or negative ,  implement a mechanism where this kind of last minute news are detected and fully impact instruments grading in some cases this can influence sentiment 100% upwards or downwards. Be careful this kind of news should be detected very carefully , they are rare but it happens, and our system don’t wanna miss those influential news . Also once this kind of event / news is detected make sure to show a persistent notification on UI linking to that event, that notification could be only closed with X button otherwise it should be persistent to not miss it. For instance anthropic announcement claiming they are releasing a new security tool which will replace all security firms caused a sharp decline in Cybersecurity firms stocks1. Macro & Market-Wide Breaking News
+These feeds capture "regime shifts"—things that move the entire S&P 500 or global bond markets instantly.
+* Investing.com (Breaking News): This is the most active "real-time" feed available for free. It covers sudden spikes in oil, war updates, and Fed leaks.
+    * URL: https://www.investing.com/rss/news.rss (General)
+    * URL: https://www.investing.com/rss/news_285.rss (Economy/Macro focus)
+* MarketWatch (Bulletin): Known for extremely fast, short-burst headlines on market "shocks."
+    * URL: http://feeds.marketwatch.com/marketwatch/bulletins
+* Financial Times (Global Economy): Higher quality, lower noise. Best for long-term macro sentiment.
+    * URL: https://www.ft.com/global-economy?format=rss
+
+2. Asset-Specific Breaking News
+To get news on specific stocks (e.g., NVDA, AAPL, TSLA), you need feeds that pull directly from regulatory filings or press releases.
+* Yahoo Finance (Ticker Specific): You can actually generate a feed for any specific ticker.
+    * Formula: https://finance.yahoo.com/rss/headline?s=TICKER
+    * Example for NVIDIA: https://finance.yahoo.com/rss/headline?s=NVDA
+* SEC Filings (EDGAR): This is the ultimate "Asset-Specific" source. It is the first place a company must report "Material Events" (8-K filings).
+    * URL: https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&owner=include&output=atom
+* PR Newswire (Finance): This is where companies blast their earnings reports and merger news before it hits the mainstream media.
+    * URL: https://www.prnewswire.com/rss/financial-services-latest-news/financial-services-latest-news-list.rss
+
+3. Geopolitical & "Risk-On/Off" (New for 2026)
+Given the current 2026 climate (e.g., the Iran-US trade tensions and AI "disillusionment" mentioned in recent reports), these feeds act as early warning systems.
+* Reuters (World News): Essential for "Risk-Off" sentiment (e.g., war news affecting oil).
+    * URL: https://www.reutersagency.com/feed/?best-topics=world
+* S&P Global (Commodity/Energy News): Specifically for tracking the "Energy Shock" sentiment of 2026.
+    * URL: https://www.spglobal.com/energy/en/news-research/rss-feed
+
+Summary Table for App Logic
+Feed Type	Update Frequency	Use Case	Sentiment Weight
+Investing.com	< 1 min	Immediate price volatility triggers.	Short-Term High
+SEC 8-K Feed	Real-time	Definitive asset-specific shocks (M&A, CEO exit).	Instant Critical
+Yahoo (Ticker)	5-10 mins	General retail buzz and analyst upgrades.	Moderate
+FT / Economist	Hourly/Daily	Structural macro "narrative" changes.	Long-Term High
+
+
+
+Add Twitter support with rss.app
+https://rss.app/feeds/v1.1/lwBUtawbS88Lde9Z.json
+https://rss.app/feeds/v1.1/u5Ogu89DyLL0US5n.json
+
+
+
+Additional 
+
+make sure for all news types (macro, asset specific, sector specifc) only sentiment graded and available to fetch news from DB are valid to show and add to total grading scores across, all counts across all UI should match with this graded counts, do not consider news under sentiment processing que, or news fetcher ques, the time intervals we set for short and long term sentiment scoring should be still intact.
