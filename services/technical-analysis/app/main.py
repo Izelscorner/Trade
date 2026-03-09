@@ -29,7 +29,7 @@ NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
 async def get_instruments() -> list[dict]:
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category FROM instruments ORDER BY symbol")
+            text("SELECT id, symbol, name, category FROM instruments WHERE is_active = true ORDER BY symbol")
         )
         return [{"id": str(r.id), "symbol": r.symbol, "name": r.name, "category": r.category} for r in result.fetchall()]
 

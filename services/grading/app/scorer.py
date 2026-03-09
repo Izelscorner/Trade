@@ -160,8 +160,8 @@ MACRO_PARAMS = {
 # Sector dynamics are slower than individual asset sentiment but faster than macro policy shifts.
 SECTOR_PARAMS = {
     "short": {
-        "half_life_hours": 18.0,   # 18h half-life: sector rotation, earnings season effects
-        "window_hours": 48,        # 48h lookback (2 days)
+        "half_life_hours": 36.0,   # Increase half-life for slightly more persistence
+        "window_hours": 120,       # 5-day lookback (from 2d)
     },
     "long": {
         "half_life_hours": 240.0,  # 10-day half-life: structural industry shifts

@@ -1641,7 +1641,9 @@ async def update_sector_sentiment() -> None:
     Produces BOTH short-term and long-term sector sentiment records for each sector.
     Uses the same dual-horizon labels as macro sentiment.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+    # Increase window to 14 days for sector aggregation.
+    # 3 days was too restrictive, especially when news volume for certain sectors is low.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
 
     async with async_session() as session:
         # Get all sector categories with recent processed articles

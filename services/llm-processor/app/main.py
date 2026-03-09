@@ -131,6 +131,14 @@ async def ensure_schema():
             EXCEPTION WHEN duplicate_object THEN NULL;
             END $$;
         """))
+        # Reset any sector articles that were marked as processed but missing sentiment labels (stuck from old versions)
+        await session.execute(text("""
+            UPDATE news_articles 
+            SET ollama_processed = false 
+            WHERE category LIKE 'sector_%%' 
+            AND ollama_processed = true 
+            AND macro_sentiment_label IS NULL
+        """))
         await session.commit()
     logger.info("Schema check complete")
 
@@ -198,9 +206,9 @@ async def process_loop() -> None:
     while True:
         try:
             refresh_counter += 1
-            # Refresh instruments every 100 cycles (~5 minutes) instead of every cycle.
-            # Instruments rarely change — no need to query DB every 3 seconds.
-            if refresh_counter % 100 == 0:
+            # Refresh instruments every 10 cycles (~50s) instead of 100.
+            # This allows new assets to be categorized and tagged much faster.
+            if refresh_counter % 10 == 0:
                 instruments = await get_instruments()
                 instrument_ids = {inst["symbol"]: inst["id"] for inst in instruments}
                 instruments_by_symbol = {inst["symbol"]: inst for inst in instruments}

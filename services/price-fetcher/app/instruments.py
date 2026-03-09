@@ -11,7 +11,7 @@ async def get_instruments() -> list[dict]:
     """Fetch all instruments from DB."""
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category, yfinance_symbol FROM instruments ORDER BY symbol")
+            text("SELECT id, symbol, name, category, yfinance_symbol FROM instruments WHERE is_active = true ORDER BY symbol")
         )
         rows = result.fetchall()
         return [

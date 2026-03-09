@@ -247,11 +247,11 @@ async def remove_instrument(instrument_id: str):
             {"iid": instrument_id},
         )
         await session.execute(
-            text("DELETE FROM technical_indicators WHERE instrument_id = :iid"),
+            text("DELETE FROM historical_prices WHERE instrument_id = :iid"),
             {"iid": instrument_id},
         )
         await session.execute(
-            text("DELETE FROM technical_analysis WHERE instrument_id = :iid"),
+            text("DELETE FROM technical_indicators WHERE instrument_id = :iid"),
             {"iid": instrument_id},
         )
         await session.execute(
