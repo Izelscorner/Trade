@@ -124,6 +124,27 @@ async def _ensure_hash_cache(session) -> None:
     logger.info("Loaded %d URL hashes into memory cache (last 30 days)", len(_known_hashes))
 
 
+async def _ensure_instrument_mapping(session, url_hash: str, article: dict) -> None:
+    """Map an existing article to an additional instrument (e.g., shared ETF constituent).
+
+    Looks up the article by title+source (since we don't store url_hash→article_id),
+    then creates the news_instrument_map entry if it doesn't already exist.
+    """
+    instrument_id = article.get("instrument_id")
+    if not instrument_id:
+        return
+    result = await session.execute(
+        text("SELECT id FROM news_articles WHERE title = :title AND source = :source LIMIT 1"),
+        {"title": article["title"], "source": article["source"]},
+    )
+    row = result.fetchone()
+    if row:
+        await session.execute(
+            text("INSERT INTO news_instrument_map (article_id, instrument_id) VALUES (:aid, :iid) ON CONFLICT DO NOTHING"),
+            {"aid": row[0], "iid": instrument_id},
+        )
+
+
 async def upsert_articles(articles: list[dict]) -> int:
     """Insert articles, skipping duplicates, and map to an instrument if provided.
 
@@ -165,6 +186,10 @@ async def upsert_articles(articles: list[dict]) -> int:
 
                 # Fast in-memory hash check — no DB round-trip
                 if url_hash in _known_hashes:
+                    # Article already exists, but may need mapping to a new instrument
+                    # (e.g., MSFT article already stored for IITU needs mapping to VOO too)
+                    if article.get("instrument_id"):
+                        await _ensure_instrument_mapping(session, url_hash, article)
                     continue
 
                 # Fuzzy duplicate detection
@@ -228,6 +253,9 @@ async def upsert_articles(articles: list[dict]) -> int:
                         text("INSERT INTO news_fetch_history (url_hash, title) VALUES (:h, :t) ON CONFLICT DO NOTHING"),
                         {"h": url_hash, "t": article["title"][:500]}
                     )
+                    # Still map to instrument if needed (shared ETF constituents)
+                    if article.get("instrument_id"):
+                        await _ensure_instrument_mapping(session, url_hash, article)
                     continue
 
                 # Determine initial flags based on category

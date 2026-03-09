@@ -10,6 +10,7 @@ import logging
 import os
 import time
 
+from httpx import Timeout
 from openai import AsyncOpenAI, APIStatusError
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def get_client() -> AsyncOpenAI:
             base_url=NIM_BASE_URL,
             api_key=NIM_API_KEY,
             max_retries=0,
+            timeout=Timeout(120.0, connect=10.0),
         )
     return _client
 

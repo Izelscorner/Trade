@@ -51,11 +51,12 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 - **Port:** 5432
 - **Image:** `postgres:16-alpine`
 - **Purpose:** Central data store for all services.
-- **Key Tables:** `instruments`, `news_articles`, `sentiment_scores`, `news_instrument_map`, `technical_indicators`, `grades`, `macro_sentiment`, `historical_prices`, `live_prices`, `intraday_prices`, `portfolio`, `processing_priority`, `etf_constituents`, `news_fetch_history`.
+- **Key Tables:** `instruments`, `news_articles`, `sentiment_scores`, `news_instrument_map`, `technical_indicators`, `grades`, `macro_sentiment`, `sector_sentiment`, `historical_prices`, `live_prices`, `intraday_prices`, `portfolio`, `processing_priority`, `etf_constituents`, `news_fetch_history`.
 - **Key Flags:** `news_articles.ollama_processed` gates which articles are displayed and graded. `is_macro` and `is_asset_specific` classify article type.
 - **Schema Notes:**
   - `grades.overall_grade` is `VARCHAR(20)` — stores action labels like "Strong Buy", "Neutral", "Sell".
   - `grades.overall_score` is `NUMERIC(7,4)` — composite score in [-3, 3].
+  - `grades.overall_score` also has `sector_score NUMERIC(7,4)` — sector signal contribution to composite.
   - `grades.details` is `JSONB` — contains `buy_confidence`, `action`, group scores, effective weights, confidence metrics, `consensus_adjustment`.
   - `sentiment_scores.label` — short-term sentiment label. `sentiment_scores.long_term_label` — long-term sentiment label.
   - `sentiment_scores.positive/negative/neutral` — probability distribution derived from LLM label.
@@ -64,6 +65,9 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
   - `etf_constituents` — maps ETF instruments to their underlying holdings with percentage weights (auto-populated via LLM).
   - `news_fetch_history` — URL hash-based dedup table to prevent refetching filtered articles across restarts.
   - `news_instrument_map.relevance_score` — weight-proportional relevance for ETF constituent articles (default 1.0 for direct, 0.02-0.23 for constituent propagation).
+  - `instruments.sector` — `VARCHAR(50)` GICS sector classification. Valid values: `technology`, `financials`, `healthcare`, `consumer_discretionary`, `consumer_staples`, `communication`, `energy`, `industrials`, `materials`, `utilities`, `real_estate`. NULL for broad-market ETFs (e.g., VOO).
+  - `sector_sentiment` — dual-horizon rolling sentiment per GICS sector. Columns: `sector`, `term` ('short'/'long'), `score` (NUMERIC), `label`, `article_count`. Indexed on `(sector, term, calculated_at DESC)`.
+  - `news_articles.category` — includes 11 sector-specific categories (`sector_technology`, `sector_financials`, etc.) alongside existing macro/asset categories.
 
 ### 2. News Fetching Service (Python)
 
@@ -73,13 +77,15 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
   - `macro_politics` — BBC World News, The Diplomat, Foreign Policy, Geopolitical Futures
   - `macro_conflict` — War on the Rocks
   - `asset_specific` — Yahoo Finance + Google News per tracked instrument (built dynamically)
+  - `sector_*` (11 feeds) — Google News RSS per GICS sector (2 sources each, e.g., `sector_technology`: "Technology Sector" + "Semiconductor Industry"; `sector_healthcare`: "Healthcare Sector" + "Biotech Industry")
   - **Slow feeds** (separate loop): MarketWatch Top Stories
-- **Loops (5 concurrent):**
+- **Loops (6 concurrent):**
   - `main_loop()` — every 2 minutes (`MAIN_INTERVAL=120`), fetches all macro feeds + all instrument-specific feeds concurrently (semaphore=5). Checks for prioritized instruments first. For prioritized ETFs, also fetches news for all tracked constituent instruments. Refreshes instrument list every 10 cycles (~20 min).
   - `slow_loop()` — every 3 minutes (`SLOW_INTERVAL=180`), high-volume feeds (MarketWatch).
   - `new_asset_news_loop()` — every 2 minutes, fast-tracks instruments with zero articles.
   - `etf_constituents_loop()` — every 10 minutes (`ETF_CONSTITUENT_INTERVAL=600`), fetches news for untracked ETF constituents (e.g., MSFT, AVGO, CRM) and maps articles to parent ETF.
-  - `cleanup_loop()` — every 15 minutes, removes stale news (180d macro, 30d asset).
+  - `sector_loop()` — every 5 minutes (`SECTOR_INTERVAL=300`), fetches all 11 sector feeds concurrently.
+  - `cleanup_loop()` — every 15 minutes, removes stale news (180d macro, 30d asset, 90d sector).
 - **Deduplication:** MD5 URL hashing (in-memory cache + `news_fetch_history` table for persistence across restarts) + `rapidfuzz` (C++ backend) fuzzy title matching (85%+ ratio, 90%+ partial ratio for titles >30 chars). Publisher suffixes stripped before comparison.
 
 ### 3. LLM Processor Service (Python)
@@ -98,6 +104,9 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
   4. **DUAL-HORIZON Sentiment Analysis** (8 articles per API call per instrument) — Category-specific role prompting returns BOTH short-term (1-7d) and long-term (1-6mo) sentiment per article: `{short_sentiment, short_confidence, long_sentiment, long_confidence}`.
      - **Explicit rules prevent common errors**: analyst ratings (overweight/buy/upgrade) always positive; institutional trades (small fund buy/sell) neutral with low confidence; commodity supply disruptions positive for commodity PRICE (not confused with bad-for-economy); safe haven assets (GOLD) positive during crises; defense stocks (RTX) positive during wars.
   5. **DUAL-HORIZON Macro Sentiment Aggregation** (5 articles per API call) — Computes both short-term and long-term S&P 500 impact. Company-specific articles assigned neutral with low confidence.
+  6. **Sector Sentiment Analysis** (6 articles per API call) — Sector-feed articles (`sector_*` category) are routed to a dedicated sector sentiment pipeline. Role: "sector analyst at Western investment bank." Focuses on entire sector impact (regulatory, industry trends, supply chain), not individual companies. Returns dual-horizon labels per article.
+- **Sector Assignment:** On startup, assigns GICS sectors to all instruments. Deterministic fallback for 16 known instruments; LLM classification for unknown instruments via `sector_classify_prompt()`.
+- **Sector Sentiment Aggregation:** Independent loop every 60 seconds. Aggregates short-term (72h window) and long-term (4320h/180d window) sentiment per sector from `sector_*` articles. Computes weighted label distribution and inserts into `sector_sentiment` table (keeps last 100 records per sector per term).
 - **ETF Constituent Tracking:** On startup, uses LLM to identify top holdings of each ETF instrument with percentage weights. Stored in `etf_constituents` table. Hardcoded fallback for IITU. News about constituents auto-propagates to parent ETF with weight-based relevance.
 - **Sentiment Labels:** `very_positive`, `positive`, `neutral`, `negative`, `very_negative`.
 - **Sentiment-to-Probability Map:** `very_positive` → {pos: 0.90, neg: 0.02, neu: 0.08}, `positive` → {0.70, 0.05, 0.25}, `neutral` → {0.15, 0.15, 0.70}, `negative` → {0.05, 0.70, 0.25}, `very_negative` → {0.02, 0.90, 0.08}.
@@ -129,7 +138,7 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 
 - **Purpose:** Synthesizes all signals into a buy-confidence percentage (0-100%) with actionable recommendation labels.
 - **Update Frequency:** Full regrade every 60 seconds; incremental on data changes every 10 seconds. Concurrent grading of all instruments via `asyncio.gather`.
-- **Change Detection:** Polls for new sentiment scores, live prices, technical indicators, and macro sentiment since last check. Macro changes trigger regrade of ALL instruments.
+- **Change Detection:** Polls for new sentiment scores, live prices, technical indicators, macro sentiment, and sector sentiment since last check. Macro or sector sentiment changes trigger regrade of ALL instruments.
 - **Priority:** `processing_priority` table ensures prioritized instruments are graded first.
 - **Output:** `buy_confidence` in (0, 100), `action` label, composite score in [-3, 3].
 
@@ -172,7 +181,19 @@ Sentiment is **term-aware**: short-term grades use `label` (short-term sentiment
 
 Confidence uses **logarithmic ramp** `log(1+n)/log(1+N)` where N is the `full_confidence_at` parameter per term. Effective count is `non_neutral_weighted_count * 2` (capped at `full_at * 2`).
 
-#### 6c. Macro Score — DUAL-HORIZON, Term-Aware
+#### 6c. Sector Score — DUAL-HORIZON, Term-Aware
+
+Sector sentiment provides an intermediate signal between asset-specific sentiment and broad macro sentiment, capturing GICS sector-level dynamics (regulatory changes, industry trends, supply chain shifts).
+
+| Parameter       | Short-Term             | Long-Term              |
+|----------------|------------------------|------------------------|
+| Half-life      | 18 hours               | 168 hours (7 days)     |
+| Window         | 48 hours               | 4320 hours (180 days)  |
+| Full confidence| 8 articles             | 8 articles             |
+
+Returns 0.0 for instruments with no sector (e.g., broad-market ETFs like VOO). Sector sentiment scores are scaled from [-1, 1] to [-3, 3] to match other sub-signals. Confidence uses logarithmic ramp `log(1+n)/log(1+N)`.
+
+#### 6d. Macro Score — DUAL-HORIZON, Term-Aware
 
 Macro sentiment is term-aware with separate aggregation windows:
 
@@ -183,22 +204,22 @@ Macro sentiment is term-aware with separate aggregation windows:
 
 Short-term macro captures immediate risk-on/off shifts. Long-term macro captures structural policy regime changes over 6 months. Confidence is log-scaled on total article count (`full_at=10`, capped at 30).
 
-#### 6d. Composite Weighting — Confidence-Adjusted
+#### 6e. Composite Weighting — Confidence-Adjusted
 
-Nominal weights per category and term:
+Nominal weights per category and term (4 sub-signals: Technical, Sentiment, Sector, Macro):
 
-| Category  | Term  | Technical | Sentiment | Macro |
-|-----------|-------|-----------|-----------|-------|
-| Stock     | Short | 50%       | 30%       | 20%   |
-| Stock     | Long  | 35%       | 30%       | 35%   |
-| ETF       | Short | 45%       | 25%       | 30%   |
-| ETF       | Long  | 30%       | 25%       | 45%   |
-| Commodity | Short | 45%       | 30%       | 25%   |
-| Commodity | Long  | 30%       | 30%       | 40%   |
+| Category  | Term  | Technical | Sentiment | Sector | Macro |
+|-----------|-------|-----------|-----------|--------|-------|
+| Stock     | Short | 50%       | 30%       | 12%    | 20%   |
+| Stock     | Long  | 35%       | 30%       | 15%    | 35%   |
+| ETF       | Short | 45%       | 25%       | 15%    | 30%   |
+| ETF       | Long  | 30%       | 25%       | 18%    | 45%   |
+| Commodity | Short | 45%       | 30%       | 10%    | 25%   |
+| Commodity | Long  | 30%       | 30%       | 12%    | 40%   |
 
 **Confidence adjustment:** Each sub-signal's effective weight is `nominal_weight * (0.5 + 0.5 * confidence)`. When sentiment has zero articles (confidence=0), its weight drops to 50% of nominal instead of anchoring the composite at zero. Weights are then renormalized.
 
-#### 6e. Sigmoid Buy-Confidence
+#### 6f. Sigmoid Buy-Confidence
 
 The composite score in [-3, 3] is mapped to buy-confidence in (0, 100) via sigmoid:
 
@@ -225,6 +246,7 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
   - `GET /api/v1/dashboard` — All instruments with prices, grades (includes `short_term_score`, `long_term_score`)
   - `GET /api/v1/dashboard/macro` — Global macro sentiment
   - `GET /api/v1/dashboard/macro/news` — Recent macro news with sentiment
+  - `GET /api/v1/dashboard/sector?sector=` — Sector sentiment (optional sector filter, returns all sectors or specific sector). Dual-horizon, scores scaled from [-1,1] to [-3,3].
   - `GET /api/v1/news` — Filtered news (by category, instrument_id). Only returns `ollama_processed=true` articles with sentiment scores (`JOIN`, not `LEFT JOIN`).
   - `GET /api/v1/grades?instrument_id=&term=` — Latest grades with details JSON
   - `GET /api/v1/grades/history/{id}?term=&limit=` — Grade history
@@ -247,18 +269,20 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
 - **Routes:** `/` Dashboard, `/assets` AssetList, `/portfolio` Portfolio, `/news` News, `/asset/:id` AssetDetail.
 - **Buy-Confidence Display:** Primary metric is a percentage (0-100%) with sigmoid-derived action labels. Radial SVG gauge on asset detail, percentage pills on dashboard cards.
 - **Technical Panel:** Indicators grouped by category (Trend, Momentum, Volume, Levels, Volatility, Modifiers) with per-group average scores. ADX/ATR called out as modifiers, not directly scored.
-- **Grade Detail:** Center-origin score bars (red/green from midpoint), confidence metrics per sub-signal, effective weight display, ATR risk factor annotation, consensus dampening indicator (amber warning when herd behavior detected), technical group breakdown grid. Sentiment bars show term-specific decay rates.
+- **Grade Detail:** Center-origin score bars (red/green from midpoint) for 4 sub-signals (technical, sentiment, sector, macro), confidence metrics per sub-signal, effective weight display, ATR risk factor annotation, consensus dampening indicator (amber warning when herd behavior detected), technical group breakdown grid. Sentiment/sector bars show term-specific decay rates.
 - **News Feed:** Dual-horizon sentiment badges per article — shows short-term (ST) and long-term (LT) labels when they differ, highlighting divergent impacts.
-- **News Categories:** Markets, Politics, Conflict, Asset (single global view).
+- **News Categories:** Markets, Politics, Conflict, Sector, Asset (single global view). Sector tab includes sub-filter dropdown for specific sectors.
+- **Sector Sentiment:** Displayed on asset detail page as `SectorSentimentCard` — dual-horizon (short-term + long-term) with color-coded labels (green/yellow/red). Sector-specific news feed shown alongside.
 - **Macro Sentiment:** Displayed as dual-horizon (short-term + long-term) global indicator.
 - **State Management:** Jotai + Jotai Query for atomic state. `@tanstack/react-query` for some data.
 - **Key Components:**
   - `GradeBadge` — Percentage pill + action label, continuous color gradient (emerald to amber to red).
-  - `GradeDetail` — SVG confidence gauge, sub-score bars with consensus dampening indicator, group breakdown, effective weights.
+  - `GradeDetail` — SVG confidence gauge, sub-score bars (technical, sentiment, sector, macro) with consensus dampening indicator, group breakdown, effective weights.
   - `InstrumentCard` — Confidence pills for short/long term, composite confidence bar.
   - `TechnicalPanel` — Grouped indicator list with group score summary row.
   - `AIAnalysisModal` — LLM-powered analysis (system-integrated and independent modes).
   - `MacroSentimentCard` — Dual-horizon global macro sentiment display (short-term + long-term rows).
+  - `SectorSentimentCard` — Dual-horizon sector sentiment on asset detail (short-term + long-term rows, color-coded).
   - `PriceChart` — Historical OHLCV chart with day selector (1D/5D/1M/3M/1Y).
   - `NewsFeed` — Article list with dual-horizon sentiment badges.
   - `SignalBadge` — buy/sell/neutral signal pill.
@@ -273,11 +297,11 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
 
 The system operates as a **unidirectional predictive pipeline**:
 
-1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds (5 concurrent loops), `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`. URL hashes cached in-memory and persisted to `news_fetch_history` for dedup across restarts. Fuzzy title matching via rapidfuzz prevents cross-source duplicates.
-2. **AI Processing Layer:** `llm-processor` polls every 3s for unprocessed articles (batch of 30). Pre-filters low-quality articles deterministically. Batch-classifies (12/call), applies deterministic post-processing for tagging (including commodity keyword expansion and ETF constituent propagation), and batch-scores DUAL-HORIZON sentiment (8/call per instrument) with explicit rules for analyst ratings, institutional trades, commodity prices, safe havens, and defense stocks. Articles marked `ollama_processed = true`.
+1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds (6 concurrent loops including sector feeds), `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`. URL hashes cached in-memory and persisted to `news_fetch_history` for dedup across restarts. Fuzzy title matching via rapidfuzz prevents cross-source duplicates.
+2. **AI Processing Layer:** `llm-processor` polls every 3s for unprocessed articles (batch of 30). Pre-filters low-quality articles deterministically. Batch-classifies (12/call), applies deterministic post-processing for tagging (including commodity keyword expansion and ETF constituent propagation), and batch-scores DUAL-HORIZON sentiment (8/call per instrument) with explicit rules for analyst ratings, institutional trades, commodity prices, safe havens, and defense stocks. Sector-feed articles routed to dedicated sector sentiment pipeline (6/call). Sector sentiment aggregated every 60s per GICS sector. Articles marked `ollama_processed = true`.
 3. **Signal Layer:** `technical-analysis` computes 18 indicators (trend/momentum/volume/levels/volatility) from price data.
-4. **Synthesis Layer:** `grading` combines signals via group-based weighted averaging with category/term-specific profiles, term-aware time-decayed sentiment (with behavioral science consensus dampening), confidence-adjusted composite weights, sigmoid buy-confidence output. Short-term grades use short-term sentiment/macro; long-term grades use long-term sentiment/macro. Change detection triggers incremental regrading every 10s; full regrade every 60s.
-5. **Presentation Layer:** `backend` API serves only processed/scored articles via REST + WebSocket. `frontend` displays buy-confidence percentages, group breakdowns, and macro sentiment with real-time updates.
+4. **Synthesis Layer:** `grading` combines 4 sub-signals (technical, sentiment, sector, macro) via group-based weighted averaging with category/term-specific profiles, term-aware time-decayed sentiment (with behavioral science consensus dampening), sector sentiment per instrument's GICS sector, confidence-adjusted composite weights, sigmoid buy-confidence output. Short-term grades use short-term sentiment/sector/macro; long-term grades use long-term sentiment/sector/macro. Change detection triggers incremental regrading every 10s; full regrade every 60s.
+5. **Presentation Layer:** `backend` API serves only processed/scored articles via REST + WebSocket. `frontend` displays buy-confidence percentages, group breakdowns, sector sentiment, and macro sentiment with real-time updates.
 
 ## Project Structure
 
@@ -296,17 +320,17 @@ Trade/
 │   │       └── schemas.py           # Pydantic response schemas
 │   ├── news-fetcher/                # RSS/search feed ingestion
 │   │   └── app/
-│   │       ├── main.py              # 5 async loops (main, slow, new_asset, etf_constituents, cleanup)
+│   │       ├── main.py              # 6 async loops (main, slow, new_asset, etf_constituents, sector, cleanup)
 │   │       ├── fetcher.py           # Feed parsing (title+summary only, no URL scraping)
-│   │       ├── feeds.py             # Feed URL definitions (MAIN_FEEDS, SLOW_FEEDS, MACRO_CATEGORIES)
-│   │       ├── store.py             # Article persistence, MD5 hash dedup, fuzzy dedup, cleanup
+│   │       ├── feeds.py             # Feed URL definitions (MAIN_FEEDS, SLOW_FEEDS, SECTOR_FEEDS, MACRO_CATEGORIES)
+│   │       ├── store.py             # Article persistence, MD5 hash dedup, fuzzy dedup, cleanup (incl. sector news 90d)
 │   │       ├── instruments.py       # Instrument DB queries
 │   │       └── db.py
 │   ├── llm-processor/               # Unified AI classification + sentiment (NVIDIA API / Qwen 122B)
 │   │   └── app/
 │   │       ├── main.py              # Polling loop
-│   │       ├── processor.py         # Batch processing, pre-filter, post-processing rules, ETF constituents
-│   │       ├── prompts.py           # All LLM prompt templates (classify, sentiment, macro, ETF constituent)
+│   │       ├── processor.py         # Batch processing, pre-filter, post-processing rules, ETF constituents, sector assignment/sentiment
+│   │       ├── prompts.py           # All LLM prompt templates (classify, sentiment, macro, sector, ETF constituent)
 │   │       ├── nim_client.py        # AsyncOpenAI client for NVIDIA NIM API with rate limiting
 │   │       └── db.py
 │   ├── technical-analysis/          # 18-indicator suite
@@ -331,7 +355,7 @@ Trade/
         ├── hooks/usePortfolio.ts
         ├── pages/
         │   ├── Dashboard.tsx
-        │   ├── AssetList.tsx
+        │   ├── AssetList.tsx        # Asset list with sector filter dropdown
         │   ├── AssetDetail.tsx      # Main instrument page
         │   ├── News.tsx
         │   └── Portfolio.tsx
@@ -353,23 +377,23 @@ Trade/
 
 ## Tracked Instruments
 
-| Symbol | Name                       | Category  | yfinance |
-|--------|----------------------------|-----------|----------|
-| RTX    | RTX Corporation            | Stock     | RTX      |
-| NVDA   | NVIDIA Corporation         | Stock     | NVDA     |
-| GOOGL  | Alphabet Inc.              | Stock     | GOOGL    |
-| AAPL   | Apple Inc.                 | Stock     | AAPL     |
-| TSLA   | Tesla, Inc.                | Stock     | TSLA     |
-| PLTR   | Palantir Technologies Inc. | Stock     | PLTR     |
-| LLY    | Eli Lilly and Company      | Stock     | LLY      |
-| NVO    | Novo Nordisk A/S           | Stock     | NVO      |
-| WMT    | Walmart Inc.               | Stock     | WMT      |
-| XOM    | Exxon Mobil Corporation    | Stock     | XOM      |
-| IITU   | iShares US Technology ETF  | ETF       | IITU.L   |
-| SMH    | VanEck Semiconductor ETF   | ETF       | SMH      |
-| VOO    | Vanguard S&P 500 ETF       | ETF       | VOO      |
-| GOLD   | Gold Futures               | Commodity | GC=F     |
-| OIL    | Crude Oil Futures          | Commodity | CL=F     |
+| Symbol | Name                       | Category  | yfinance | Sector                |
+|--------|----------------------------|-----------|----------|-----------------------|
+| RTX    | RTX Corporation            | Stock     | RTX      | industrials           |
+| NVDA   | NVIDIA Corporation         | Stock     | NVDA     | technology            |
+| GOOGL  | Alphabet Inc.              | Stock     | GOOGL    | communication         |
+| AAPL   | Apple Inc.                 | Stock     | AAPL     | technology            |
+| TSLA   | Tesla, Inc.                | Stock     | TSLA     | consumer_discretionary|
+| PLTR   | Palantir Technologies Inc. | Stock     | PLTR     | technology            |
+| LLY    | Eli Lilly and Company      | Stock     | LLY      | healthcare            |
+| NVO    | Novo Nordisk A/S           | Stock     | NVO      | healthcare            |
+| WMT    | Walmart Inc.               | Stock     | WMT      | consumer_staples      |
+| XOM    | Exxon Mobil Corporation    | Stock     | XOM      | energy                |
+| IITU   | iShares US Technology ETF  | ETF       | IITU.L   | technology            |
+| SMH    | VanEck Semiconductor ETF   | ETF       | SMH      | technology            |
+| VOO    | Vanguard S&P 500 ETF       | ETF       | VOO      | NULL (broad-market)   |
+| GOLD   | Gold Futures               | Commodity | GC=F     | materials             |
+| OIL    | Crude Oil Futures          | Commodity | CL=F     | energy                |
 
 New instruments can be added dynamically via `POST /api/v1/instruments`.
 
@@ -390,7 +414,8 @@ New instruments can be added dynamically via `POST /api/v1/instruments`.
 - **DUAL-HORIZON sentiment** — LLM returns both short-term (1-7d) and long-term (1-6mo) sentiment per article. Short-term grades use short-term sentiment, long-term grades use long-term sentiment. Different decay rates per horizon.
 - **Behavioral science consensus dampening** — Contrarian signal at >80% agreement (×0.85), priced-in detection for stale consensus >48h (×0.90). Prevents herd behavior from dominating grades.
 - **ETF constituent-aware tagging** — News about ETF holdings auto-propagates to parent ETF with weight-proportional relevance, so NVDA news at 23% weight impacts IITU accordingly. Untracked constituents (MSFT, AVGO, CRM, etc.) have their own dedicated fetch loop.
-- **Exponential time-decay** — Term-specific: short-term sentiment 12h half-life, long-term 168h (7d); short-term macro 24h, long-term macro 648h (27d).
+- **GICS sector sentiment as 4th sub-signal** — Captures industry-level dynamics (regulation, supply chains, sector rotation) between asset-specific sentiment and broad macro. Sector weight ranges 10-18% by category/term. Instruments with no sector (broad-market ETFs) receive 0.0 sector score. Sector assignment is deterministic for known instruments, LLM-classified for dynamically added ones.
+- **Exponential time-decay** — Term-specific: short-term sentiment 12h half-life, long-term 168h (7d); short-term sector 18h, long-term sector 168h (7d); short-term macro 24h, long-term macro 648h (27d).
 - **Logarithmic confidence** — diminishing returns on article count, more information-theoretically sound than linear ramp.
 - **Confidence-adjusted composite weights** — sub-signals with low data reduce to 50% nominal weight instead of anchoring composite at zero.
 - **NVIDIA Hosted API (NIM)** for classification and sentiment — `qwen/qwen3.5-122b-a10b`, temperature 0, batch processing with 2.0s rate limiter.
