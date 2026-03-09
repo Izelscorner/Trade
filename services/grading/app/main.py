@@ -26,9 +26,9 @@ FULL_REGRADE_INTERVAL = 60  # Full regrade every 60 seconds per spec
 async def get_instruments() -> list[dict]:
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category FROM instruments ORDER BY symbol")
+            text("SELECT id, symbol, name, category, sector FROM instruments WHERE is_active = true ORDER BY symbol")
         )
-        return [{"id": str(r.id), "symbol": r.symbol, "name": r.name, "category": r.category} for r in result.fetchall()]
+        return [{"id": str(r.id), "symbol": r.symbol, "name": r.name, "category": r.category, "sector": r.sector} for r in result.fetchall()]
 
 
 async def detect_changes(since: datetime) -> dict:
@@ -94,7 +94,24 @@ async def detect_changes(since: datetime) -> dict:
         if row and row.cnt > 0:
             macro_changed = True
 
-    return {"instruments": changed_instruments, "macro_changed": macro_changed}
+        # Check for new sector sentiment
+        sector_changed = False
+        try:
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*) as cnt
+                    FROM sector_sentiment
+                    WHERE calculated_at >= :since
+                """),
+                {"since": since},
+            )
+            row = result.fetchone()
+            if row and row.cnt > 0:
+                sector_changed = True
+        except Exception:
+            pass  # Table may not exist yet
+
+    return {"instruments": changed_instruments, "macro_changed": macro_changed or sector_changed}
 
 
 async def get_priority_instrument_id() -> str | None:
@@ -118,13 +135,13 @@ async def grading_loop() -> None:
 
     async def grade_and_store(inst: dict, term: str) -> None:
         try:
-            grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"])
+            grade = await grade_instrument(inst["id"], inst["symbol"], term, inst["category"], inst.get("sector"))
             if grade:
                 await store_grade(grade)
                 logger.info(
-                    "[%s] %s-term grade: %s (score=%.4f, tech=%.4f, sent=%.4f, macro=%.4f)",
+                    "[%s] %s-term grade: %s (score=%.4f, tech=%.4f, sent=%.4f, sect=%.4f, macro=%.4f)",
                     inst["symbol"], term, grade["overall_grade"], grade["overall_score"],
-                    grade["technical_score"], grade["sentiment_score"], grade["macro_score"],
+                    grade["technical_score"], grade["sentiment_score"], grade["sector_score"], grade["macro_score"],
                 )
         except Exception:
             logger.exception("[%s] Failed to grade (%s-term)", inst["symbol"], term)

@@ -7,6 +7,11 @@ CREATE TABLE IF NOT EXISTS instruments (
     symbol VARCHAR(20) NOT NULL UNIQUE,
     name VARCHAR(255) NOT NULL,
     category VARCHAR(50) NOT NULL CHECK (category IN ('stock', 'etf', 'commodity')),
+    sector VARCHAR(50) CHECK (sector IN (
+        'technology', 'financials', 'healthcare', 'consumer_discretionary',
+        'consumer_staples', 'communication', 'energy', 'industrials',
+        'materials', 'utilities', 'real_estate'
+    )),
     yfinance_symbol VARCHAR(20) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -45,7 +50,13 @@ CREATE TABLE IF NOT EXISTS news_articles (
     summary TEXT,
     content TEXT,
     source VARCHAR(100) NOT NULL,
-    category VARCHAR(50) NOT NULL CHECK (category IN ('macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific')),
+    category VARCHAR(50) NOT NULL CHECK (category IN (
+        'macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific',
+        'sector_technology', 'sector_financials', 'sector_healthcare',
+        'sector_consumer_discretionary', 'sector_consumer_staples',
+        'sector_communication', 'sector_energy', 'sector_industrials',
+        'sector_materials', 'sector_utilities', 'sector_real_estate'
+    )),
     is_macro BOOLEAN NOT NULL DEFAULT false,
     is_asset_specific BOOLEAN NOT NULL DEFAULT false,
     ollama_processed BOOLEAN NOT NULL DEFAULT false,
@@ -101,6 +112,7 @@ CREATE TABLE IF NOT EXISTS grades (
     technical_score NUMERIC(7, 4) NOT NULL,
     sentiment_score NUMERIC(7, 4) NOT NULL,
     macro_score NUMERIC(7, 4) NOT NULL,
+    sector_score NUMERIC(7, 4) NOT NULL DEFAULT 0,
     details JSONB,
     graded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -109,6 +121,21 @@ CREATE TABLE IF NOT EXISTS grades (
 CREATE TABLE IF NOT EXISTS macro_sentiment (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     region VARCHAR(10) NOT NULL DEFAULT 'global',
+    term VARCHAR(10) NOT NULL DEFAULT 'short' CHECK (term IN ('short', 'long')),
+    score NUMERIC(7, 6) NOT NULL,
+    label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
+    article_count INT NOT NULL DEFAULT 0,
+    calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Sector sentiment (rolling, term-aware) — one per sector per term
+CREATE TABLE IF NOT EXISTS sector_sentiment (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sector VARCHAR(50) NOT NULL CHECK (sector IN (
+        'technology', 'financials', 'healthcare', 'consumer_discretionary',
+        'consumer_staples', 'communication', 'energy', 'industrials',
+        'materials', 'utilities', 'real_estate'
+    )),
     term VARCHAR(10) NOT NULL DEFAULT 'short' CHECK (term IN ('short', 'long')),
     score NUMERIC(7, 6) NOT NULL,
     label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
@@ -167,25 +194,27 @@ CREATE INDEX idx_macro_sentiment_region_calc ON macro_sentiment(region, term, ca
 CREATE INDEX idx_etf_constituents_etf ON etf_constituents(etf_instrument_id);
 CREATE INDEX idx_news_instrument_map_instrument ON news_instrument_map(instrument_id);
 CREATE INDEX idx_intraday_prices_instrument_ts ON intraday_prices(instrument_id, timestamp DESC);
+CREATE INDEX idx_sector_sentiment_sector_term ON sector_sentiment(sector, term, calculated_at DESC);
+CREATE INDEX idx_instruments_sector ON instruments(sector) WHERE sector IS NOT NULL;
 
 -- Seed instruments
-INSERT INTO instruments (symbol, name, category, yfinance_symbol) VALUES
+INSERT INTO instruments (symbol, name, category, sector, yfinance_symbol) VALUES
     -- Stocks
-    ('RTX', 'RTX Corporation', 'stock', 'RTX'),
-    ('NVDA', 'NVIDIA Corporation', 'stock', 'NVDA'),
-    ('GOOGL', 'Alphabet Inc.', 'stock', 'GOOGL'),
-    ('AAPL', 'Apple Inc.', 'stock', 'AAPL'),
-    ('TSLA', 'Tesla, Inc.', 'stock', 'TSLA'),
-    ('PLTR', 'Palantir Technologies Inc.', 'stock', 'PLTR'),
-    ('LLY', 'Eli Lilly and Company', 'stock', 'LLY'),
-    ('NVO', 'Novo Nordisk A/S', 'stock', 'NVO'),
-    ('WMT', 'Walmart Inc.', 'stock', 'WMT'),
-    ('XOM', 'Exxon Mobil Corporation', 'stock', 'XOM'),
+    ('RTX', 'RTX Corporation', 'stock', 'industrials', 'RTX'),
+    ('NVDA', 'NVIDIA Corporation', 'stock', 'technology', 'NVDA'),
+    ('GOOGL', 'Alphabet Inc.', 'stock', 'communication', 'GOOGL'),
+    ('AAPL', 'Apple Inc.', 'stock', 'technology', 'AAPL'),
+    ('TSLA', 'Tesla, Inc.', 'stock', 'consumer_discretionary', 'TSLA'),
+    ('PLTR', 'Palantir Technologies Inc.', 'stock', 'technology', 'PLTR'),
+    ('LLY', 'Eli Lilly and Company', 'stock', 'healthcare', 'LLY'),
+    ('NVO', 'Novo Nordisk A/S', 'stock', 'healthcare', 'NVO'),
+    ('WMT', 'Walmart Inc.', 'stock', 'consumer_staples', 'WMT'),
+    ('XOM', 'Exxon Mobil Corporation', 'stock', 'energy', 'XOM'),
     -- ETFs
-    ('IITU', 'iShares US Technology ETF', 'etf', 'IITU.L'),
-    ('SMH', 'VanEck Semiconductor ETF', 'etf', 'SMH'),
-    ('VOO', 'Vanguard S&P 500 ETF', 'etf', 'VOO'),
+    ('IITU', 'iShares US Technology ETF', 'etf', 'technology', 'IITU.L'),
+    ('SMH', 'VanEck Semiconductor ETF', 'etf', 'technology', 'SMH'),
+    ('VOO', 'Vanguard S&P 500 ETF', 'etf', NULL, 'VOO'),
     -- Commodities
-    ('GOLD', 'Gold Futures', 'commodity', 'GC=F'),
-    ('OIL', 'Crude Oil Futures', 'commodity', 'CL=F')
+    ('GOLD', 'Gold Futures', 'commodity', 'materials', 'GC=F'),
+    ('OIL', 'Crude Oil Futures', 'commodity', 'energy', 'CL=F')
 ON CONFLICT (symbol) DO NOTHING;

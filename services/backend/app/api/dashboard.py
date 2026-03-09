@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from sqlalchemy import text
 
 from ..core.db import async_session
-from ..schemas import APIResponse, DashboardInstrumentSchema, MacroSentimentSchema
+from ..schemas import APIResponse, DashboardInstrumentSchema, MacroSentimentSchema, SectorSentimentSchema
 
 router = APIRouter()
 
@@ -20,7 +20,7 @@ async def get_dashboard():
         result = await session.execute(
             text("""
                 SELECT
-                    i.id, i.symbol, i.name, i.category,
+                    i.id, i.symbol, i.name, i.category, i.sector,
                     lp.price, lp.change_amount, lp.change_percent, lp.market_status,
                     gs.overall_grade as short_grade, gs.overall_score as short_score,
                     gl.overall_grade as long_grade, gl.overall_score as long_score,
@@ -53,6 +53,7 @@ async def get_dashboard():
             symbol=r.symbol,
             name=r.name,
             category=r.category,
+            sector=r.sector,
             price=float(r.price) if r.price is not None else None,
             change_amount=float(r.change_amount) if r.change_amount is not None else None,
             change_percent=float(r.change_percent) if r.change_percent is not None else None,
@@ -176,3 +177,57 @@ async def get_macro_news():
         )
 
     return APIResponse(data=articles, timestamp=datetime.now(timezone.utc))
+
+
+@router.get("/sector", response_model=APIResponse)
+async def get_sector_sentiment(sector: str | None = None):
+    """Get latest sector sentiment (both short-term and long-term).
+
+    If sector is provided, returns sentiment for that sector only.
+    Otherwise returns latest sentiment for all sectors.
+    """
+    async with async_session() as session:
+        if sector:
+            result = await session.execute(
+                text("""
+                    SELECT DISTINCT ON (term) sector, term, score, label, article_count, calculated_at
+                    FROM sector_sentiment
+                    WHERE sector = :sector
+                    ORDER BY term, calculated_at DESC
+                """),
+                {"sector": sector},
+            )
+        else:
+            result = await session.execute(
+                text("""
+                    SELECT DISTINCT ON (sector, term) sector, term, score, label, article_count, calculated_at
+                    FROM sector_sentiment
+                    ORDER BY sector, term, calculated_at DESC
+                """)
+            )
+        rows = result.fetchall()
+
+    sentiments = []
+    for r in rows:
+        raw_score = float(r.score)
+        confidence = min(1.0, r.article_count / 8)
+        effective_score = round(raw_score * confidence, 4)
+        # Sector scores are on [-1, 1] scale (from SENTIMENT_MULTIPLIERS),
+        # so use proportionally smaller thresholds than macro's ±0.25
+        if effective_score > 0.08:
+            label = "positive"
+        elif effective_score < -0.08:
+            label = "negative"
+        else:
+            label = "neutral"
+        sentiments.append(
+            SectorSentimentSchema(
+                sector=r.sector,
+                term=r.term,
+                score=effective_score,
+                label=label,
+                article_count=r.article_count,
+                calculated_at=r.calculated_at,
+            )
+        )
+    return APIResponse(data=[s.model_dump() for s in sentiments], timestamp=datetime.now(timezone.utc))

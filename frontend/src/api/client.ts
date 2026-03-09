@@ -10,6 +10,7 @@ import type {
   LivePrice,
   MacroSentiment,
   NewsArticle,
+  SectorSentiment,
   TechnicalIndicator,
 } from "../types";
 
@@ -62,6 +63,10 @@ export const fetchMacroSentiment = () =>
   fetchAPI<MacroSentiment[]>("/dashboard/macro");
 export const fetchMacroNews = () =>
   fetchAPI<NewsArticle[]>("/dashboard/macro/news");
+export const fetchSectorSentiment = (sector?: string) =>
+  fetchAPI<SectorSentiment[]>(
+    `/dashboard/sector${sector ? `?sector=${sector}` : ""}`,
+  );
 
 // Instruments
 export const fetchInstruments = (category?: string) =>

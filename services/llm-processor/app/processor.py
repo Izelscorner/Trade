@@ -21,10 +21,13 @@ from .prompts import (
     CLASSIFY_SYSTEM,
     SENTIMENT_SYSTEM,
     MACRO_SYSTEM,
+    SECTOR_SENTIMENT_SYSTEM,
     classify_prompt,
     batch_classify_prompt,
     batch_sentiment_prompt,
     batch_macro_sentiment_prompt,
+    batch_sector_sentiment_prompt,
+    sector_classify_prompt,
     sentiment_prompt,
     macro_sentiment_prompt,
     etf_constituent_prompt,
@@ -43,6 +46,7 @@ BATCH_SIZE = 30
 CLASSIFY_BATCH = 12   # articles per classify API call (was 8 — 33% fewer calls)
 SENTIMENT_BATCH = 8   # articles per sentiment API call per instrument (was 6 — 25% fewer calls)
 MACRO_BATCH = 5       # macro articles per macro-sentiment API call (was 3 — 40% fewer calls)
+SECTOR_BATCH = 6      # sector articles per sector-sentiment API call
 
 # Token budgets per article (generous to avoid truncation → fallback burst)
 CLASSIFY_TOKENS_PER_ARTICLE = 100   # {"id","type","instruments","is_macro"} × N — trimmed, actual ~60 tokens each
@@ -181,7 +185,7 @@ async def get_instruments() -> list[dict]:
     """Load all tracked instruments from the database."""
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category FROM instruments ORDER BY symbol")
+            text("SELECT id, symbol, name, category, sector FROM instruments WHERE is_active = true ORDER BY symbol")
         )
         return [
             {
@@ -189,6 +193,7 @@ async def get_instruments() -> list[dict]:
                 "symbol": row.symbol,
                 "name": row.name,
                 "category": row.category,
+                "sector": row.sector,
             }
             for row in result.fetchall()
         ]
@@ -624,6 +629,7 @@ async def process_batch(
 
     keep: list[dict] = []          # articles to run sentiment on
     macro_articles: list[dict] = [] # macro articles needing macro-sentiment
+    sector_articles: dict[str, list[dict]] = {}  # sector -> articles needing sector sentiment
     to_delete: list[str] = []      # spam article IDs
 
     for art in articles:
@@ -669,6 +675,22 @@ async def process_batch(
             title, content, source_category, tagged_instruments, is_macro,
             valid_symbols, name_lookup, instruments,
         )
+
+        # Sector articles: route to sector sentiment pipeline
+        is_sector = source_category.startswith("sector_")
+        if is_sector:
+            sector_name = source_category.replace("sector_", "")
+            art["_tagged"] = tagged_instruments
+            art["_is_macro"] = False
+            art["_is_sector"] = True
+            art["_sector"] = sector_name
+            sector_articles.setdefault(sector_name, []).append(art)
+            keep.append(art)
+            # Also tag instruments if any were found
+            if tagged_instruments:
+                etf_relevance_sector: dict[str, float] = {}
+                await update_article_tags(art_id, False, bool(tagged_instruments), tagged_instruments, instrument_ids, etf_relevance_sector)
+            continue
 
         if not is_macro and not tagged_instruments:
             logger.info("Filtered irrelevant: '%s'", title[:60])
@@ -784,13 +806,20 @@ async def process_batch(
             chunk = macro_articles[chunk_start:chunk_start + MACRO_BATCH]
             await _run_batch_macro_sentiment(chunk, sentiment_stored)
 
+    # --- Step 5b: Batch DUAL-HORIZON sector sentiment ---
+    for sector, s_articles in sector_articles.items():
+        for chunk_start in range(0, len(s_articles), SECTOR_BATCH):
+            chunk = s_articles[chunk_start:chunk_start + SECTOR_BATCH]
+            await _run_batch_sector_sentiment(chunk, sector, sentiment_stored)
+
     # --- Step 6: Mark processed ---
     for art in keep:
         art_id = art["id"]
         is_macro = art.get("_is_macro", False)
+        is_sector = art.get("_is_sector", False)
         stored = sentiment_stored.get(art_id, False)
 
-        if not stored and not is_macro:
+        if not stored and not is_macro and not is_sector:
             logger.warning("No sentiment for '%s' — skipping mark processed", art["title"][:60])
             continue
 
@@ -884,6 +913,57 @@ async def _run_batch_macro_sentiment(articles: list[dict], sentiment_stored: dic
                 store_in_scores=not sentiment_stored.get(art["id"], False)
             )
             sentiment_stored[art["id"]] = True
+
+
+async def _run_batch_sector_sentiment(articles: list[dict], sector: str, sentiment_stored: dict[str, bool]) -> None:
+    """Run dual-horizon sector sentiment in batch; store labels for sector aggregation."""
+    _LABEL_MAP = {
+        "good": "positive", "bad": "negative", "mixed": "neutral",
+        "very_good": "very_positive", "very_bad": "very_negative",
+        "very good": "very_positive", "very bad": "very_negative",
+    }
+    valid_labels = {"very_positive", "positive", "neutral", "negative", "very_negative"}
+
+    def _normalize(raw: str) -> str:
+        raw = raw.strip().lower().strip("<>")
+        label = _LABEL_MAP.get(raw, raw)
+        return label if label in valid_labels else "neutral"
+
+    prompt = batch_sector_sentiment_prompt(articles, sector)
+    max_tok = MACRO_TOKENS_PER_ARTICLE * len(articles) + TOKENS_OVERHEAD
+    raw_results = await generate_json_array(
+        prompt, system=SECTOR_SENTIMENT_SYSTEM, max_tokens=max_tok
+    )
+
+    if raw_results is not None:
+        result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
+        for art in articles:
+            item = result_map.get(art["id"])
+            if item:
+                short_label = _normalize(str(item.get("short_sentiment", "neutral")))
+                long_label = _normalize(str(item.get("long_sentiment", "neutral")))
+                # Store as macro_sentiment_label for sector aggregation
+                await store_macro_label(art["id"], short_label, long_label)
+                if not sentiment_stored.get(art["id"], False):
+                    short_conf = float(item.get("short_confidence", 0.5))
+                    long_conf = float(item.get("long_confidence", 0.5))
+                    await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
+                    sentiment_stored[art["id"]] = True
+                logger.info("Sector sentiment (%s) '%s': short=%s long=%s",
+                            sector, art["title"][:40], short_label, long_label)
+            else:
+                # Default to neutral for missing results
+                await store_macro_label(art["id"], "neutral", "neutral")
+                if not sentiment_stored.get(art["id"], False):
+                    await store_sentiment(art["id"], "neutral", 0.3, "neutral", 0.3)
+                    sentiment_stored[art["id"]] = True
+    else:
+        # Batch failed — store neutral defaults
+        for art in articles:
+            await store_macro_label(art["id"], "neutral", "neutral")
+            if not sentiment_stored.get(art["id"], False):
+                await store_sentiment(art["id"], "neutral", 0.3, "neutral", 0.3)
+                sentiment_stored[art["id"]] = True
 
 
 # ---------------------------------------------------------------------------
@@ -1179,3 +1259,194 @@ async def cleanup_priority() -> None:
             """)
         )
         await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# GICS Sector Assignment
+# ---------------------------------------------------------------------------
+
+# Known sector assignments — deterministic fallback when LLM is unavailable
+_KNOWN_SECTORS: dict[str, str | None] = {
+    "RTX": "industrials",
+    "NVDA": "technology",
+    "GOOGL": "communication",
+    "AAPL": "technology",
+    "TSLA": "consumer_discretionary",
+    "PLTR": "technology",
+    "LLY": "healthcare",
+    "NVO": "healthcare",
+    "WMT": "consumer_staples",
+    "XOM": "energy",
+    "IITU": "technology",
+    "SMH": "technology",
+    "VOO": None,
+    "GOLD": "materials",
+    "OIL": "energy",
+}
+
+VALID_SECTORS = {
+    "technology", "financials", "healthcare", "consumer_discretionary",
+    "consumer_staples", "communication", "energy", "industrials",
+    "materials", "utilities", "real_estate",
+}
+
+
+async def assign_sectors(instruments: list[dict]) -> None:
+    """Assign GICS sectors to instruments that don't have one yet.
+
+    Uses LLM for classification with deterministic fallback for known instruments.
+    This runs once per instrument — sectors are stable and rarely change.
+    """
+    # Find instruments without sectors
+    needs_sector = [i for i in instruments if not i.get("sector")]
+    if not needs_sector:
+        return
+
+    logger.info("Assigning GICS sectors for %d instruments...", len(needs_sector))
+
+    # Try deterministic assignment first
+    remaining = []
+    async with async_session() as session:
+        for inst in needs_sector:
+            known = _KNOWN_SECTORS.get(inst["symbol"])
+            if known is not None or inst["symbol"] in _KNOWN_SECTORS:
+                if known and known in VALID_SECTORS:
+                    await session.execute(
+                        text("UPDATE instruments SET sector = :sector WHERE id = :id"),
+                        {"sector": known, "id": inst["id"]},
+                    )
+                    inst["sector"] = known
+                    logger.info("Sector (known): %s → %s", inst["symbol"], known)
+                else:
+                    logger.info("Sector (known): %s → null (broad-market)", inst["symbol"])
+            else:
+                remaining.append(inst)
+        await session.commit()
+
+    if not remaining:
+        return
+
+    # Use LLM for unknown instruments
+    prompt = sector_classify_prompt(remaining)
+    result = await generate_json(
+        prompt,
+        system="You are a financial classification expert. Always respond with valid JSON.",
+        max_tokens=500,
+    )
+
+    if result and "results" in result:
+        async with async_session() as session:
+            for item in result["results"]:
+                if not isinstance(item, dict):
+                    continue
+                symbol = item.get("symbol", "").upper()
+                sector = item.get("sector")
+                if sector and sector in VALID_SECTORS:
+                    await session.execute(
+                        text("UPDATE instruments SET sector = :sector WHERE symbol = :symbol"),
+                        {"sector": sector, "symbol": symbol},
+                    )
+                    # Update in-memory
+                    for inst in remaining:
+                        if inst["symbol"] == symbol:
+                            inst["sector"] = sector
+                    logger.info("Sector (LLM): %s → %s", symbol, sector)
+            await session.commit()
+    else:
+        logger.warning("LLM sector classification failed, instruments without sectors: %s",
+                       [i["symbol"] for i in remaining])
+
+
+# ---------------------------------------------------------------------------
+# Sector Sentiment Aggregation
+# ---------------------------------------------------------------------------
+
+async def update_sector_sentiment() -> None:
+    """Calculate aggregate sector sentiment from sector news articles.
+
+    Produces BOTH short-term and long-term sector sentiment records for each sector.
+    Uses the same dual-horizon labels as macro sentiment.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+
+    async with async_session() as session:
+        # Get all sector categories with recent processed articles
+        result = await session.execute(
+            text("""
+                SELECT category,
+                       COALESCE(macro_sentiment_label, 'neutral') AS short_label,
+                       COALESCE(macro_long_term_label, 'neutral') AS long_label
+                FROM news_articles
+                WHERE category LIKE 'sector_%%'
+                AND ollama_processed = true
+                AND published_at >= :cutoff
+                ORDER BY category, published_at DESC
+            """),
+            {"cutoff": cutoff},
+        )
+        rows = result.fetchall()
+
+        if not rows:
+            return
+
+        # Group by sector
+        sector_articles: dict[str, list] = {}
+        for r in rows:
+            # Extract sector from category: 'sector_technology' -> 'technology'
+            sector = r.category.replace("sector_", "")
+            sector_articles.setdefault(sector, []).append(r)
+
+        for sector, articles in sector_articles.items():
+            total_cnt = len(articles)
+
+            # Short-term: always insert a record so "all neutral" is distinguishable from "no data"
+            short_scores = [SENTIMENT_MULTIPLIERS.get(a.short_label, 0.0) for a in articles
+                            if a.short_label != "neutral"]
+            if short_scores:
+                short_net = sum(short_scores) / len(short_scores)
+            else:
+                short_net = 0.0
+            short_net = max(-1.0, min(1.0, short_net))
+            short_label = "positive" if short_net > 0.08 else ("negative" if short_net < -0.08 else "neutral")
+
+            await session.execute(
+                text("""
+                    INSERT INTO sector_sentiment (sector, term, score, label, article_count, calculated_at)
+                    VALUES (:sector, 'short', :score, :label, :count, NOW())
+                """),
+                {"sector": sector, "score": short_net, "label": short_label, "count": total_cnt},
+            )
+
+            # Long-term: always insert
+            long_scores = [SENTIMENT_MULTIPLIERS.get(a.long_label, 0.0) for a in articles
+                           if a.long_label != "neutral"]
+            if long_scores:
+                long_net = sum(long_scores) / len(long_scores)
+            else:
+                long_net = 0.0
+            long_net = max(-1.0, min(1.0, long_net))
+            long_label = "positive" if long_net > 0.08 else ("negative" if long_net < -0.08 else "neutral")
+
+            await session.execute(
+                text("""
+                    INSERT INTO sector_sentiment (sector, term, score, label, article_count, calculated_at)
+                    VALUES (:sector, 'long', :score, :label, :count, NOW())
+                """),
+                {"sector": sector, "score": long_net, "label": long_label, "count": total_cnt},
+            )
+
+        # Clean up old records (keep last 100 per sector per term)
+        await session.execute(
+            text("""
+                DELETE FROM sector_sentiment
+                WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY sector, term ORDER BY calculated_at DESC) as rn
+                        FROM sector_sentiment
+                    ) ranked WHERE rn <= 100
+                )
+            """)
+        )
+
+        await session.commit()
+    logger.info("Sector sentiment updated for %d sectors", len(sector_articles))

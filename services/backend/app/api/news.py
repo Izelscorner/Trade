@@ -59,13 +59,16 @@ async def list_news(
             """
             use_asset_sentiment = False
         else:
-            # Category view: return both sentiments, use macro for macro articles
+            # Category view: return both sentiments.
+            # Sector articles (category LIKE 'sector_%') store sentiment in
+            # macro_sentiment_label just like macro articles, so include them.
             query = """
                 SELECT a.id, a.title, a.link, a.summary, a.source, a.category,
                        a.is_macro, a.is_asset_specific, a.published_at,
                        s.positive, s.negative, s.neutral, s.label,
                        s.long_term_label,
-                       a.macro_sentiment_label
+                       a.macro_sentiment_label,
+                       a.macro_long_term_label
                 FROM news_articles a
                 LEFT JOIN sentiment_scores s ON s.article_id = a.id
                 WHERE a.category = :cat
@@ -73,7 +76,9 @@ async def list_news(
                 AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
                 AND (
                     (s.label IS NOT NULL AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral'))
-                    OR (a.is_macro AND a.macro_sentiment_label IS NOT NULL AND a.macro_sentiment_label != 'neutral')
+                    OR ((a.is_macro OR a.category LIKE 'sector_%%')
+                        AND a.macro_sentiment_label IS NOT NULL
+                        AND (a.macro_sentiment_label != 'neutral' OR COALESCE(a.macro_long_term_label, 'neutral') != 'neutral'))
                 )
                 ORDER BY a.published_at DESC
             """
@@ -86,14 +91,17 @@ async def list_news(
                    a.is_macro, a.is_asset_specific, a.published_at,
                    s.positive, s.negative, s.neutral, s.label,
                    s.long_term_label,
-                   a.macro_sentiment_label
+                   a.macro_sentiment_label,
+                   a.macro_long_term_label
             FROM news_articles a
             LEFT JOIN sentiment_scores s ON s.article_id = a.id
             WHERE a.ollama_processed = true
             AND (s.article_id IS NOT NULL OR a.macro_sentiment_label IS NOT NULL)
             AND (
                 (s.label IS NOT NULL AND (s.label != 'neutral' OR COALESCE(s.long_term_label, 'neutral') != 'neutral'))
-                OR (a.is_macro AND a.macro_sentiment_label IS NOT NULL AND a.macro_sentiment_label != 'neutral')
+                OR ((a.is_macro OR a.category LIKE 'sector_%%')
+                    AND a.macro_sentiment_label IS NOT NULL
+                    AND (a.macro_sentiment_label != 'neutral' OR COALESCE(a.macro_long_term_label, 'neutral') != 'neutral'))
             )
             ORDER BY a.published_at DESC
         """
@@ -118,6 +126,8 @@ async def list_news(
         macro_label = getattr(r, "macro_sentiment_label", None)
         score_label = getattr(r, "label", None)
 
+        is_sector = r.category.startswith("sector_") if r.category else False
+
         if use_asset_sentiment:
             # Asset page: always use asset-perspective sentiment_scores
             if score_label is not None:
@@ -129,8 +139,8 @@ async def list_news(
                     label=score_label,
                     long_term_label=lt_label,
                 )
-        elif r.is_macro and macro_label:
-            # Macro article in general view: use macro perspective
+        elif (r.is_macro or is_sector) and macro_label:
+            # Macro or sector article: use macro_sentiment_label perspective
             lt_label = getattr(r, "macro_long_term_label", None) if hasattr(r, "macro_long_term_label") else None
             pos, neg, neu = _MACRO_PROBS.get(macro_label, (0.15, 0.15, 0.70))
             sentiment = SentimentSchema(

@@ -8,7 +8,9 @@
       "Bash(docker compose exec *)",
       "Bash(docker compose exec -T postgres psql *)",
       "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -t -A -c \":*)",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -c \":*)"
     ],
     "deny": [
       "Read(./.env)"

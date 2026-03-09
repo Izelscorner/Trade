@@ -12,7 +12,8 @@ import CategoryFilter from "../components/CategoryFilter";
 import GradeBadge from "../components/GradeBadge";
 import PriceChange from "../components/PriceChange";
 import { TableRowSkeleton } from "../components/Skeletons";
-import type { Category, DashboardInstrument } from "../types";
+import type { Category, DashboardInstrument, Sector } from "../types";
+import { SECTOR_LABELS } from "../types";
 import {
   ArrowUpDown,
   ChevronLeft,
@@ -43,6 +44,7 @@ export default function AssetList() {
   const queryClient = useQueryClient();
   const { isInPortfolio, togglePortfolio } = usePortfolio();
   const [category, setCategory] = useState<Category | "all">("all");
+  const [sector, setSector] = useState<Sector | "all">("all");
   const [sortKey, setSortKey] = useState<SortKey>("symbol");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [search, setSearch] = useState("");
@@ -56,12 +58,24 @@ export default function AssetList() {
   // Reset page when filters change
   useEffect(() => {
     setPage(1);
-  }, [category, search]);
+  }, [category, sector, search]);
+
+  // Derive available sectors from current instruments
+  const availableSectors = useMemo(() => {
+    const sectors = new Set<Sector>();
+    (instruments || []).forEach((i) => {
+      if (i.sector) sectors.add(i.sector as Sector);
+    });
+    return Array.from(sectors).sort();
+  }, [instruments]);
 
   const filtered = useMemo(() => {
     let list = instruments || [];
     if (category !== "all") {
       list = list.filter((i) => i.category === category);
+    }
+    if (sector !== "all") {
+      list = list.filter((i) => i.sector === sector);
     }
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -92,7 +106,7 @@ export default function AssetList() {
       }
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [instruments, category, sortKey, sortDir, search]);
+  }, [instruments, category, sector, sortKey, sortDir, search]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
   const paginated = filtered.slice(
@@ -137,6 +151,19 @@ export default function AssetList() {
             />
           </div>
           <CategoryFilter selected={category} onChange={setCategory} />
+          {/* Sector Filter */}
+          <select
+            value={sector}
+            onChange={(e) => setSector(e.target.value as Sector | "all")}
+            className="px-3 py-2 text-sm rounded-lg bg-surface-2 border border-border-subtle text-text-primary focus:outline-none focus:border-accent-cyan/50 appearance-none cursor-pointer"
+          >
+            <option value="all">All Sectors</option>
+            {availableSectors.map((s) => (
+              <option key={s} value={s}>
+                {SECTOR_LABELS[s] || s}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 text-accent-cyan text-sm font-medium hover:bg-accent-cyan/20 transition-colors"

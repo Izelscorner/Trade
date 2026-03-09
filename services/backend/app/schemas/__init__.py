@@ -21,6 +21,7 @@ class InstrumentSchema(BaseModel):
     symbol: str
     name: str
     category: str
+    sector: str | None = None
 
 
 # --- Sentiment (defined before NewsArticleSchema) ---
@@ -58,6 +59,7 @@ class GradeSchema(BaseModel):
     technical_score: float
     sentiment_score: float
     macro_score: float
+    sector_score: float = 0.0
     details: dict | None = None
     graded_at: datetime
 
@@ -99,6 +101,7 @@ class DashboardInstrumentSchema(BaseModel):
     symbol: str
     name: str
     category: str
+    sector: str | None = None
     price: float | None = None
     change_amount: float | None = None
     change_percent: float | None = None
@@ -112,6 +115,15 @@ class DashboardInstrumentSchema(BaseModel):
 
 class MacroSentimentSchema(BaseModel):
     region: str
+    term: str = "short"
+    score: float
+    label: str
+    article_count: int
+    calculated_at: datetime
+
+
+class SectorSentimentSchema(BaseModel):
+    sector: str
     term: str = "short"
     score: float
     label: str

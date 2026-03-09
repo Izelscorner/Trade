@@ -14,7 +14,8 @@ import {
 import Fuse from "fuse.js";
 import { fetchNews } from "../api/client";
 import { wsSubscribe } from "../ws";
-import type { NewsArticle } from "../types";
+import type { NewsArticle, Sector } from "../types";
+import { SECTOR_LABELS } from "../types";
 
 const sentimentColors: Record<string, string> = {
   "very positive":
@@ -46,6 +47,13 @@ const categoryBadgeStyles: Record<
     label: "Asset",
     className: "text-accent-blue bg-accent-blue/10",
   },
+  // Sector categories share a common style
+  ...Object.fromEntries(
+    Object.entries(SECTOR_LABELS).map(([key, label]) => [
+      `sector_${key}`,
+      { label, className: "text-accent-cyan bg-accent-cyan/10" },
+    ]),
+  ),
 };
 
 const categoryOptions = [
@@ -54,6 +62,7 @@ const categoryOptions = [
   { value: "macro_markets", label: "Markets" },
   { value: "macro_politics", label: "Politics" },
   { value: "macro_conflict", label: "Conflict" },
+  { value: "sector", label: "Sector" },
   { value: "asset_specific", label: "Asset" },
 ] as const;
 
@@ -62,6 +71,10 @@ const macroCategories = [
   "macro_politics",
   "macro_conflict",
 ];
+
+const sectorCategories = Object.keys(SECTOR_LABELS).map(
+  (s) => `sector_${s}`,
+);
 
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return "";
@@ -77,6 +90,7 @@ function timeAgo(dateStr: string | null): string {
 export default function News() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
+  const [sectorFilter, setSectorFilter] = useState<Sector | "all">("all");
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const prevIdsRef = useRef<Set<string>>(new Set());
 
@@ -91,10 +105,16 @@ export default function News() {
   }, [categoryType]);
 
   const { data: rawArticles = [], isLoading } = useQuery<NewsArticle[]>({
-    queryKey: ["news-page", categoryType],
+    queryKey: ["news-page", categoryType, sectorFilter],
     queryFn: () => {
       const opts: { category?: string } = {};
-      if (categoryType !== "all") {
+      if (categoryType === "sector") {
+        // Fetch specific sector or all sector news (client-side filtered)
+        if (sectorFilter !== "all") {
+          opts.category = `sector_${sectorFilter}`;
+        }
+        // When "all" sectors, fetch everything and filter client-side
+      } else if (categoryType !== "all") {
         opts.category = categoryType;
       }
       return fetchNews(opts);
@@ -102,7 +122,12 @@ export default function News() {
     refetchInterval: 120_000,
   });
 
-  // Client-side filtering for "macro" meta-category
+  // Reset sector sub-filter when leaving sector view
+  useEffect(() => {
+    if (categoryType !== "sector") setSectorFilter("all");
+  }, [categoryType]);
+
+  // Client-side filtering for meta-categories
   const articles = useMemo(() => {
     if (categoryType === "all") return rawArticles;
     if (categoryType === "macro") {
@@ -110,8 +135,15 @@ export default function News() {
         (a) => macroCategories.includes(a.category) || a.is_macro,
       );
     }
+    if (categoryType === "sector") {
+      return rawArticles.filter((a) => {
+        if (!sectorCategories.includes(a.category)) return false;
+        if (sectorFilter !== "all") return a.category === `sector_${sectorFilter}`;
+        return true;
+      });
+    }
     return rawArticles;
-  }, [rawArticles, categoryType]);
+  }, [rawArticles, categoryType, sectorFilter]);
 
   // Track new article IDs for animation
   useEffect(() => {
@@ -217,6 +249,27 @@ export default function News() {
             </button>
           ))}
         </div>
+
+        {/* Sector sub-filter (visible when Sector category is active) */}
+        {categoryType === "sector" && (
+          <>
+            <div className="w-px h-6 bg-border-subtle" />
+            <select
+              value={sectorFilter}
+              onChange={(e) => setSectorFilter(e.target.value as Sector | "all")}
+              className="px-3 py-1.5 text-sm rounded-lg bg-surface-2 border border-border-subtle text-text-primary focus:outline-none focus:border-accent-cyan/50 appearance-none cursor-pointer"
+            >
+              <option value="all">All Sectors</option>
+              {(Object.entries(SECTOR_LABELS) as [Sector, string][]).map(
+                ([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ),
+              )}
+            </select>
+          </>
+        )}
       </div>
 
       {/* Articles list */}

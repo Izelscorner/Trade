@@ -33,7 +33,7 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
                 SELECT DISTINCT ON (g.instrument_id, g.term)
                     g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
-                    g.technical_score, g.sentiment_score, g.macro_score,
+                    g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
                     g.details, g.graded_at
                 FROM grades g
                 JOIN instruments i ON i.id = g.instrument_id
@@ -56,6 +56,7 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
             technical_score=float(r.technical_score),
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),
+            sector_score=float(r.sector_score),
             details=json.loads(r.details) if isinstance(r.details, str) else r.details,
             graded_at=r.graded_at,
         )
@@ -72,7 +73,7 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
             text("""
                 SELECT g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
-                    g.technical_score, g.sentiment_score, g.macro_score,
+                    g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
                     g.details, g.graded_at
                 FROM grades g
                 JOIN instruments i ON i.id = g.instrument_id
@@ -96,6 +97,7 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
             technical_score=float(r.technical_score),
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),
+            sector_score=float(r.sector_score),
             details=json.loads(r.details) if isinstance(r.details, str) else r.details,
             graded_at=r.graded_at,
         )

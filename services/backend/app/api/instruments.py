@@ -53,12 +53,12 @@ async def list_instruments(category: str | None = None):
     async with async_session() as session:
         if category:
             result = await session.execute(
-                text("SELECT id, symbol, name, category FROM instruments WHERE category = :cat AND is_active = true ORDER BY symbol"),
+                text("SELECT id, symbol, name, category, sector FROM instruments WHERE category = :cat AND is_active = true ORDER BY symbol"),
                 {"cat": category},
             )
         else:
             result = await session.execute(
-                text("SELECT id, symbol, name, category FROM instruments WHERE is_active = true ORDER BY symbol")
+                text("SELECT id, symbol, name, category, sector FROM instruments WHERE is_active = true ORDER BY symbol")
             )
         rows = result.fetchall()
 
@@ -68,6 +68,7 @@ async def list_instruments(category: str | None = None):
             symbol=r.symbol,
             name=r.name,
             category=r.category,
+            sector=r.sector,
         )
         for r in rows
     ]
@@ -155,7 +156,7 @@ async def get_instrument(instrument_id: str):
     """Get a single instrument by ID."""
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT id, symbol, name, category FROM instruments WHERE id = :iid AND is_active = true"),
+            text("SELECT id, symbol, name, category, sector FROM instruments WHERE id = :iid AND is_active = true"),
             {"iid": instrument_id},
         )
         row = result.fetchone()
@@ -168,6 +169,7 @@ async def get_instrument(instrument_id: str):
         symbol=row.symbol,
         name=row.name,
         category=row.category,
+        sector=row.sector,
     )
     return APIResponse(data=inst.model_dump(), timestamp=datetime.now(timezone.utc))
 

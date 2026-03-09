@@ -45,4 +45,54 @@ SLOW_FEEDS: dict[str, list[dict[str, str]]] = {
 
 MACRO_CATEGORIES = {"macro_markets", "macro_politics", "macro_conflict"}
 
-ALL_CATEGORIES = MACRO_CATEGORIES | {"asset_specific"}
+# Sector-specific feeds — GICS sector classification
+SECTOR_FEEDS: dict[str, list[dict[str, str]]] = {
+    "sector_technology": [
+        {"source": "Google News: Technology Sector", "url": "https://news.google.com/rss/search?q=technology+sector+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Semiconductor Industry", "url": "https://news.google.com/rss/search?q=semiconductor+industry&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_financials": [
+        {"source": "Google News: Financial Sector", "url": "https://news.google.com/rss/search?q=financial+sector+banking+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Banking Industry", "url": "https://news.google.com/rss/search?q=banking+industry+wall+street&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_healthcare": [
+        {"source": "Google News: Healthcare Sector", "url": "https://news.google.com/rss/search?q=healthcare+sector+pharma+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Biotech Industry", "url": "https://news.google.com/rss/search?q=biotech+pharmaceutical+industry&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_consumer_discretionary": [
+        {"source": "Google News: Consumer Discretionary", "url": "https://news.google.com/rss/search?q=consumer+discretionary+retail+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Retail Industry", "url": "https://news.google.com/rss/search?q=retail+industry+consumer+spending&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_consumer_staples": [
+        {"source": "Google News: Consumer Staples", "url": "https://news.google.com/rss/search?q=consumer+staples+sector+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Food & Beverage Industry", "url": "https://news.google.com/rss/search?q=food+beverage+industry+consumer+goods&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_communication": [
+        {"source": "Google News: Communication Services", "url": "https://news.google.com/rss/search?q=communication+services+sector+media+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Telecom & Media", "url": "https://news.google.com/rss/search?q=telecom+media+streaming+industry&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_energy": [
+        {"source": "Google News: Energy Sector", "url": "https://news.google.com/rss/search?q=energy+sector+oil+gas+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Oil & Gas Industry", "url": "https://news.google.com/rss/search?q=oil+gas+industry+energy+transition&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_industrials": [
+        {"source": "Google News: Industrials Sector", "url": "https://news.google.com/rss/search?q=industrials+sector+manufacturing+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Defense & Aerospace", "url": "https://news.google.com/rss/search?q=defense+aerospace+industry&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_materials": [
+        {"source": "Google News: Materials Sector", "url": "https://news.google.com/rss/search?q=materials+sector+mining+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Mining & Commodities", "url": "https://news.google.com/rss/search?q=mining+commodities+metals+industry&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_utilities": [
+        {"source": "Google News: Utilities Sector", "url": "https://news.google.com/rss/search?q=utilities+sector+stocks+electricity&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Power & Utilities", "url": "https://news.google.com/rss/search?q=power+utilities+renewable+energy+grid&hl=en-US&gl=US&ceid=US:en"},
+    ],
+    "sector_real_estate": [
+        {"source": "Google News: Real Estate Sector", "url": "https://news.google.com/rss/search?q=real+estate+sector+REIT+stocks&hl=en-US&gl=US&ceid=US:en"},
+        {"source": "Google News: Housing & Commercial", "url": "https://news.google.com/rss/search?q=housing+market+commercial+real+estate&hl=en-US&gl=US&ceid=US:en"},
+    ],
+}
+
+SECTOR_CATEGORIES = set(SECTOR_FEEDS.keys())
+
+ALL_CATEGORIES = MACRO_CATEGORIES | SECTOR_CATEGORIES | {"asset_specific"}

@@ -18,6 +18,8 @@ import {
   prioritizeInstrument,
   fetchConfig,
   fetchETFConstituents,
+  fetchSectorSentiment,
+  fetchNews,
 } from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
@@ -28,8 +30,9 @@ import MacroSentimentCard from "../components/MacroSentimentCard";
 import NewsFeed from "../components/NewsFeed";
 import AIAnalysisModal from "../components/AIAnalysisModal";
 import { PageSkeleton } from "../components/Skeletons";
-import { ArrowLeft, CircleDot, Brain, Layers } from "lucide-react";
-import type { Instrument, LivePrice, Grade, ETFConstituent } from "../types";
+import { ArrowLeft, CircleDot, Brain, Layers, Building2 } from "lucide-react";
+import type { Instrument, LivePrice, Grade, ETFConstituent, SectorSentiment } from "../types";
+import { SECTOR_LABELS, type Sector } from "../types";
 import { useEffect, useState } from "react";
 
 const marketStatusConfig: Record<string, { label: string; color: string }> = {
@@ -78,6 +81,20 @@ export default function AssetDetail() {
     queryFn: () => fetchETFConstituents(id!),
     enabled: !!id && instrument?.category === "etf",
     staleTime: 600_000,
+  });
+
+  const { data: sectorSentiments } = useQuery<SectorSentiment[]>({
+    queryKey: ["sector-sentiment", instrument?.sector],
+    queryFn: () => fetchSectorSentiment(instrument!.sector!),
+    enabled: !!instrument?.sector,
+    staleTime: 60_000,
+  });
+
+  const { data: sectorNews } = useQuery({
+    queryKey: ["sector-news", instrument?.sector],
+    queryFn: () => fetchNews({ category: `sector_${instrument!.sector}` }),
+    enabled: !!instrument?.sector,
+    staleTime: 120_000,
   });
 
   const modelDisplay = useMemo(() => {
@@ -210,6 +227,16 @@ export default function AssetDetail() {
         <MacroSentimentCard sentiments={macroSentiments || []} />
       </div>
 
+      {/* Sector Sentiment */}
+      {instrument.sector && sectorSentiments && sectorSentiments.length > 0 && (
+        <div className="animate-slide-up" style={{ animationDelay: "160ms" }}>
+          <SectorSentimentCard
+            sector={instrument.sector}
+            sentiments={sectorSentiments}
+          />
+        </div>
+      )}
+
       {/* ETF Constituents */}
       {instrument.category === "etf" &&
         etfConstituents &&
@@ -293,6 +320,17 @@ export default function AssetDetail() {
         />
       </div>
 
+      {/* Sector News */}
+      {instrument.sector && sectorNews && sectorNews.length > 0 && (
+        <div className="animate-slide-up" style={{ animationDelay: "350ms" }}>
+          <NewsFeed
+            articles={sectorNews}
+            title={`${SECTOR_LABELS[instrument.sector as Sector] || instrument.sector} Sector News`}
+            icon={<Building2 size={18} className="text-accent-cyan" />}
+          />
+        </div>
+      )}
+
       <AIAnalysisModal
         isOpen={aiModalOpen}
         onClose={() => setAiModalOpen(false)}
@@ -301,6 +339,69 @@ export default function AssetDetail() {
         symbol={instrument.symbol}
         title={`${modelDisplay} AI Analysis`}
       />
+    </div>
+  );
+}
+
+function SectorSentimentCard({
+  sector,
+  sentiments,
+}: {
+  sector: string;
+  sentiments: SectorSentiment[];
+}) {
+  const sectorLabel = SECTOR_LABELS[sector as Sector] || sector;
+
+  const sentimentColor = (label: string) => {
+    if (label === "positive") return "text-emerald-400";
+    if (label === "negative") return "text-red-400";
+    return "text-slate-400";
+  };
+
+  const sentimentBg = (label: string) => {
+    if (label === "positive") return "bg-emerald-500/10 border-emerald-500/20";
+    if (label === "negative") return "bg-red-500/10 border-red-500/20";
+    return "bg-surface-3 border-border-subtle";
+  };
+
+  return (
+    <div className="rounded-xl bg-surface-1 border border-border-subtle p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <Building2 size={18} className="text-accent-cyan" />
+        <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">
+          {sectorLabel} Sector Sentiment
+        </h2>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {sentiments.map((s) => (
+          <div
+            key={s.term}
+            className={`rounded-lg border p-3 ${sentimentBg(s.label)}`}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-text-muted uppercase tracking-wider font-medium">
+                {s.term === "short" ? "Short-Term" : "Long-Term"}
+              </span>
+              <span className="text-[10px] text-text-muted font-mono bg-surface-3 px-1.5 py-0.5 rounded">
+                {s.article_count} articles
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-lg font-bold font-mono ${sentimentColor(s.label)}`}
+              >
+                {s.score > 0 ? "+" : ""}
+                {s.score.toFixed(4)}
+              </span>
+              <span
+                className={`text-xs font-semibold uppercase tracking-wider ${sentimentColor(s.label)}`}
+              >
+                {s.label}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

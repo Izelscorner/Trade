@@ -15,9 +15,9 @@ import urllib.parse
 
 from sqlalchemy import text
 
-from .feeds import MAIN_FEEDS, SLOW_FEEDS, MACRO_CATEGORIES
+from .feeds import MAIN_FEEDS, SLOW_FEEDS, SECTOR_FEEDS, MACRO_CATEGORIES
 from .fetcher import fetch_feed
-from .store import upsert_articles, cleanup_old_macro_news, cleanup_old_asset_news
+from .store import upsert_articles, cleanup_old_macro_news, cleanup_old_asset_news, cleanup_old_sector_news
 from .instruments import get_instruments
 from .db import async_session
 
@@ -31,6 +31,7 @@ MAIN_INTERVAL = 120          # 2 minutes — RSS feeds rarely update faster
 SLOW_INTERVAL = 180          # 3 minutes
 CLEANUP_INTERVAL = 900       # 15 minutes
 NEW_ASSET_CHECK_INTERVAL = 120  # 2 minutes
+SECTOR_INTERVAL = 300        # 5 minutes — sector news is less time-critical
 
 
 async def fetch_category(category: str, feeds: list[dict], instrument_id: str | None = None, asset_name: str | None = None) -> int:
@@ -280,6 +281,20 @@ async def new_asset_news_loop() -> None:
         await asyncio.sleep(NEW_ASSET_CHECK_INTERVAL)
 
 
+async def sector_loop() -> None:
+    """Fetch sector-specific news feeds every 5 minutes."""
+    await asyncio.sleep(20)  # Stagger start
+    while True:
+        try:
+            for category, feeds in SECTOR_FEEDS.items():
+                count = await fetch_category(category, feeds)
+                if count > 0:
+                    logger.info("[%s] Stored %d new sector articles", category, count)
+        except Exception:
+            logger.exception("Error in sector fetch loop")
+        await asyncio.sleep(SECTOR_INTERVAL)
+
+
 async def cleanup_loop() -> None:
     """Periodically clean up stale articles."""
     while True:
@@ -287,6 +302,7 @@ async def cleanup_loop() -> None:
         try:
             await cleanup_old_macro_news()
             await cleanup_old_asset_news()
+            await cleanup_old_sector_news()
         except Exception:
             logger.exception("Error in cleanup loop")
 
@@ -298,6 +314,7 @@ async def main() -> None:
         slow_loop(),
         new_asset_news_loop(),
         etf_constituents_loop(),
+        sector_loop(),
         cleanup_loop(),
     )
 

@@ -108,19 +108,21 @@ GROUP_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
-# Composite (technical vs sentiment vs macro) weight profiles
+# Composite (technical vs sentiment vs sector vs macro) weight profiles
+# Sector signal sits between asset-specific sentiment and broad macro:
+# it captures industry-level dynamics (regulation, sector rotation, structural trends).
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short": {"technical": 0.50, "sentiment": 0.30, "macro": 0.20},
-        "long":  {"technical": 0.35, "sentiment": 0.30, "macro": 0.35},
+        "short": {"technical": 0.45, "sentiment": 0.25, "sector": 0.12, "macro": 0.18},
+        "long":  {"technical": 0.30, "sentiment": 0.25, "sector": 0.15, "macro": 0.30},
     },
     "etf": {
-        "short": {"technical": 0.45, "sentiment": 0.25, "macro": 0.30},
-        "long":  {"technical": 0.30, "sentiment": 0.25, "macro": 0.45},
+        "short": {"technical": 0.40, "sentiment": 0.20, "sector": 0.15, "macro": 0.25},
+        "long":  {"technical": 0.25, "sentiment": 0.20, "sector": 0.18, "macro": 0.37},
     },
     "commodity": {
-        "short": {"technical": 0.45, "sentiment": 0.30, "macro": 0.25},
-        "long":  {"technical": 0.30, "sentiment": 0.30, "macro": 0.40},
+        "short": {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23},
+        "long":  {"technical": 0.28, "sentiment": 0.25, "sector": 0.12, "macro": 0.35},
     },
 }
 
@@ -151,6 +153,19 @@ MACRO_PARAMS = {
     "long": {
         "half_life_hours": 648.0,   # 27-day half-life (~10% weight after 3 months)
         "window_hours": 4320,       # 180 days lookback (~6 months)
+    },
+}
+
+# Sector sentiment parameters — between asset-level and macro-level decay rates.
+# Sector dynamics are slower than individual asset sentiment but faster than macro policy shifts.
+SECTOR_PARAMS = {
+    "short": {
+        "half_life_hours": 18.0,   # 18h half-life: sector rotation, earnings season effects
+        "window_hours": 48,        # 48h lookback (2 days)
+    },
+    "long": {
+        "half_life_hours": 240.0,  # 10-day half-life: structural industry shifts
+        "window_hours": 720,       # 30 days lookback
     },
 }
 
@@ -544,6 +559,84 @@ async def get_macro_score(term: str = "short") -> tuple[float, dict]:
 
 
 # ---------------------------------------------------------------------------
+# Sector score — DUAL-HORIZON, term-aware
+# ---------------------------------------------------------------------------
+
+async def get_sector_score(sector: str | None, term: str = "short") -> tuple[float, dict]:
+    """Aggregate sector sentiment with term-appropriate parameters.
+
+    Sector sentiment captures industry-level dynamics that are more specific than
+    broad macro but broader than individual asset sentiment. Uses exponential
+    time-decay with horizon-appropriate half-lives.
+
+    Returns (0.0, minimal_details) if sector is None (e.g., broad-market ETFs).
+    """
+    if not sector:
+        return 0.0, {"sector": None, "term": term, "records": 0}
+
+    params = SECTOR_PARAMS.get(term, SECTOR_PARAMS["short"])
+    half_life_hours = params["half_life_hours"]
+    window_hours = params["window_hours"]
+
+    decay_lambda = math.log(2) / half_life_hours
+    now = datetime.now(timezone.utc)
+
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT score, article_count, calculated_at, label
+                FROM sector_sentiment
+                WHERE sector = :sector
+                AND term = :term
+                AND calculated_at >= NOW() - INTERVAL '1 hour' * :window_h
+                ORDER BY calculated_at DESC
+                LIMIT 20
+            """),
+            {"sector": sector, "term": term, "window_h": window_hours},
+        )
+        rows = result.fetchall()
+
+    if not rows:
+        return 0.0, {"sector": sector, "records": 0, "term": term}
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+    # Use latest record's article_count (not sum across records, which inflates)
+    latest_article_count = rows[0].article_count or 0
+
+    for row in rows:
+        calc_at = row.calculated_at
+        if calc_at.tzinfo is None:
+            calc_at = calc_at.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (now - calc_at).total_seconds() / 3600.0)
+        decay_weight = math.exp(-decay_lambda * age_hours)
+
+        # Sector scores from update_sector_sentiment() are on [-1, 1] scale
+        # (SENTIMENT_MULTIPLIERS). Scale to [-3, 3] to match other sub-signals.
+        score = _clip(float(row.score) * 3.0)
+        weighted_sum += score * decay_weight
+        weight_total += decay_weight
+
+    if weight_total == 0.0:
+        return 0.0, {"sector": sector, "records": len(rows), "articles": latest_article_count, "term": term}
+
+    sector_mean = weighted_sum / weight_total
+    confidence = _log_confidence(min(latest_article_count, 20), full_at=8)
+    effective = _clip(sector_mean * confidence)
+
+    return round(effective, 4), {
+        "sector": sector,
+        "records": len(rows),
+        "articles": latest_article_count,
+        "mean": round(sector_mean, 4),
+        "confidence": round(confidence, 4),
+        "latest_label": rows[0].label,
+        "decay_half_life_h": half_life_hours,
+        "term": term,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Final composite grading
 # ---------------------------------------------------------------------------
 
@@ -552,12 +645,15 @@ async def grade_instrument(
     symbol: str,
     term: str = "short",
     category: str = "stock",
+    sector: str | None = None,
 ) -> dict | None:
     """Compute a mathematically rigorous grade for one instrument.
 
-    Now term-aware: short-term grades use short-term sentiment/macro,
-    long-term grades use long-term sentiment/macro. This prevents
+    Now term-aware: short-term grades use short-term sentiment/macro/sector,
+    long-term grades use long-term sentiment/macro/sector. This prevents
     short-term noise from contaminating long-term views and vice versa.
+
+    4-signal composite: Technical + Sentiment + Sector + Macro.
 
     Returns a dict ready for DB insertion; also embeds buy_confidence and
     action_label in the details JSON so the frontend can display them.
@@ -568,6 +664,7 @@ async def grade_instrument(
         instrument_id, lookback, category, term
     )
     sentiment_score, sent_details = await get_sentiment_score(instrument_id, term)
+    sector_score, sector_details = await get_sector_score(sector, term)
     macro_score, macro_details = await get_macro_score(term)
 
     # Composite weights
@@ -578,11 +675,13 @@ async def grade_instrument(
     # reduce its effective weight so it doesn't anchor the result at zero.
     tech_conf = tech_details.get("data_completeness", 1.0)
     sent_conf = sent_details.get("confidence", 0.0)
+    sector_conf = sector_details.get("confidence", 0.0) if sector else 0.0
     macro_conf = macro_details.get("confidence", 0.0)
 
     effective_weights = {
         "technical": weights["technical"] * (0.5 + 0.5 * tech_conf),
         "sentiment": weights["sentiment"] * (0.5 + 0.5 * sent_conf),
+        "sector":    weights["sector"]    * (0.5 + 0.5 * sector_conf),
         "macro":     weights["macro"]     * (0.5 + 0.5 * macro_conf),
     }
     w_sum = sum(effective_weights.values())
@@ -592,6 +691,7 @@ async def grade_instrument(
         overall = (
             technical_score * effective_weights["technical"]
             + sentiment_score * effective_weights["sentiment"]
+            + sector_score * effective_weights["sector"]
             + macro_score * effective_weights["macro"]
         ) / w_sum
 
@@ -612,6 +712,7 @@ async def grade_instrument(
         "technical_score": technical_score,
         "sentiment_score": sentiment_score,
         "macro_score": macro_score,
+        "sector_score": sector_score,
         "details": json.dumps({
             "weights": weights,
             "effective_weights": {k: round(v / w_sum, 4) for k, v in effective_weights.items()} if w_sum else weights,
@@ -619,6 +720,7 @@ async def grade_instrument(
             "action": action,
             "technical": tech_details,
             "sentiment": sent_details,
+            "sector": sector_details,
             "macro": macro_details,
         }),
         "graded_at": now,
@@ -631,9 +733,9 @@ async def store_grade(grade: dict) -> None:
         await session.execute(
             text("""
                 INSERT INTO grades (instrument_id, term, overall_grade, overall_score,
-                    technical_score, sentiment_score, macro_score, details, graded_at)
+                    technical_score, sentiment_score, macro_score, sector_score, details, graded_at)
                 VALUES (:instrument_id, :term, :overall_grade, :overall_score,
-                    :technical_score, :sentiment_score, :macro_score, CAST(:details AS jsonb), :graded_at)
+                    :technical_score, :sentiment_score, :macro_score, :sector_score, CAST(:details AS jsonb), :graded_at)
             """),
             grade,
         )

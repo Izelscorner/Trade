@@ -2,11 +2,39 @@
 
 export type Category = "stock" | "etf" | "commodity";
 
+export type Sector =
+  | "technology"
+  | "financials"
+  | "healthcare"
+  | "consumer_discretionary"
+  | "consumer_staples"
+  | "communication"
+  | "energy"
+  | "industrials"
+  | "materials"
+  | "utilities"
+  | "real_estate";
+
+export const SECTOR_LABELS: Record<Sector, string> = {
+  technology: "Technology",
+  financials: "Financials",
+  healthcare: "Healthcare",
+  consumer_discretionary: "Consumer Disc.",
+  consumer_staples: "Consumer Staples",
+  communication: "Communication",
+  energy: "Energy",
+  industrials: "Industrials",
+  materials: "Materials",
+  utilities: "Utilities",
+  real_estate: "Real Estate",
+};
+
 export interface Instrument {
   id: string;
   symbol: string;
   name: string;
   category: Category;
+  sector?: Sector | null;
 }
 
 export interface DashboardInstrument {
@@ -14,6 +42,7 @@ export interface DashboardInstrument {
   symbol: string;
   name: string;
   category: Category;
+  sector?: Sector | null;
   price: number | null;
   change_amount: number | null;
   change_percent: number | null;
@@ -54,13 +83,14 @@ export interface Grade {
   technical_score: number;
   sentiment_score: number;
   macro_score: number;
+  sector_score: number;
   details: GradeDetails | null;
   graded_at: string;
 }
 
 export interface GradeDetails {
-  weights: { technical: number; sentiment: number; macro: number };
-  effective_weights?: { technical: number; sentiment: number; macro: number };
+  weights: { technical: number; sentiment: number; sector: number; macro: number };
+  effective_weights?: { technical: number; sentiment: number; sector: number; macro: number };
   buy_confidence?: number;  // 0–100 sigmoid-scaled buy probability
   action?: string;          // "Strong Buy" | "Buy" | "Slight Buy" | "Neutral" | "Slight Sell" | "Sell" | "Strong Sell"
   technical: {
@@ -86,6 +116,17 @@ export interface GradeDetails {
     [key: string]: unknown;
   };
   macro: {
+    records?: number;
+    articles?: number;
+    mean?: number;
+    confidence?: number;
+    latest_label?: string;
+    decay_half_life_h?: number;
+    term?: string;
+    [key: string]: unknown;
+  };
+  sector?: {
+    sector?: string;
     records?: number;
     articles?: number;
     mean?: number;
@@ -163,6 +204,15 @@ export interface TechnicalIndicator {
 export interface MacroSentiment {
   region: string;
   term?: string;
+  score: number;
+  label: string;
+  article_count: number;
+  calculated_at: string;
+}
+
+export interface SectorSentiment {
+  sector: string;
+  term: string;
   score: number;
   label: string;
   article_count: number;

@@ -56,6 +56,34 @@ async def _ensure_extra_tables():
             CREATE INDEX IF NOT EXISTS idx_intraday_prices_instrument_ts
             ON intraday_prices(instrument_id, timestamp DESC)
         """))
+        # Sector infrastructure migrations
+        await session.execute(_text("""
+            DO $$ BEGIN
+                ALTER TABLE instruments ADD COLUMN sector VARCHAR(50);
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS sector_sentiment (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                sector VARCHAR(50) NOT NULL,
+                term VARCHAR(10) NOT NULL DEFAULT 'short' CHECK (term IN ('short', 'long')),
+                score NUMERIC(7, 6) NOT NULL,
+                label VARCHAR(10) NOT NULL CHECK (label IN ('positive', 'negative', 'neutral')),
+                article_count INT NOT NULL DEFAULT 0,
+                calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(_text("""
+            CREATE INDEX IF NOT EXISTS idx_sector_sentiment_sector_term
+            ON sector_sentiment(sector, term, calculated_at DESC)
+        """))
+        await session.execute(_text("""
+            DO $$ BEGIN
+                ALTER TABLE grades ADD COLUMN sector_score NUMERIC(7, 4) DEFAULT 0;
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
         await session.commit()
 
 

@@ -239,6 +239,67 @@ Choose for each: very_positive, positive, neutral, negative, very_negative
 {{"short_sentiment": "negative", "short_confidence": 0.8, "long_sentiment": "negative", "long_confidence": 0.6}}"""
 
 
+SECTOR_SENTIMENT_SYSTEM = """You are a sector analyst at a Western investment bank.
+You predict the impact on a specific GICS sector's stocks on TWO time horizons:
+- SHORT-TERM (1-7 days): immediate sector rotation, sentiment-driven moves
+- LONG-TERM (1-6 months): structural industry changes, regulatory shifts, competitive dynamics
+Always respond with valid JSON."""
+
+
+def sector_classify_prompt(instruments: list[dict]) -> str:
+    """Prompt to classify instruments by GICS sector."""
+    inst_text = "\n".join(
+        f'  - symbol="{i["symbol"]}", name="{i["name"]}", category="{i["category"]}"'
+        for i in instruments
+    )
+    return f"""Classify each instrument by its GICS sector. These are US-listed assets.
+
+Instruments:
+{inst_text}
+
+Valid sectors: technology, financials, healthcare, consumer_discretionary, consumer_staples, communication, energy, industrials, materials, utilities, real_estate
+
+Rules:
+- Stocks: assign the primary GICS sector based on the company's main business.
+- ETFs: assign the sector that best represents the ETF's focus. Broad-market ETFs (like S&P 500) should be null.
+- Commodities: GOLD/silver → materials. OIL/natural gas → energy.
+- If unsure, use the most specific sector that fits.
+
+Respond with: {{"results": [{{"symbol": "AAPL", "sector": "technology"}}, {{"symbol": "VOO", "sector": null}}, ...]}}
+Include ALL instruments in the results array."""
+
+
+def batch_sector_sentiment_prompt(articles: list[dict], sector: str) -> str:
+    """Build a prompt for dual-horizon sentiment analysis on sector news."""
+    sector_display = sector.replace("_", " ").title()
+    articles_text = ""
+    for i, art in enumerate(articles):
+        title = art["title"]
+        content = art.get("content") or art.get("summary") or ""
+        text = f"{title}. {content[:200]}" if content else title
+        articles_text += f'\n{i + 1}. id="{art["id"]}": "{text[:350]}"\n'
+
+    return f"""You are a {sector_display} sector analyst. For each article, assess the impact on {sector_display} sector stocks on TWO horizons:
+
+**SHORT-TERM (1-7 days):** Immediate sector rotation, earnings season impact, regulatory announcements, sector ETF flows.
+
+**LONG-TERM (1-6 months):** Structural industry shifts, technological disruption, regulatory regime changes, supply chain evolution, competitive landscape changes.
+
+Articles:{articles_text}
+RULES — {sector_display.upper()} SECTOR STOCK IMPACT ONLY:
+- Focus on how this news affects the ENTIRE {sector_display} sector, not just individual companies.
+- Regulatory changes (new rules, antitrust, FDA approvals/rejections) often have outsized sector impact.
+- Industry-wide trends (AI adoption, interest rates for financials, drug pricing for healthcare) = high confidence.
+- Company-specific news that doesn't reflect sector trends = neutral with LOW confidence (0.1-0.2).
+- Short-term and long-term can diverge (e.g., sector sell-off creates long-term buying opportunity).
+
+Choose for each horizon: very_positive, positive, neutral, negative, very_negative
+Set confidence 0.0-1.0 for each.
+
+Respond with: {{"results": [{{"id": "...", "short_sentiment": "neutral", "short_confidence": 0.5, "long_sentiment": "neutral", "long_confidence": 0.5}}, ...]}}
+Include ALL {len(articles)} articles in the results array."""
+
+
 def etf_constituent_prompt(etf_name: str, etf_symbol: str) -> str:
     """Prompt to identify ETF constituents and their weights."""
     return f"""What are the top 10 holdings of the {etf_name} (ticker: {etf_symbol}) ETF?

@@ -39,17 +39,47 @@ async def ensure_schema():
         await session.execute(text(
             "ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS macro_sentiment_label VARCHAR(30)"
         ))
-        # Drop old category constraint and add new one
+        # Drop old category constraint and add new one (includes sector categories)
         await session.execute(text(
             "ALTER TABLE news_articles DROP CONSTRAINT IF EXISTS news_articles_category_check"
         ))
         await session.execute(text("""
             DO $$ BEGIN
                 ALTER TABLE news_articles ADD CONSTRAINT news_articles_category_check
-                    CHECK (category IN ('macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific'));
+                    CHECK (category IN (
+                        'macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific',
+                        'sector_technology', 'sector_financials', 'sector_healthcare',
+                        'sector_consumer_discretionary', 'sector_consumer_staples',
+                        'sector_communication', 'sector_energy', 'sector_industrials',
+                        'sector_materials', 'sector_utilities', 'sector_real_estate'
+                    ));
             EXCEPTION WHEN duplicate_object THEN NULL;
             END $$;
         """))
+        # Add sector column to instruments if not exists
+        await session.execute(text(
+            "ALTER TABLE instruments ADD COLUMN IF NOT EXISTS sector VARCHAR(50)"
+        ))
+        # Create sector_sentiment table if not exists
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS sector_sentiment (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                sector VARCHAR(50) NOT NULL,
+                term VARCHAR(10) NOT NULL DEFAULT 'short',
+                score NUMERIC(7, 6) NOT NULL,
+                label VARCHAR(10) NOT NULL,
+                article_count INT NOT NULL DEFAULT 0,
+                calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_sector_sentiment_sector_term
+            ON sector_sentiment(sector, term, calculated_at DESC)
+        """))
+        # Add sector_score column to grades if not exists
+        await session.execute(text(
+            "ALTER TABLE grades ADD COLUMN IF NOT EXISTS sector_score NUMERIC(7, 4) NOT NULL DEFAULT 0"
+        ))
         # Drop old region constraint on macro_sentiment and add new one
         await session.execute(text(
             "ALTER TABLE macro_sentiment DROP CONSTRAINT IF EXISTS macro_sentiment_region_check"
@@ -311,5 +341,24 @@ async def cleanup_old_asset_news() -> int:
         total_deleted = await _delete_articles(session, old_ids)
         if total_deleted:
             logger.info("Cleaned up %d asset articles older than 30 days", total_deleted)
+        await session.commit()
+    return total_deleted
+
+
+async def cleanup_old_sector_news() -> int:
+    """Remove sector news articles older than 90 days."""
+    total_deleted = 0
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT id FROM news_articles
+                WHERE category LIKE 'sector_%%'
+                AND published_at < NOW() - INTERVAL '90 days'
+            """)
+        )
+        old_ids = [str(r.id) for r in result.fetchall()]
+        total_deleted = await _delete_articles(session, old_ids)
+        if total_deleted:
+            logger.info("Cleaned up %d sector articles older than 90 days", total_deleted)
         await session.commit()
     return total_deleted

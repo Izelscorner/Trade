@@ -7,6 +7,7 @@ import {
   TrendingUp,
   Newspaper,
   Globe,
+  Building2,
   ShieldCheck,
   Zap,
   AlertTriangle,
@@ -268,6 +269,10 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
   const macroConf = grade.details?.macro?.confidence;
   const macroArticles = grade.details?.macro?.articles;
   const macroDecay = grade.details?.macro?.decay_half_life_h;
+  const sectorConf = grade.details?.sector?.confidence;
+  const sectorArticles = grade.details?.sector?.articles;
+  const sectorDecay = grade.details?.sector?.decay_half_life_h;
+  const sectorName = grade.details?.sector?.sector;
   const techCompleteness = grade.details?.technical?.data_completeness;
   const atrFactor = grade.details?.technical?.atr_risk_factor;
   const groups = grade.details?.technical?.group_scores as
@@ -296,6 +301,7 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
 
   const sentDecayLabel = sentDecay ? `${sentDecay}h decay` : undefined;
   const macroDecayLabel = macroDecay ? `${macroDecay}h decay` : undefined;
+  const sectorDecayLabel = sectorDecay ? `${sectorDecay}h decay` : undefined;
 
   return (
     <div className="rounded-xl bg-surface-2/50 border border-border-subtle p-5 space-y-4">
@@ -343,6 +349,18 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           extraInfo={sentDecayLabel}
           consensusAdj={sentConsensus}
         />
+        {grade.sector_score !== undefined && (
+          <ScoreBar
+            label={sectorName ? `Sector (${sectorName})` : "Sector"}
+            score={grade.sector_score}
+            icon={Building2}
+            confidence={sectorConf}
+            articles={
+              typeof sectorArticles === "number" ? sectorArticles : undefined
+            }
+            extraInfo={sectorDecayLabel}
+          />
+        )}
         <ScoreBar
           label="Macro"
           score={grade.macro_score}
@@ -361,12 +379,12 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           <span className="text-[10px] text-text-muted flex items-center gap-1">
             <Zap size={9} /> Effective weights:
           </span>
-          {(["technical", "sentiment", "macro"] as const).map((k) => (
+          {(["technical", "sentiment", "sector", "macro"] as const).map((k) => (
             <span
               key={k}
               className="text-[10px] font-mono text-text-secondary bg-surface-3 px-1.5 py-0.5 rounded"
             >
-              {k.slice(0, 4)} {((effectiveWeights[k] ?? 0) * 100).toFixed(0)}%
+              {k.slice(0, 4)} {((effectiveWeights[k as keyof typeof effectiveWeights] ?? 0) * 100).toFixed(0)}%
             </span>
           ))}
           {techCompleteness !== undefined && (

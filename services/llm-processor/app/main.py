@@ -21,6 +21,8 @@ from .processor import (
     get_instruments,
     process_batch,
     update_macro_sentiment,
+    update_sector_sentiment,
+    assign_sectors,
     cleanup_priority,
     build_name_lookup,
     populate_etf_constituents,
@@ -88,6 +90,45 @@ async def ensure_schema():
             SET macro_sentiment_label = 'neutral'
             WHERE is_macro = true AND ollama_processed = true AND macro_sentiment_label IS NULL
         """))
+        # Sector support
+        await session.execute(text(
+            "ALTER TABLE instruments ADD COLUMN IF NOT EXISTS sector VARCHAR(50)"
+        ))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS sector_sentiment (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                sector VARCHAR(50) NOT NULL,
+                term VARCHAR(10) NOT NULL DEFAULT 'short',
+                score NUMERIC(7, 6) NOT NULL,
+                label VARCHAR(10) NOT NULL,
+                article_count INT NOT NULL DEFAULT 0,
+                calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_sector_sentiment_sector_term
+            ON sector_sentiment(sector, term, calculated_at DESC)
+        """))
+        await session.execute(text(
+            "ALTER TABLE grades ADD COLUMN IF NOT EXISTS sector_score NUMERIC(7, 4) NOT NULL DEFAULT 0"
+        ))
+        # Expand category constraint for sector news
+        await session.execute(text(
+            "ALTER TABLE news_articles DROP CONSTRAINT IF EXISTS news_articles_category_check"
+        ))
+        await session.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE news_articles ADD CONSTRAINT news_articles_category_check
+                    CHECK (category IN (
+                        'macro_markets', 'macro_politics', 'macro_conflict', 'asset_specific',
+                        'sector_technology', 'sector_financials', 'sector_healthcare',
+                        'sector_consumer_discretionary', 'sector_consumer_staples',
+                        'sector_communication', 'sector_energy', 'sector_industrials',
+                        'sector_materials', 'sector_utilities', 'sector_real_estate'
+                    ));
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$;
+        """))
         await session.commit()
     logger.info("Schema check complete")
 
@@ -102,6 +143,18 @@ async def macro_sentiment_loop() -> None:
         except Exception:
             logger.exception("Error updating macro sentiment")
         await asyncio.sleep(30)
+
+
+async def sector_sentiment_loop() -> None:
+    """Independent loop that recalculates sector sentiment every 60 seconds."""
+    await asyncio.sleep(20)
+    logger.info("Sector sentiment loop started (60s interval)")
+    while True:
+        try:
+            await update_sector_sentiment()
+        except Exception:
+            logger.exception("Error updating sector sentiment")
+        await asyncio.sleep(60)
 
 
 async def process_loop() -> None:
@@ -130,6 +183,9 @@ async def process_loop() -> None:
     if etf_instruments:
         await populate_etf_constituents(etf_instruments)
 
+    # Assign GICS sectors to instruments that don't have one
+    await assign_sectors(instruments)
+
     # Append constituents to valid_symbols_str so the LLM is allowed to tag them
     from .processor import _ETF_CONSTITUENTS
     all_syms = set(valid_symbols)
@@ -154,6 +210,9 @@ async def process_loop() -> None:
                 etf_instruments = [i for i in instruments if i["category"] == "etf"]
                 if etf_instruments:
                     await populate_etf_constituents(etf_instruments)
+
+                # Assign sectors for any new instruments
+                await assign_sectors(instruments)
 
                 # Append constituents again after refresh
                 all_syms = set(valid_symbols)
@@ -199,10 +258,12 @@ async def lifespan(app: FastAPI):
     logger.info("LLM Processor Service starting...")
     process_task = asyncio.create_task(process_loop())
     macro_task = asyncio.create_task(macro_sentiment_loop())
+    sector_task = asyncio.create_task(sector_sentiment_loop())
     yield
     process_task.cancel()
     macro_task.cancel()
-    for t in (process_task, macro_task):
+    sector_task.cancel()
+    for t in (process_task, macro_task, sector_task):
         try:
             await t
         except asyncio.CancelledError:
