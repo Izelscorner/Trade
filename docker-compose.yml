@@ -74,7 +74,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - NIM_BASE_URL=https://integrate.api.nvidia.com/v1
-      - NIM_MODEL=qwen/qwen3.5-122b-a10b
+      - NIM_MODEL=${NIM_MODEL}
       - NIM_API_KEY=${NIM_API_KEY}
     depends_on:
       postgres:
@@ -185,7 +185,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       NIM_BASE_URL: https://integrate.api.nvidia.com/v1
-      NIM_MODEL: qwen/qwen3.5-122b-a10b
+      NIM_MODEL: ${NIM_MODEL}
       NIM_API_KEY: ${NIM_API_KEY}
     depends_on:
       postgres:

@@ -18,6 +18,8 @@ from .db import async_session
 from .nim_client import check_health, close_client, _call_with_retry
 from .processor import (
     get_unprocessed_articles,
+    get_unprocessed_queue_depth,
+    get_adaptive_batch_size,
     get_instruments,
     process_batch,
     update_macro_sentiment,
@@ -222,10 +224,14 @@ async def process_loop() -> None:
 
                 logger.info("Refreshed instruments: %s", valid_symbols_str)
 
-            articles = await get_unprocessed_articles()
+            # Fetch batch of unprocessed articles
+            queue_depth = await get_unprocessed_queue_depth()
+            batch_size = get_adaptive_batch_size(queue_depth)
+            articles = await get_unprocessed_articles(limit=batch_size)
 
             if articles:
-                logger.info("Batch-processing %d articles...", len(articles))
+                logger.info("Processing %d articles (queue=%d) — 15 concurrent small-batch calls...",
+                            len(articles), queue_depth)
                 try:
                     await process_batch(
                         articles,
@@ -234,18 +240,12 @@ async def process_loop() -> None:
                     )
                 except Exception:
                     logger.exception("Error in process_batch")
-                    # Check if API is still healthy
                     if not await check_health():
                         logger.warning("NIM API not healthy after batch error, backing off 30s...")
                         await asyncio.sleep(30)
                         await wait_for_nim(max_retries=12, delay=10)
 
                 await cleanup_priority()
-
-                # If we got a full batch, continue immediately
-                if len(articles) >= 20:
-                    await asyncio.sleep(1)
-                    continue
 
         except Exception:
             logger.exception("Error in processing loop")

@@ -314,7 +314,7 @@ function InstrumentRow({
 
   return (
     <div
-      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
+      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px_40px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
       style={{ animationDelay: `${index * 30}ms` }}
     >
       <button

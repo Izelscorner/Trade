@@ -91,7 +91,7 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 ### 3. LLM Processor Service (Python)
 
 - **Purpose:** Unified AI pipeline. Polls the database every 3 seconds (`PROCESS_INTERVAL=3`) for unprocessed articles and runs them through the Qwen 3.5 122B model via the NVIDIA API for classification and context-aware sentiment analysis.
-- **Processing Pipeline (per batch of up to 30 articles):**
+- **Processing Pipeline (per batch of up to 30-60 articles, adaptive):**
   1. **Pre-filter** — `is_low_quality_article()` deterministically removes articles with titles <15 chars, combined text <40 chars, title=summary aggregator filler, or SEO patterns. Saves API calls.
   2. **Batch Classification + Instrument Tagging** (12 articles per API call) — Returns `{type: "news"|"spam", instruments: ["AAPL", ...], is_macro: true|false}`. Spam/non-finance/foreign-domestic-politics articles are deleted.
   3. **Deterministic Post-Processing** — Regex-based rules correct LLM errors:
@@ -110,7 +110,7 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 - **ETF Constituent Tracking:** On startup, uses LLM to identify top holdings of each ETF instrument with percentage weights. Stored in `etf_constituents` table. Hardcoded fallback for IITU. News about constituents auto-propagates to parent ETF with weight-based relevance.
 - **Sentiment Labels:** `very_positive`, `positive`, `neutral`, `negative`, `very_negative`.
 - **Sentiment-to-Probability Map:** `very_positive` → {pos: 0.90, neg: 0.02, neu: 0.08}, `positive` → {0.70, 0.05, 0.25}, `neutral` → {0.15, 0.15, 0.70}, `negative` → {0.05, 0.70, 0.25}, `very_negative` → {0.02, 0.90, 0.08}.
-- **API Call & Rate Limiting:** NVIDIA Hosted API `qwen/qwen3.5-122b-a10b`, temperature 0.0 (deterministic). `asyncio.Lock` enforcing 2.0-second minimum delay between requests (`RATE_LIMIT_DELAY=2.0`). Concurrency limit 1 (`CONCURRENCY_LIMIT=1`). Token budgets: 100/article classify, 70/article sentiment, 80/article macro, +150 overhead. `INTER_CHUNK_DELAY=1.0s` between sub-batch chunks.
+- **API Call & Rate Limiting:** NVIDIA Hosted API `qwen/qwen3.5-122b-a10b`, temperature 0.0 (deterministic). Token bucket rate limiter allowing bursts while capping at 40 requests/minute (`NIM_RATE_LIMIT_RPM=40`). Concurrency limit 3 (`NIM_CONCURRENCY=3`) for parallel in-flight requests. Adaptive backoff with jitter on 429 errors — consecutive 429s drain bucket tokens to self-correct. Token budgets: 100/article classify, 70/article sentiment, 80/article macro, +150 overhead. `INTER_CHUNK_DELAY=0.5s` between sub-batch chunks.
 - **Category-Specific Roles:**
   - Stock: "Wall Street equity analyst covering {name}. Day-trader + fundamental investor."
   - ETF: "Wall Street ETF analyst covering {name}. Constituent-level impacts propagate with weight-proportional magnitude."
@@ -428,6 +428,32 @@ New instruments can be added dynamically via `POST /api/v1/instruments`.
 - **FastAPI** for all Python HTTP services — async, fast, auto-docs.
 - **pandas/numpy** for technical analysis indicator calculations.
 - **rapidfuzz** for fuzzy deduplication in news fetcher — C++ backend for performance.
+
+## Scaling Design (15 → Hundreds of Instruments)
+
+The system uses several adaptive mechanisms to scale from 15 to hundreds of instruments:
+
+### Rate Limit Management
+- **Token bucket rate limiter** replaces fixed-delay: allows short bursts (3 concurrent) while capping at 40 req/min. Self-corrects on 429 errors by draining bucket tokens.
+- **Adaptive batch sizing:** Queue depth >100 articles → batch size scales from 30 to 60. Sub-batch sizes (classify/sentiment) scale up 50% when headroom exists.
+- **Consecutive 429 detection:** 3+ consecutive 429s trigger automatic throttling (bucket drain + smaller batches).
+
+### Intelligent Processing Distribution
+- **Concurrent instrument bucket processing:** Up to 3 instrument sentiment buckets processed in parallel (`INSTRUMENT_BUCKET_CONCURRENCY=3`), each still rate-limited by token bucket.
+- **Confidence-based skip logic:** Instruments with sentiment confidence ≥85% AND ≥15 non-neutral articles skip LLM sentiment processing — signal is already strong enough. Articles assigned neutral/low-confidence to avoid stale data.
+- **Priority-based processing:** `processing_priority` table ensures user-clicked instruments are processed first across all services.
+
+### Dynamic News Fetching
+- **Dynamic semaphore:** Scales from 5 to 15 concurrent HTTP fetches based on instrument count (`len(instruments) // 10 + 5`, capped at 15).
+- **Priority-tiered fetch depth:**
+  - `high` (user-prioritized, zero articles): Yahoo + Google + extra Google name query (3 sources)
+  - `normal` (moderate coverage): Yahoo + Google (2 sources, default)
+  - `low` (30+ recent articles): Google only (1 source, diminishing returns)
+- **Article count classification:** Per-cycle article count query determines fetch priority per instrument.
+
+### Grading Efficiency
+- **Stable grade skip:** During full regrade cycles, instruments whose last 3 grades are within ±0.005 score are skipped. Still regraded on incremental data changes (new sentiment, prices, etc.).
+- **Priority bypass:** User-prioritized instruments are never skipped during full regrades.
 
 ## Improvement Roadmap
 

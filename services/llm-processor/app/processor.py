@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from .db import async_session
-from .nim_client import generate_json, generate_json_array
+from .nim_client import generate_json, generate_json_array, get_api_metrics
 from .prompts import (
     CLASSIFY_SYSTEM,
     SENTIMENT_SYSTEM,
@@ -38,24 +38,35 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
-PROCESS_INTERVAL = 3  # seconds between processing cycles
-BATCH_SIZE = 30
+PROCESS_INTERVAL = 5   # seconds between processing waves
+BATCH_SIZE = 90        # articles fetched per wave from DB
+BATCH_SIZE_MAX = 150   # max batch size when queue is deep
 
-# Sub-batch sizes for LLM calls — larger batches = fewer API calls.
-# Qwen 122B handles these sizes well with structured JSON output.
-CLASSIFY_BATCH = 12   # articles per classify API call (was 8 — 33% fewer calls)
-SENTIMENT_BATCH = 8   # articles per sentiment API call per instrument (was 6 — 25% fewer calls)
-MACRO_BATCH = 5       # macro articles per macro-sentiment API call (was 3 — 40% fewer calls)
-SECTOR_BATCH = 6      # sector articles per sector-sentiment API call
+# Articles per API call — larger batches = fewer API calls = faster throughput.
+CLASSIFY_BATCH = 20    # articles per classify API call
+SENTIMENT_BATCH = 20   # articles per sentiment API call per instrument
+MACRO_BATCH = 20       # macro articles per macro-sentiment API call
+SECTOR_BATCH = 20      # sector articles per sector-sentiment API call
 
 # Token budgets per article (generous to avoid truncation → fallback burst)
-CLASSIFY_TOKENS_PER_ARTICLE = 100   # {"id","type","instruments","is_macro"} × N — trimmed, actual ~60 tokens each
-SENTIMENT_TOKENS_PER_ARTICLE = 70   # dual-horizon {"id","short_sentiment","short_confidence","long_sentiment","long_confidence"} — actual ~45 each
-MACRO_TOKENS_PER_ARTICLE = 80       # dual-horizon macro — same structure as sentiment
+CLASSIFY_TOKENS_PER_ARTICLE = 100   # {"id","type","instruments","is_macro"} × N
+SENTIMENT_TOKENS_PER_ARTICLE = 70   # dual-horizon sentiment
+MACRO_TOKENS_PER_ARTICLE = 80       # dual-horizon macro
 TOKENS_OVERHEAD = 150               # wrapper object + whitespace slack
 
-# Small sleep between consecutive sub-batch chunks to smooth rate-limit pressure
-INTER_CHUNK_DELAY = 1.0  # seconds
+# Weighted concurrency distribution for parallel processing.
+# 20 total concurrent API calls: 14 asset + 4 macro + 2 sector.
+# All types run simultaneously in every wave.
+TOTAL_CONCURRENCY = 20
+ASSET_CONCURRENCY = 14     # concurrent asset sentiment API calls
+MACRO_CONCURRENCY = 4      # concurrent macro sentiment API calls
+SECTOR_CONCURRENCY = 2     # concurrent sector sentiment API calls
+CLASSIFY_CONCURRENCY = 10  # concurrent classify API calls (phase 1)
+
+# Confidence-based skip thresholds — instruments with sufficient sentiment
+# confidence can skip LLM sentiment processing to save API calls.
+CONFIDENCE_SKIP_THRESHOLD = 0.85  # skip if confidence >= this (short-term)
+CONFIDENCE_SKIP_ARTICLE_MIN = 15  # minimum non-neutral articles before skipping
 
 # Map sentiment labels to probability distributions
 SENTIMENT_PROBABILITIES = {
@@ -179,6 +190,86 @@ _COMMODITY_PRICE_KEYWORDS = {
 
 # ETF constituent cache: etf_symbol -> {constituent_symbol: weight_percent}
 _ETF_CONSTITUENTS: dict[str, dict[str, float]] = {}
+
+
+def get_adaptive_batch_size(queue_depth: int) -> int:
+    """Return batch size based on queue depth and API headroom.
+
+    When the queue is deep (many unprocessed articles), pull larger batches
+    to maximize throughput. When queue is shallow, use smaller batches for
+    lower latency.
+    """
+    metrics = get_api_metrics()
+
+    # If we're getting 429s, shrink batch size to reduce pressure
+    if metrics["consecutive_429s"] >= 2:
+        return max(10, BATCH_SIZE // 2)
+
+    # Scale batch size based on queue depth
+    if queue_depth > 100:
+        return BATCH_SIZE_MAX
+    elif queue_depth > 50:
+        return min(BATCH_SIZE_MAX, BATCH_SIZE + 15)
+    else:
+        return BATCH_SIZE
+
+
+def get_adaptive_sub_batch(base_size: int, queue_depth: int) -> int:
+    """Increase sub-batch size when queue is deep and API has headroom."""
+    metrics = get_api_metrics()
+
+    # Conservative if we're hitting rate limits
+    if metrics["consecutive_429s"] >= 1:
+        return base_size
+
+    # Increase sub-batch by 50% when queue is deep (fewer API calls needed)
+    if queue_depth > 50 and metrics["headroom_pct"] > 30:
+        return min(base_size + base_size // 2, base_size * 2)
+
+    return base_size
+
+
+async def get_instrument_sentiment_confidence(instrument_id: str) -> dict:
+    """Check current sentiment confidence for an instrument.
+
+    Returns confidence metrics used to decide whether to skip LLM processing.
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE s.label != 'neutral') as non_neutral
+                FROM sentiment_scores s
+                JOIN news_instrument_map m ON m.article_id = s.article_id
+                JOIN news_articles a ON a.id = m.article_id
+                WHERE m.instrument_id = :iid
+                AND a.ollama_processed = true
+                AND a.published_at >= NOW() - INTERVAL '2 days'
+            """),
+            {"iid": instrument_id},
+        )
+        row = result.fetchone()
+        total = row.total if row else 0
+        non_neutral = row.non_neutral if row else 0
+
+        # Log confidence ramp: log(1+n) / log(1+N) where N=20
+        import math
+        confidence = min(1.0, math.log(1 + non_neutral) / math.log(1 + 20)) if non_neutral > 0 else 0.0
+
+        return {
+            "total": total,
+            "non_neutral": non_neutral,
+            "confidence": round(confidence, 4),
+        }
+
+
+async def get_unprocessed_queue_depth() -> int:
+    """Get count of unprocessed articles for adaptive batch sizing."""
+    async with async_session() as session:
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM news_articles WHERE ollama_processed = false")
+        )
+        return result.scalar() or 0
 
 
 async def get_instruments() -> list[dict]:
@@ -362,42 +453,18 @@ def postprocess_classification(
 async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
     """Get articles that haven't been processed yet.
 
-    Priority ordering:
-      0 - User-prioritized instruments (clicked in frontend)
-      1 - Macro articles (until 10+ macro articles are processed, then same as asset)
-      2 - Asset-specific articles
+    Fetches a proportional mix matching concurrency weights:
+      asset : macro : sector = 10 : 3 : 2  (of the total limit)
+    User-prioritized articles always come first regardless of type.
+    If any category has fewer articles than its quota, the remainder
+    is redistributed to the other categories.
     """
-    async with async_session() as session:
-        macro_count_res = await session.execute(
-            text("SELECT count(*) FROM news_articles WHERE is_macro = true AND ollama_processed = true")
-        )
-        macro_processed = macro_count_res.scalar() or 0
-        macro_priority = 1 if macro_processed >= 10 else 0
+    # Proportional quotas (14:4:2 = 70%:20%:10%)
+    asset_quota = int(limit * 14 / 20)
+    macro_quota = int(limit * 4 / 20)
+    sector_quota = limit - asset_quota - macro_quota  # remainder gets sector
 
-        result = await session.execute(
-            text("""
-                SELECT a.id, a.title, a.summary, a.content, a.category
-                FROM news_articles a
-                LEFT JOIN LATERAL (
-                    SELECT pp.requested_at
-                    FROM news_instrument_map nim
-                    JOIN processing_priority pp ON pp.instrument_id = nim.instrument_id
-                    WHERE nim.article_id = a.id
-                    ORDER BY pp.requested_at DESC
-                    LIMIT 1
-                ) pri ON true
-                WHERE a.ollama_processed = false
-                ORDER BY
-                    CASE WHEN pri.requested_at IS NOT NULL THEN 0
-                         WHEN a.category LIKE 'macro_%%' THEN :macro_pri
-                         ELSE 2
-                    END,
-                    COALESCE(pri.requested_at, '1970-01-01'::timestamptz) DESC,
-                    a.published_at DESC
-                LIMIT :limit
-            """),
-            {"limit": limit, "macro_pri": macro_priority},
-        )
+    def _parse_rows(result) -> list[dict]:
         return [
             {
                 "id": str(r.id),
@@ -408,6 +475,116 @@ async def get_unprocessed_articles(limit: int = BATCH_SIZE) -> list[dict]:
             }
             for r in result.fetchall()
         ]
+
+    _priority_join = """
+        LEFT JOIN LATERAL (
+            SELECT pp.requested_at
+            FROM news_instrument_map nim
+            JOIN processing_priority pp ON pp.instrument_id = nim.instrument_id
+            WHERE nim.article_id = a.id
+            ORDER BY pp.requested_at DESC
+            LIMIT 1
+        ) pri ON true
+    """
+    _order_by = """
+        ORDER BY
+            CASE WHEN pri.requested_at IS NOT NULL THEN 0 ELSE 1 END,
+            COALESCE(pri.requested_at, '1970-01-01'::timestamptz) DESC,
+            a.published_at DESC
+    """
+
+    async with async_session() as session:
+        # Fetch each category separately with its quota
+        asset_res = await session.execute(
+            text(f"""
+                SELECT a.id, a.title, a.summary, a.content, a.category
+                FROM news_articles a
+                {_priority_join}
+                WHERE a.ollama_processed = false
+                  AND a.category NOT LIKE 'macro_%%'
+                  AND a.category NOT LIKE 'sector_%%'
+                {_order_by}
+                LIMIT :lim
+            """),
+            {"lim": asset_quota},
+        )
+        asset_articles = _parse_rows(asset_res)
+
+        macro_res = await session.execute(
+            text(f"""
+                SELECT a.id, a.title, a.summary, a.content, a.category
+                FROM news_articles a
+                {_priority_join}
+                WHERE a.ollama_processed = false
+                  AND a.category LIKE 'macro_%%'
+                {_order_by}
+                LIMIT :lim
+            """),
+            {"lim": macro_quota},
+        )
+        macro_articles = _parse_rows(macro_res)
+
+        sector_res = await session.execute(
+            text(f"""
+                SELECT a.id, a.title, a.summary, a.content, a.category
+                FROM news_articles a
+                {_priority_join}
+                WHERE a.ollama_processed = false
+                  AND a.category LIKE 'sector_%%'
+                {_order_by}
+                LIMIT :lim
+            """),
+            {"lim": sector_quota},
+        )
+        sector_articles = _parse_rows(sector_res)
+
+        # Redistribute unused quota to other categories
+        total = len(asset_articles) + len(macro_articles) + len(sector_articles)
+        if total < limit:
+            remaining = limit - total
+            seen_ids = {a["id"] for a in asset_articles + macro_articles + sector_articles}
+            extra_res = await session.execute(
+                text(f"""
+                    SELECT a.id, a.title, a.summary, a.content, a.category
+                    FROM news_articles a
+                    {_priority_join}
+                    WHERE a.ollama_processed = false
+                    {_order_by}
+                    LIMIT :lim
+                """),
+                {"lim": remaining + len(seen_ids)},
+            )
+            for row in _parse_rows(extra_res):
+                if row["id"] not in seen_ids and len(asset_articles) + len(macro_articles) + len(sector_articles) < limit:
+                    seen_ids.add(row["id"])
+                    if row["category"].startswith("macro_"):
+                        macro_articles.append(row)
+                    elif row["category"].startswith("sector_"):
+                        sector_articles.append(row)
+                    else:
+                        asset_articles.append(row)
+
+        # Interleave: asset, asset, asset, macro, asset, sector, ... (10:3:2 pattern)
+        result_list: list[dict] = []
+        ai, mi, si = 0, 0, 0
+        while ai < len(asset_articles) or mi < len(macro_articles) or si < len(sector_articles):
+            # 14 asset
+            for _ in range(14):
+                if ai < len(asset_articles):
+                    result_list.append(asset_articles[ai])
+                    ai += 1
+            # 4 macro
+            for _ in range(4):
+                if mi < len(macro_articles):
+                    result_list.append(macro_articles[mi])
+                    mi += 1
+            # 2 sector
+            for _ in range(2):
+                if si < len(sector_articles):
+                    result_list.append(sector_articles[si])
+                    si += 1
+
+        return result_list
 
 
 # ---------------------------------------------------------------------------
@@ -593,36 +770,47 @@ async def process_batch(
     if not articles:
         return
 
-    # --- Step 1: Batch classify ---
+    # --- Step 1: Batch classify (parallel chunks with concurrency limit) ---
     classify_results: dict[str, dict] = {}  # article_id -> classification
-    for chunk_start in range(0, len(articles), CLASSIFY_BATCH):
-        if chunk_start > 0:
-            await asyncio.sleep(INTER_CHUNK_DELAY)
-        chunk = articles[chunk_start:chunk_start + CLASSIFY_BATCH]
-        prompt = batch_classify_prompt(chunk, symbol_mapping, valid_symbols_str)
-        max_tok = CLASSIFY_TOKENS_PER_ARTICLE * len(chunk) + TOKENS_OVERHEAD
-        raw_results = await generate_json_array(
-            prompt, system=CLASSIFY_SYSTEM, max_tokens=max_tok
-        )
-        if raw_results is None:
-            # Fallback: try one-at-a-time for this chunk
-            logger.warning("Batch classify failed for chunk of %d, falling back to individual calls", len(chunk))
-            for art in chunk:
-                result = await _classify_single(art, symbol_mapping, valid_symbols_str)
-                if result:
-                    classify_results[art["id"]] = result
-        else:
-            for item in raw_results:
-                if isinstance(item, dict) and "id" in item:
-                    classify_results[item["id"]] = item
-            # Articles missing from response: retry individually
-            found_ids = {item["id"] for item in raw_results if isinstance(item, dict) and "id" in item}
-            for art in chunk:
-                if art["id"] not in found_ids:
-                    logger.warning("Article %s missing from batch classify response, retrying individually", art["id"])
+    classify_sem = asyncio.Semaphore(CLASSIFY_CONCURRENCY)
+
+    async def _classify_chunk(chunk: list[dict]) -> list[tuple[str, dict]]:
+        """Classify a chunk of articles, return list of (article_id, classification)."""
+        async with classify_sem:
+            results = []
+            prompt = batch_classify_prompt(chunk, symbol_mapping, valid_symbols_str)
+            max_tok = CLASSIFY_TOKENS_PER_ARTICLE * len(chunk) + TOKENS_OVERHEAD
+            raw_results = await generate_json_array(
+                prompt, system=CLASSIFY_SYSTEM, max_tokens=max_tok
+            )
+            if raw_results is None:
+                logger.warning("Batch classify failed for chunk of %d, falling back to individual calls", len(chunk))
+                for art in chunk:
                     result = await _classify_single(art, symbol_mapping, valid_symbols_str)
                     if result:
-                        classify_results[art["id"]] = result
+                        results.append((art["id"], result))
+            else:
+                for item in raw_results:
+                    if isinstance(item, dict) and "id" in item:
+                        results.append((item["id"], item))
+                found_ids = {r[0] for r in results}
+                for art in chunk:
+                    if art["id"] not in found_ids:
+                        logger.warning("Article %s missing from batch classify response, retrying individually", art["id"])
+                        result = await _classify_single(art, symbol_mapping, valid_symbols_str)
+                        if result:
+                            results.append((art["id"], result))
+            return results
+
+    classify_chunks = [
+        articles[i:i + CLASSIFY_BATCH]
+        for i in range(0, len(articles), CLASSIFY_BATCH)
+    ]
+    logger.info("Classify: dispatching %d parallel chunks (%d articles)", len(classify_chunks), len(articles))
+    chunk_results = await asyncio.gather(*[_classify_chunk(c) for c in classify_chunks])
+    for result_list in chunk_results:
+        for art_id, clf in result_list:
+            classify_results[art_id] = clf
 
     # --- Step 2: Post-process classifications ---
     article_map = {a["id"]: a for a in articles}
@@ -746,27 +934,75 @@ async def process_batch(
 
     sentiment_stored: dict[str, bool] = {art["id"]: False for art in keep}
 
-    for symbol, bucket in instrument_buckets.items():
-        inst = instruments_by_symbol.get(symbol, {})
+    # Adaptive sub-batch size based on queue depth
+    queue_depth = len(articles)
+    effective_sentiment_batch = get_adaptive_sub_batch(SENTIMENT_BATCH, queue_depth)
 
-        needs_llm = bucket
+    # --- Confidence-based skip logic ---
+    # For instruments with sufficiently high sentiment confidence, skip LLM
+    # sentiment and assign neutral — the signal is already strong enough.
+    skipped_instruments: set[str] = set()
+    for symbol in list(instrument_buckets.keys()):
+        inst = instruments_by_symbol.get(symbol)
+        if not inst:
+            continue
+        iid = instrument_ids.get(symbol)
+        if not iid:
+            continue
+        conf = await get_instrument_sentiment_confidence(iid)
+        if (conf["confidence"] >= CONFIDENCE_SKIP_THRESHOLD
+                and conf["non_neutral"] >= CONFIDENCE_SKIP_ARTICLE_MIN):
+            # High confidence — skip LLM, assign neutral with low confidence
+            skipped_instruments.add(symbol)
+            for art in instrument_buckets[symbol]:
+                await store_sentiment(art["id"], "neutral", 0.3, "neutral", 0.3)
+                sentiment_stored[art["id"]] = True
+            logger.info("Skipping sentiment for %s (confidence=%.2f, %d non-neutral articles)",
+                        symbol, conf["confidence"], conf["non_neutral"])
 
-        role = get_role(inst) if inst else f"You predict {symbol} price direction."
-        asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
+    # Remove skipped instruments from buckets
+    for sym in skipped_instruments:
+        del instrument_buckets[sym]
 
-        for chunk_start in range(0, len(needs_llm), SENTIMENT_BATCH):
-            if chunk_start > 0:
-                await asyncio.sleep(INTER_CHUNK_DELAY)
-            chunk = needs_llm[chunk_start:chunk_start + SENTIMENT_BATCH]
+    # --- Concurrent processing with weighted distribution ---
+    # Asset/macro/sector sentiment all run in parallel with dedicated concurrency limits.
+    asset_sem = asyncio.Semaphore(ASSET_CONCURRENCY)
+    macro_sem = asyncio.Semaphore(MACRO_CONCURRENCY)
+    sector_sem = asyncio.Semaphore(SECTOR_CONCURRENCY)
+
+    async def _process_sentiment_chunk(chunk: list[dict], symbol: str, role: str, asset_desc: str) -> None:
+        """Process a single sentiment chunk for an instrument (rate-limited by asset_sem)."""
+        async with asset_sem:
             prompt = batch_sentiment_prompt(chunk, role, asset_desc)
             max_tok = SENTIMENT_TOKENS_PER_ARTICLE * len(chunk) + TOKENS_OVERHEAD
             raw_results = await generate_json_array(
                 prompt, system=SENTIMENT_SYSTEM, max_tokens=max_tok
             )
-            if raw_results is None:
-                # Fallback: individual calls
-                logger.warning("Batch sentiment failed for %s chunk of %d", symbol, len(chunk))
-                for art in chunk:
+        if raw_results is None:
+            logger.warning("Batch sentiment failed for %s chunk of %d", symbol, len(chunk))
+            for art in chunk:
+                result = await _sentiment_single(art, role, asset_desc)
+                if result:
+                    short_label = result.get("short_sentiment", result.get("sentiment", "neutral"))
+                    short_conf = float(result.get("short_confidence", result.get("confidence", 0.5)))
+                    long_label = result.get("long_sentiment", "neutral")
+                    long_conf = float(result.get("long_confidence", 0.5))
+                    await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
+                    sentiment_stored[art["id"]] = True
+        else:
+            result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
+            for art in chunk:
+                item = result_map.get(art["id"])
+                if item:
+                    short_label = item.get("short_sentiment", item.get("sentiment", "neutral"))
+                    short_conf = float(item.get("short_confidence", item.get("confidence", 0.5)))
+                    long_label = item.get("long_sentiment", "neutral")
+                    long_conf = float(item.get("long_confidence", 0.5))
+                    await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
+                    logger.info("Sentiment (batch) %s on '%s': short=%s(%.2f) long=%s(%.2f)",
+                                symbol, art["title"][:40], short_label, short_conf, long_label, long_conf)
+                    sentiment_stored[art["id"]] = True
+                else:
                     result = await _sentiment_single(art, role, asset_desc)
                     if result:
                         short_label = result.get("short_sentiment", result.get("sentiment", "neutral"))
@@ -775,42 +1011,80 @@ async def process_batch(
                         long_conf = float(result.get("long_confidence", 0.5))
                         await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
                         sentiment_stored[art["id"]] = True
-            else:
-                result_map = {item["id"]: item for item in raw_results if isinstance(item, dict) and "id" in item}
-                for art in chunk:
-                    item = result_map.get(art["id"])
-                    if item:
-                        # Extract dual-horizon sentiment
-                        short_label = item.get("short_sentiment", item.get("sentiment", "neutral"))
-                        short_conf = float(item.get("short_confidence", item.get("confidence", 0.5)))
-                        long_label = item.get("long_sentiment", "neutral")
-                        long_conf = float(item.get("long_confidence", 0.5))
-                        await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
-                        logger.info("Sentiment (batch) %s on '%s': short=%s(%.2f) long=%s(%.2f)",
-                                    symbol, art["title"][:40], short_label, short_conf, long_label, long_conf)
-                        sentiment_stored[art["id"]] = True
-                    else:
-                        # Missing from batch response — fallback
-                        result = await _sentiment_single(art, role, asset_desc)
-                        if result:
-                            short_label = result.get("short_sentiment", result.get("sentiment", "neutral"))
-                            short_conf = float(result.get("short_confidence", result.get("confidence", 0.5)))
-                            long_label = result.get("long_sentiment", "neutral")
-                            long_conf = float(result.get("long_confidence", 0.5))
-                            await store_sentiment(art["id"], short_label, short_conf, long_label, long_conf)
-                            sentiment_stored[art["id"]] = True
 
-    # --- Step 5: Batch DUAL-HORIZON macro sentiment ---
-    if macro_articles:
-        for chunk_start in range(0, len(macro_articles), MACRO_BATCH):
-            chunk = macro_articles[chunk_start:chunk_start + MACRO_BATCH]
-            await _run_batch_macro_sentiment(chunk, sentiment_stored)
+    async def process_instrument_bucket(symbol: str, bucket: list[dict]) -> None:
+        inst = instruments_by_symbol.get(symbol, {})
+        needs_llm = bucket
 
-    # --- Step 5b: Batch DUAL-HORIZON sector sentiment ---
-    for sector, s_articles in sector_articles.items():
-        for chunk_start in range(0, len(s_articles), SECTOR_BATCH):
-            chunk = s_articles[chunk_start:chunk_start + SECTOR_BATCH]
-            await _run_batch_sector_sentiment(chunk, sector, sentiment_stored)
+        role = get_role(inst) if inst else f"You predict {symbol} price direction."
+        asset_desc = get_asset_description(inst) if inst else f"{symbol} price"
+
+        # Dispatch all sentiment chunks for this instrument in parallel
+        # Each chunk acquires its own slot from asset_sem (10 concurrent max)
+        chunks = [
+            needs_llm[i:i + effective_sentiment_batch]
+            for i in range(0, len(needs_llm), effective_sentiment_batch)
+        ]
+        if len(chunks) > 1:
+            logger.info("Sentiment %s: dispatching %d parallel chunks (%d articles)", symbol, len(chunks), len(needs_llm))
+        await asyncio.gather(*[
+            _process_sentiment_chunk(c, symbol, role, asset_desc)
+            for c in chunks
+        ])
+
+    # --- Parallel sentiment processing (asset + macro + sector simultaneously) ---
+    # Weighted concurrency: 10 asset / 3 macro / 2 sector = 15 total concurrent API calls.
+
+    async def _run_all_asset_sentiment():
+        if not instrument_buckets:
+            return
+        total_articles = sum(len(b) for b in instrument_buckets.values())
+        logger.info("Asset sentiment: dispatching %d instruments (%d articles, max %d concurrent)",
+                     len(instrument_buckets), total_articles, ASSET_CONCURRENCY)
+        await asyncio.gather(*[
+            process_instrument_bucket(symbol, bucket)
+            for symbol, bucket in instrument_buckets.items()
+        ])
+
+    async def _run_all_macro_sentiment():
+        if not macro_articles:
+            return
+        macro_chunks = [
+            macro_articles[i:i + MACRO_BATCH]
+            for i in range(0, len(macro_articles), MACRO_BATCH)
+        ]
+        logger.info("Macro sentiment: dispatching %d parallel chunks (%d articles, max %d concurrent)",
+                     len(macro_chunks), len(macro_articles), MACRO_CONCURRENCY)
+
+        async def _macro_chunk(chunk):
+            async with macro_sem:
+                await _run_batch_macro_sentiment(chunk, sentiment_stored)
+
+        await asyncio.gather(*[_macro_chunk(c) for c in macro_chunks])
+
+    async def _run_all_sector_sentiment():
+        sector_tasks = []
+        for sector, s_articles in sector_articles.items():
+            for i in range(0, len(s_articles), SECTOR_BATCH):
+                chunk = s_articles[i:i + SECTOR_BATCH]
+                sector_tasks.append((chunk, sector))
+        if not sector_tasks:
+            return
+        logger.info("Sector sentiment: dispatching %d parallel chunks (max %d concurrent)",
+                     len(sector_tasks), SECTOR_CONCURRENCY)
+
+        async def _sector_chunk(chunk, sector):
+            async with sector_sem:
+                await _run_batch_sector_sentiment(chunk, sector, sentiment_stored)
+
+        await asyncio.gather(*[_sector_chunk(c, s) for c, s in sector_tasks])
+
+    # Run all three sentiment types simultaneously
+    await asyncio.gather(
+        _run_all_asset_sentiment(),
+        _run_all_macro_sentiment(),
+        _run_all_sector_sentiment(),
+    )
 
     # --- Step 6: Mark processed ---
     for art in keep:

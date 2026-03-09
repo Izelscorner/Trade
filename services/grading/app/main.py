@@ -22,6 +22,12 @@ logger = logging.getLogger("grading")
 POLL_INTERVAL = 10  # Check for changes every 10 seconds
 FULL_REGRADE_INTERVAL = 60  # Full regrade every 60 seconds per spec
 
+# Stable grade skip: instruments whose grade hasn't moved by more than
+# this threshold in the last N regrades are skipped during full regrades
+# to save compute. They still regrade on incremental data changes.
+STABLE_GRADE_THRESHOLD = 0.005  # score change threshold (±0.005 on [-3,3])
+STABLE_GRADE_LOOKBACK = 3       # number of recent grades to check
+
 
 async def get_instruments() -> list[dict]:
     async with async_session() as session:
@@ -124,6 +130,34 @@ async def get_priority_instrument_id() -> str | None:
         return row.instrument_id if row else None
 
 
+async def is_grade_stable(instrument_id: str, term: str) -> bool:
+    """Check if an instrument's grade has been stable (not changing) recently.
+
+    Returns True if the last N grades have all been within STABLE_GRADE_THRESHOLD
+    of each other — meaning a full regrade would produce essentially the same result.
+    Used to skip redundant computation during full regrade cycles.
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT overall_score
+                FROM grades
+                WHERE instrument_id = :iid AND term = :term
+                ORDER BY graded_at DESC
+                LIMIT :lookback
+            """),
+            {"iid": instrument_id, "term": term, "lookback": STABLE_GRADE_LOOKBACK},
+        )
+        rows = result.fetchall()
+
+    if len(rows) < STABLE_GRADE_LOOKBACK:
+        return False  # Not enough history to judge stability
+
+    scores = [float(r.overall_score) for r in rows]
+    score_range = max(scores) - min(scores)
+    return score_range <= STABLE_GRADE_THRESHOLD
+
+
 async def grading_loop() -> None:
     """Main grading loop - detects changes and regrades affected instruments."""
     # Wait for other services to populate initial data
@@ -163,17 +197,33 @@ async def grading_loop() -> None:
             now = datetime.now(timezone.utc)
             time_since_full = (now - last_full_regrade).total_seconds()
 
-            # Periodic full regrade — all instruments concurrently
+            # Periodic full regrade — skip stable instruments to save compute
             if time_since_full >= FULL_REGRADE_INTERVAL:
                 instruments = await get_instruments()
-                await asyncio.gather(*[
-                    grade_and_store(inst, term)
-                    for inst in instruments
-                    for term in ("short", "long")
-                ])
+                priority_id = await get_priority_instrument_id()
+
+                # Check stability and build task list
+                tasks = []
+                skipped = 0
+                for inst in instruments:
+                    for term in ("short", "long"):
+                        # Never skip prioritized instruments
+                        if inst["id"] == priority_id:
+                            tasks.append(grade_and_store(inst, term))
+                            continue
+                        # Skip stable instruments during full regrade
+                        if await is_grade_stable(inst["id"], term):
+                            skipped += 1
+                            continue
+                        tasks.append(grade_and_store(inst, term))
+
+                if tasks:
+                    await asyncio.gather(*tasks)
                 last_full_regrade = now
                 last_check = now
-                logger.info("Full regrade complete")
+                total = len(instruments) * 2
+                logger.info("Full regrade complete: %d/%d graded, %d stable-skipped",
+                            total - skipped, total, skipped)
                 continue
 
             # Check for incremental changes
