@@ -133,3 +133,8 @@ US Dollar Index (DXY)	Stability / Slight Weakness	Sharp Spike (hurts US earnings
 0-Year Treasury Yield	3.5% - 4.25%	> 5% (pressures valuations)
 Global GDP Growth	~2.8% - 3.3%	Below 2% (Recession warning)
 Brent Crude Oil	$70 - $85	> $100 (Inflationary spike)
+
+
+- change asset specific fundemental data fetching from FMP to yahoo finance (P/E Ratio, ROE, D/E Ratio, PEG Ratio)
+- in macro get crude oil price from our database
+- 
