@@ -639,35 +639,67 @@ async def get_sector_score(sector: str | None, term: str = "short") -> tuple[flo
 
 
 # ---------------------------------------------------------------------------
-# Fundamentals score — piecewise-linear metric scoring
+# Fundamentals score — sector-relative piecewise-linear metric scoring
 # ---------------------------------------------------------------------------
-# Finance Expert: Institutional valuation standards.
-# P/E 15-22 = fair value (S&P 500 historical median ~16-18).
-# ROE 10-20% = solid profitability. >35% = exceptional (or leverage).
-# D/E 0-0.3 = conservative. >3.0 = high leverage risk.
-# PEG 0.5-1.0 = Peter Lynch "ideal" growth-at-reasonable-price.
+# Finance Expert: P/E and D/E norms vary dramatically by sector.
+# Tech/growth sectors tolerate P/E 25-40 as "fair"; utilities/energy 10-18.
+# Financials carry structurally high D/E (banks leverage deposits).
+# ROE and PEG are more universal across sectors.
+#
+# Data Scientist: Sector-relative thresholds reduce cross-sector scoring bias.
+# Thresholds derived from 10-year sector median P/E ranges (S&P 500).
 
-def _score_pe(pe: float | None) -> float:
-    """Score P/E ratio on [-3, 3]. Lower is better (to a point)."""
+# Sector P/E thresholds: (deep_value, attractive, fair_low, fair_high, expensive, very_expensive)
+_SECTOR_PE_THRESHOLDS: dict[str | None, tuple[float, float, float, float, float, float]] = {
+    "technology":            (10, 18, 25, 38, 55, 80),
+    "communication":         (10, 16, 22, 35, 50, 75),
+    "consumer_discretionary": (8, 15, 20, 35, 55, 80),
+    "healthcare":            (10, 16, 22, 35, 50, 70),
+    "financials":            (5,  8, 12, 18, 25, 40),
+    "industrials":           (8, 13, 18, 28, 40, 60),
+    "consumer_staples":      (8, 13, 18, 25, 35, 50),
+    "energy":                (5,  8, 12, 20, 30, 50),
+    "materials":             (6, 10, 15, 22, 35, 50),
+    "utilities":             (5,  8, 12, 18, 25, 40),
+    "real_estate":           (8, 14, 20, 30, 45, 65),
+    None:                    (8, 15, 18, 28, 45, 65),  # default / unknown sector
+}
+
+# Sector D/E thresholds: (very_conservative, conservative, moderate, high, extreme)
+_SECTOR_DE_THRESHOLDS: dict[str | None, tuple[float, float, float, float, float]] = {
+    "financials":   (1.0, 3.0, 6.0, 10.0, 15.0),  # Banks carry structural leverage
+    "utilities":    (0.5, 1.0, 2.0,  4.0,  6.0),   # Capital-intensive, higher norms
+    "real_estate":  (0.5, 1.0, 2.0,  4.0,  6.0),
+    "energy":       (0.3, 0.7, 1.5,  3.0,  5.0),
+    None:           (0.3, 0.7, 1.5,  3.0,  5.0),   # default
+}
+
+
+def _score_pe(pe: float | None, sector: str | None = None) -> float:
+    """Score P/E ratio on [-3, 3] using sector-relative thresholds."""
     if pe is None:
         return 0.0
     if pe < 0:
-        return -2.5  # Negative earnings
-    if pe <= 8:
+        return -2.5  # Negative earnings — bad regardless of sector
+
+    t = _SECTOR_PE_THRESHOLDS.get(sector, _SECTOR_PE_THRESHOLDS[None])
+    deep_val, attractive, fair_lo, fair_hi, expensive, very_exp = t
+
+    if pe <= deep_val:
         return 2.0   # Deep value
-    if pe <= 15:
+    if pe <= attractive:
         return 1.5   # Attractive value
-    if pe <= 22:
-        return 0.5   # Fair value
-    if pe <= 35:
-        return -0.5  # Expensive
-    if pe <= 60:
+    if pe <= fair_hi:
+        return 0.5   # Fair value for this sector
+    if pe <= expensive:
+        return -0.5  # Expensive for this sector
+    if pe <= very_exp:
         return -1.5  # Very expensive
     return -2.5       # Extreme overvaluation
 
 
-def _score_roe(roe: float | None) -> float:
-    """Score ROE on [-3, 3]. Higher is better."""
+def _score_roe(roe: float | None, sector: str | None = None) -> float:
+    """Score ROE on [-3, 3]. Higher is better. Universal across sectors."""
     if roe is None:
         return 0.0
     if roe < 0:
@@ -683,25 +715,31 @@ def _score_roe(roe: float | None) -> float:
     return 2.5        # Exceptional
 
 
-def _score_de(de: float | None) -> float:
-    """Score D/E ratio on [-3, 3]. Lower is better."""
+def _score_de(de: float | None, sector: str | None = None) -> float:
+    """Score D/E ratio on [-3, 3] using sector-relative thresholds."""
     if de is None:
         return 0.0
     if de < 0:
-        return -2.0  # Negative equity
-    if de <= 0.3:
-        return 2.0   # Very conservative
-    if de <= 0.7:
+        return -2.0  # Negative equity — bad regardless of sector
+
+    t = _SECTOR_DE_THRESHOLDS.get(sector, _SECTOR_DE_THRESHOLDS[None])
+    v_conservative, conservative, moderate, high, extreme = t
+
+    if de <= v_conservative:
+        return 2.0   # Very conservative for this sector
+    if de <= conservative:
         return 1.0   # Conservative
-    if de <= 1.5:
-        return 0.0   # Moderate
-    if de <= 3.0:
+    if de <= moderate:
+        return 0.0   # Moderate / sector norm
+    if de <= high:
         return -1.0  # High leverage
+    if de <= extreme:
+        return -1.5
     return -2.0       # Extreme leverage
 
 
-def _score_peg(peg: float | None) -> float:
-    """Score PEG ratio on [-3, 3]. 0.5-1.0 is ideal (Peter Lynch)."""
+def _score_peg(peg: float | None, sector: str | None = None) -> float:
+    """Score PEG ratio on [-3, 3]. 0.5-1.0 is ideal (Peter Lynch). Universal."""
     if peg is None:
         return 0.0
     if peg < 0:
@@ -723,12 +761,13 @@ _FUND_SCORERS = {"pe_ratio": _score_pe, "roe": _score_roe, "de_ratio": _score_de
 
 
 async def get_fundamentals_score(
-    instrument_id: str, category: str = "stock"
+    instrument_id: str, category: str = "stock", sector: str | None = None
 ) -> tuple[float, dict]:
     """Compute fundamentals score from latest fundamental_metrics row.
 
     Returns (score in [-3, 3], details_dict).
     Commodities always return 0.0 (no fundamentals for futures).
+    P/E and D/E scoring is sector-relative — tech tolerates higher P/E than utilities.
     """
     if category == "commodity":
         return 0.0, {"category": "commodity", "confidence": 0.0}
@@ -761,7 +800,7 @@ async def get_fundamentals_score(
     weighted_sum = 0.0
     weight_total = 0.0
     for key, scorer in _FUND_SCORERS.items():
-        s = scorer(metrics[key])
+        s = scorer(metrics[key], sector)
         metric_scores[key] = {"value": metrics[key], "score": round(s, 2)}
         if metrics[key] is not None:
             weighted_sum += s * _FUND_WEIGHTS[key]
@@ -828,7 +867,7 @@ async def grade_instrument(
     sentiment_score, sent_details = await get_sentiment_score(instrument_id, term)
     sector_score, sector_details = await get_sector_score(sector, term)
     macro_score, macro_details = await get_macro_score(term)
-    fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category)
+    fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category, sector)
 
     # Composite weights
     profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
