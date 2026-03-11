@@ -108,21 +108,23 @@ GROUP_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
-# Composite (technical vs sentiment vs sector vs macro) weight profiles
-# Sector signal sits between asset-specific sentiment and broad macro:
-# it captures industry-level dynamics (regulation, sector rotation, structural trends).
+# Composite (technical vs sentiment vs sector vs macro vs fundamentals) weight profiles
+# 5-signal composite: fundamentals add valuation/profitability/growth assessment.
+# Commodities get 0% fundamentals (no P/E, ROE, etc. for futures).
+# Short-term: fundamentals matter less (market moves on sentiment/technicals).
+# Long-term: fundamentals matter more (value investing, mean reversion to fair value).
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short": {"technical": 0.45, "sentiment": 0.25, "sector": 0.12, "macro": 0.18},
-        "long":  {"technical": 0.30, "sentiment": 0.25, "sector": 0.15, "macro": 0.30},
+        "short": {"technical": 0.43, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.07},
+        "long":  {"technical": 0.24, "sentiment": 0.20, "sector": 0.12, "macro": 0.24, "fundamentals": 0.20},
     },
     "etf": {
-        "short": {"technical": 0.40, "sentiment": 0.20, "sector": 0.15, "macro": 0.25},
-        "long":  {"technical": 0.25, "sentiment": 0.20, "sector": 0.18, "macro": 0.37},
+        "short": {"technical": 0.38, "sentiment": 0.18, "sector": 0.14, "macro": 0.23, "fundamentals": 0.07},
+        "long":  {"technical": 0.20, "sentiment": 0.17, "sector": 0.15, "macro": 0.33, "fundamentals": 0.15},
     },
     "commodity": {
-        "short": {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23},
-        "long":  {"technical": 0.28, "sentiment": 0.25, "sector": 0.12, "macro": 0.35},
+        "short": {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23, "fundamentals": 0.0},
+        "long":  {"technical": 0.28, "sentiment": 0.25, "sector": 0.12, "macro": 0.35, "fundamentals": 0.0},
     },
 }
 
@@ -637,6 +639,166 @@ async def get_sector_score(sector: str | None, term: str = "short") -> tuple[flo
 
 
 # ---------------------------------------------------------------------------
+# Fundamentals score — piecewise-linear metric scoring
+# ---------------------------------------------------------------------------
+# Finance Expert: Institutional valuation standards.
+# P/E 15-22 = fair value (S&P 500 historical median ~16-18).
+# ROE 10-20% = solid profitability. >35% = exceptional (or leverage).
+# D/E 0-0.3 = conservative. >3.0 = high leverage risk.
+# PEG 0.5-1.0 = Peter Lynch "ideal" growth-at-reasonable-price.
+
+def _score_pe(pe: float | None) -> float:
+    """Score P/E ratio on [-3, 3]. Lower is better (to a point)."""
+    if pe is None:
+        return 0.0
+    if pe < 0:
+        return -2.5  # Negative earnings
+    if pe <= 8:
+        return 2.0   # Deep value
+    if pe <= 15:
+        return 1.5   # Attractive value
+    if pe <= 22:
+        return 0.5   # Fair value
+    if pe <= 35:
+        return -0.5  # Expensive
+    if pe <= 60:
+        return -1.5  # Very expensive
+    return -2.5       # Extreme overvaluation
+
+
+def _score_roe(roe: float | None) -> float:
+    """Score ROE on [-3, 3]. Higher is better."""
+    if roe is None:
+        return 0.0
+    if roe < 0:
+        return -2.0  # Loss-making
+    if roe <= 0.05:
+        return -1.0  # Poor
+    if roe <= 0.10:
+        return 0.0   # Mediocre
+    if roe <= 0.20:
+        return 1.0   # Good
+    if roe <= 0.35:
+        return 2.0   # Very good
+    return 2.5        # Exceptional
+
+
+def _score_de(de: float | None) -> float:
+    """Score D/E ratio on [-3, 3]. Lower is better."""
+    if de is None:
+        return 0.0
+    if de < 0:
+        return -2.0  # Negative equity
+    if de <= 0.3:
+        return 2.0   # Very conservative
+    if de <= 0.7:
+        return 1.0   # Conservative
+    if de <= 1.5:
+        return 0.0   # Moderate
+    if de <= 3.0:
+        return -1.0  # High leverage
+    return -2.0       # Extreme leverage
+
+
+def _score_peg(peg: float | None) -> float:
+    """Score PEG ratio on [-3, 3]. 0.5-1.0 is ideal (Peter Lynch)."""
+    if peg is None:
+        return 0.0
+    if peg < 0:
+        return -1.5  # Negative growth or negative earnings
+    if peg <= 0.5:
+        return 2.5   # Exceptional growth-value
+    if peg <= 1.0:
+        return 1.5   # Ideal
+    if peg <= 1.5:
+        return 0.5   # Fair
+    if peg <= 2.5:
+        return -0.5  # Overpriced for growth
+    return -1.5       # Very overpriced for growth
+
+
+# Metric weights within fundamentals sub-signal
+_FUND_WEIGHTS = {"pe_ratio": 0.30, "roe": 0.25, "de_ratio": 0.20, "peg_ratio": 0.25}
+_FUND_SCORERS = {"pe_ratio": _score_pe, "roe": _score_roe, "de_ratio": _score_de, "peg_ratio": _score_peg}
+
+
+async def get_fundamentals_score(
+    instrument_id: str, category: str = "stock"
+) -> tuple[float, dict]:
+    """Compute fundamentals score from latest fundamental_metrics row.
+
+    Returns (score in [-3, 3], details_dict).
+    Commodities always return 0.0 (no fundamentals for futures).
+    """
+    if category == "commodity":
+        return 0.0, {"category": "commodity", "confidence": 0.0}
+
+    async with async_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT pe_ratio, roe, de_ratio, peg_ratio, fetched_at
+                FROM fundamental_metrics
+                WHERE instrument_id = :iid
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """),
+            {"iid": instrument_id},
+        )
+        row = result.fetchone()
+
+    if not row:
+        return 0.0, {"confidence": 0.0, "has_data": False}
+
+    # Score each metric
+    metrics = {
+        "pe_ratio": float(row.pe_ratio) if row.pe_ratio is not None else None,
+        "roe": float(row.roe) if row.roe is not None else None,
+        "de_ratio": float(row.de_ratio) if row.de_ratio is not None else None,
+        "peg_ratio": float(row.peg_ratio) if row.peg_ratio is not None else None,
+    }
+
+    metric_scores = {}
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for key, scorer in _FUND_SCORERS.items():
+        s = scorer(metrics[key])
+        metric_scores[key] = {"value": metrics[key], "score": round(s, 2)}
+        if metrics[key] is not None:
+            weighted_sum += s * _FUND_WEIGHTS[key]
+            weight_total += _FUND_WEIGHTS[key]
+
+    if weight_total == 0:
+        return 0.0, {"confidence": 0.0, "has_data": False}
+
+    raw_score = weighted_sum / weight_total
+
+    # Freshness-based confidence: 1.0 within 48h, linear decay to 0.3 at 30 days, 0 beyond
+    now = datetime.now(timezone.utc)
+    fetched = row.fetched_at
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    age_hours = (now - fetched).total_seconds() / 3600.0
+
+    if age_hours <= 48:
+        confidence = 1.0
+    elif age_hours <= 720:  # 30 days
+        confidence = 1.0 - 0.7 * ((age_hours - 48) / (720 - 48))
+    else:
+        confidence = 0.0
+
+    effective = _clip(raw_score * confidence)
+
+    return round(effective, 4), {
+        "has_data": True,
+        "metrics": metric_scores,
+        "raw_score": round(raw_score, 4),
+        "confidence": round(confidence, 4),
+        "age_hours": round(age_hours, 1),
+        "fetched_at": fetched.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Final composite grading
 # ---------------------------------------------------------------------------
 
@@ -653,7 +815,7 @@ async def grade_instrument(
     long-term grades use long-term sentiment/macro/sector. This prevents
     short-term noise from contaminating long-term views and vice versa.
 
-    4-signal composite: Technical + Sentiment + Sector + Macro.
+    5-signal composite: Technical + Sentiment + Sector + Macro + Fundamentals.
 
     Returns a dict ready for DB insertion; also embeds buy_confidence and
     action_label in the details JSON so the frontend can display them.
@@ -666,6 +828,7 @@ async def grade_instrument(
     sentiment_score, sent_details = await get_sentiment_score(instrument_id, term)
     sector_score, sector_details = await get_sector_score(sector, term)
     macro_score, macro_details = await get_macro_score(term)
+    fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category)
 
     # Composite weights
     profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
@@ -677,12 +840,14 @@ async def grade_instrument(
     sent_conf = sent_details.get("confidence", 0.0)
     sector_conf = sector_details.get("confidence", 0.0) if sector else 0.0
     macro_conf = macro_details.get("confidence", 0.0)
+    fund_conf = fund_details.get("confidence", 0.0)
 
     effective_weights = {
-        "technical": weights["technical"] * (0.5 + 0.5 * tech_conf),
-        "sentiment": weights["sentiment"] * (0.5 + 0.5 * sent_conf),
-        "sector":    weights["sector"]    * (0.5 + 0.5 * sector_conf),
-        "macro":     weights["macro"]     * (0.5 + 0.5 * macro_conf),
+        "technical":    weights["technical"]    * (0.5 + 0.5 * tech_conf),
+        "sentiment":    weights["sentiment"]    * (0.5 + 0.5 * sent_conf),
+        "sector":       weights["sector"]       * (0.5 + 0.5 * sector_conf),
+        "macro":        weights["macro"]        * (0.5 + 0.5 * macro_conf),
+        "fundamentals": weights["fundamentals"] * (0.5 + 0.5 * fund_conf),
     }
     w_sum = sum(effective_weights.values())
     if w_sum == 0:
@@ -693,6 +858,7 @@ async def grade_instrument(
             + sentiment_score * effective_weights["sentiment"]
             + sector_score * effective_weights["sector"]
             + macro_score * effective_weights["macro"]
+            + fundamentals_score * effective_weights["fundamentals"]
         ) / w_sum
 
     overall = round(_clip(overall), 4)
@@ -713,6 +879,7 @@ async def grade_instrument(
         "sentiment_score": sentiment_score,
         "macro_score": macro_score,
         "sector_score": sector_score,
+        "fundamentals_score": fundamentals_score,
         "details": json.dumps({
             "weights": weights,
             "effective_weights": {k: round(v / w_sum, 4) for k, v in effective_weights.items()} if w_sum else weights,
@@ -722,6 +889,7 @@ async def grade_instrument(
             "sentiment": sent_details,
             "sector": sector_details,
             "macro": macro_details,
+            "fundamentals": fund_details,
         }),
         "graded_at": now,
     }
@@ -733,9 +901,9 @@ async def store_grade(grade: dict) -> None:
         await session.execute(
             text("""
                 INSERT INTO grades (instrument_id, term, overall_grade, overall_score,
-                    technical_score, sentiment_score, macro_score, sector_score, details, graded_at)
+                    technical_score, sentiment_score, macro_score, sector_score, fundamentals_score, details, graded_at)
                 VALUES (:instrument_id, :term, :overall_grade, :overall_score,
-                    :technical_score, :sentiment_score, :macro_score, :sector_score, CAST(:details AS jsonb), :graded_at)
+                    :technical_score, :sentiment_score, :macro_score, :sector_score, :fundamentals_score, CAST(:details AS jsonb), :graded_at)
             """),
             grade,
         )

@@ -34,6 +34,7 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
                     g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
                     g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
+                    COALESCE(g.fundamentals_score, 0) as fundamentals_score,
                     g.details, g.graded_at
                 FROM grades g
                 JOIN instruments i ON i.id = g.instrument_id
@@ -57,6 +58,7 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),
             sector_score=float(r.sector_score),
+            fundamentals_score=float(r.fundamentals_score),
             details=json.loads(r.details) if isinstance(r.details, str) else r.details,
             graded_at=r.graded_at,
         )
@@ -74,6 +76,7 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
                 SELECT g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
                     g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
+                    COALESCE(g.fundamentals_score, 0) as fundamentals_score,
                     g.details, g.graded_at
                 FROM grades g
                 JOIN instruments i ON i.id = g.instrument_id
@@ -98,6 +101,7 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),
             sector_score=float(r.sector_score),
+            fundamentals_score=float(r.fundamentals_score),
             details=json.loads(r.details) if isinstance(r.details, str) else r.details,
             graded_at=r.graded_at,
         )

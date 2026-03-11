@@ -60,6 +60,7 @@ class GradeSchema(BaseModel):
     sentiment_score: float
     macro_score: float
     sector_score: float = 0.0
+    fundamentals_score: float = 0.0
     details: dict | None = None
     graded_at: datetime
 

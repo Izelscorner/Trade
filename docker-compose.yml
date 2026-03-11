@@ -177,6 +177,35 @@ services:
           cpus: "1.0"
           pids: 100
 
+  fundamentals-fetcher:
+    build:
+      context: ./services/fundamentals-fetcher
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      FMP_API_KEY: ${FMP_API_KEY}
+      FRED_API_KEY: ${FRED_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+          pids: 50
+
   backend:
     build:
       context: ./services/backend

@@ -20,6 +20,8 @@ import {
   fetchETFConstituents,
   fetchSectorSentiment,
   fetchNews,
+  fetchFundamentals,
+  fetchMacroIndicators,
 } from "../api/client";
 import { wsSubscribe } from "../ws";
 import PriceChange from "../components/PriceChange";
@@ -27,11 +29,13 @@ import PriceChart from "../components/PriceChart";
 import TechnicalPanel from "../components/TechnicalPanel";
 import GradeDetail from "../components/GradeDetail";
 import MacroSentimentCard from "../components/MacroSentimentCard";
+import FundamentalsPanel from "../components/FundamentalsPanel";
+import MacroIndicatorsCard from "../components/MacroIndicatorsCard";
 import NewsFeed from "../components/NewsFeed";
 import AIAnalysisModal from "../components/AIAnalysisModal";
 import { PageSkeleton } from "../components/Skeletons";
 import { ArrowLeft, CircleDot, Brain, Layers, Building2 } from "lucide-react";
-import type { Instrument, LivePrice, Grade, ETFConstituent, SectorSentiment } from "../types";
+import type { Instrument, LivePrice, Grade, ETFConstituent, SectorSentiment, FundamentalMetrics, MacroIndicator } from "../types";
 import { SECTOR_LABELS, type Sector } from "../types";
 import { useEffect, useState } from "react";
 
@@ -95,6 +99,19 @@ export default function AssetDetail() {
     queryFn: () => fetchNews({ category: `sector_${instrument!.sector}` }),
     enabled: !!instrument?.sector,
     staleTime: 120_000,
+  });
+
+  const { data: fundamentals } = useQuery<FundamentalMetrics>({
+    queryKey: ["fundamentals", id],
+    queryFn: () => fetchFundamentals(id!),
+    enabled: !!id && instrument?.category !== "commodity",
+    staleTime: 600_000,
+  });
+
+  const { data: macroIndicators } = useQuery<MacroIndicator[]>({
+    queryKey: ["macro-indicators"],
+    queryFn: fetchMacroIndicators,
+    staleTime: 600_000,
   });
 
   const modelDisplay = useMemo(() => {
@@ -222,10 +239,24 @@ export default function AssetDetail() {
         <GradeDetail shortGrade={shortGrade} longGrade={longGrade} />
       </div>
 
+      {/* Fundamentals (stocks/ETFs only) */}
+      {instrument.category !== "commodity" && fundamentals && (
+        <div className="animate-slide-up" style={{ animationDelay: "125ms" }}>
+          <FundamentalsPanel metrics={fundamentals} category={instrument.category} />
+        </div>
+      )}
+
       {/* Macro Sentiment */}
       <div className="animate-slide-up" style={{ animationDelay: "150ms" }}>
         <MacroSentimentCard sentiments={macroSentiments || []} />
       </div>
+
+      {/* Macro Economic Indicators */}
+      {macroIndicators && macroIndicators.length > 0 && (
+        <div className="animate-slide-up" style={{ animationDelay: "155ms" }}>
+          <MacroIndicatorsCard indicators={macroIndicators} />
+        </div>
+      )}
 
       {/* Sector Sentiment */}
       {instrument.sector && sectorSentiments && sectorSentiments.length > 0 && (

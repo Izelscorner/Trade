@@ -41,6 +41,11 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 │  │ (Remote API) │    │  Processor   │    │  Service     │                        │
 │  │ Qwen 122B    │    │              │    │  (Python)    │                        │
 │  └──────────────┘    └──────────────┘    └──────────────┘                        │
+│                                                                                  │
+│  ┌──────────────────────────────────────────┐                                    │
+│  │ Fundamentals Fetcher (FMP + FRED APIs)   │                                    │
+│  │ P/E, ROE, D/E, PEG + DXY, 10Y, GDP, Oil │                                    │
+│  └──────────────────────────────────────────┘                                    │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,13 +56,14 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 - **Port:** 5432
 - **Image:** `postgres:16-alpine`
 - **Purpose:** Central data store for all services.
-- **Key Tables:** `instruments`, `news_articles`, `sentiment_scores`, `news_instrument_map`, `technical_indicators`, `grades`, `macro_sentiment`, `sector_sentiment`, `historical_prices`, `live_prices`, `intraday_prices`, `portfolio`, `processing_priority`, `etf_constituents`, `news_fetch_history`.
+- **Key Tables:** `instruments`, `news_articles`, `sentiment_scores`, `news_instrument_map`, `technical_indicators`, `grades`, `macro_sentiment`, `sector_sentiment`, `historical_prices`, `live_prices`, `intraday_prices`, `portfolio`, `processing_priority`, `etf_constituents`, `news_fetch_history`, `fundamental_metrics`, `macro_indicators`.
 - **Key Flags:** `news_articles.ollama_processed` gates which articles are displayed and graded. `is_macro` and `is_asset_specific` classify article type.
 - **Schema Notes:**
   - `grades.overall_grade` is `VARCHAR(20)` — stores action labels like "Strong Buy", "Neutral", "Sell".
   - `grades.overall_score` is `NUMERIC(7,4)` — composite score in [-3, 3].
-  - `grades.overall_score` also has `sector_score NUMERIC(7,4)` — sector signal contribution to composite.
-  - `grades.details` is `JSONB` — contains `buy_confidence`, `action`, group scores, effective weights, confidence metrics, `consensus_adjustment`.
+  - `grades.sector_score` is `NUMERIC(7,4)` — sector signal contribution to composite.
+  - `grades.fundamentals_score` is `NUMERIC(7,4)` — fundamentals signal contribution to composite (P/E, ROE, D/E, PEG).
+  - `grades.details` is `JSONB` — contains `buy_confidence`, `action`, group scores, effective weights, confidence metrics, `consensus_adjustment`, `fundamentals` (metric scores, freshness confidence).
   - `sentiment_scores.label` — short-term sentiment label. `sentiment_scores.long_term_label` — long-term sentiment label.
   - `sentiment_scores.positive/negative/neutral` — probability distribution derived from LLM label.
   - `news_articles.macro_sentiment_label` — short-term macro label. `news_articles.macro_long_term_label` — long-term macro label.
@@ -68,6 +74,8 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
   - `instruments.sector` — `VARCHAR(50)` GICS sector classification. Valid values: `technology`, `financials`, `healthcare`, `consumer_discretionary`, `consumer_staples`, `communication`, `energy`, `industrials`, `materials`, `utilities`, `real_estate`. NULL for broad-market ETFs (e.g., VOO).
   - `sector_sentiment` — dual-horizon rolling sentiment per GICS sector. Columns: `sector`, `term` ('short'/'long'), `score` (NUMERIC), `label`, `article_count`. Indexed on `(sector, term, calculated_at DESC)`.
   - `news_articles.category` — includes 11 sector-specific categories (`sector_technology`, `sector_financials`, etc.) alongside existing macro/asset categories.
+  - `fundamental_metrics` — daily P/E, ROE, D/E, PEG ratios per instrument. Fetched from FMP API. ETFs store weighted-average of constituents. Indexed on `(instrument_id, fetched_at DESC)`.
+  - `macro_indicators` — daily macro economic indicators (DXY, 10Y Treasury, GDP Growth, Brent Crude) from FRED API. Indexed on `(indicator_name, fetched_at DESC)`.
 
 ### 2. News Fetching Service (Python)
 
@@ -134,13 +142,25 @@ All services run as Docker containers orchestrated via Docker Compose. Two isola
 - **Live Price Fetch Interval:** 60 seconds with dedup guard.
 - **Intraday:** 5-minute candles for 1-day charts.
 
+### 5b. Fundamentals Fetcher Service (Python)
+
+- **Purpose:** Fetches fundamental financial metrics (P/E, ROE, D/E, PEG) from FMP API and macro economic indicators (DXY, 10Y Treasury, GDP Growth, Brent Crude) from FRED API.
+- **Schedule:** Runs once on startup, then daily at 06:00 UTC.
+- **FMP API:** `financialmodelingprep.com` Stable API. 250 requests/day limit. Uses `/stable/ratios` (P/E, D/E, PEG) and `/stable/key-metrics` (ROE) — 2 calls per symbol with 2s delay.
+- **FRED API:** `api.stlouisfed.org`. Series: `DTWEXBGS` (DXY), `DGS10` (10Y Treasury), `A191RL1Q225SBEA` (US GDP growth), `DCOILBRENTEU` (Brent Crude).
+- **ETF Fundamentals:** Computed as weighted average of constituents' metrics (requires ≥30% weight coverage per metric). Stored as single row for ETF.
+- **Commodities:** Skipped (no fundamentals for futures contracts).
+- **API Keys:** `FMP_API_KEY` and `FRED_API_KEY` in `.env`.
+- **Safety:** 120 FMP call cap, 30 record cleanup retention per instrument/indicator.
+
 ### 6. Grading Service (Python) — Mathematical Model
 
 - **Purpose:** Synthesizes all signals into a buy-confidence percentage (0-100%) with actionable recommendation labels.
 - **Update Frequency:** Full regrade every 60 seconds; incremental on data changes every 10 seconds. Concurrent grading of all instruments via `asyncio.gather`.
-- **Change Detection:** Polls for new sentiment scores, live prices, technical indicators, macro sentiment, and sector sentiment since last check. Macro or sector sentiment changes trigger regrade of ALL instruments.
+- **Change Detection:** Polls for new sentiment scores, live prices, technical indicators, macro sentiment, sector sentiment, and fundamental metrics since last check. Macro or sector sentiment changes trigger regrade of ALL instruments.
 - **Priority:** `processing_priority` table ensures prioritized instruments are graded first.
 - **Output:** `buy_confidence` in (0, 100), `action` label, composite score in [-3, 3].
+- **5-Signal Composite:** Technical + Sentiment + Sector + Macro + Fundamentals.
 
 #### 6a. Technical Score — Group-Based Weighted Average
 
@@ -204,18 +224,37 @@ Macro sentiment is term-aware with separate aggregation windows:
 
 Short-term macro captures immediate risk-on/off shifts. Long-term macro captures structural policy regime changes over 6 months. Confidence is log-scaled on total article count (`full_at=10`, capped at 30).
 
+#### 6d2. Fundamentals Score — Piecewise-Linear Metric Scoring
+
+Fundamentals provide a value-investing signal based on 4 key financial ratios. Commodities receive 0% weight (no fundamentals for futures).
+
+**Metric Scoring (each mapped to [-3, 3]):**
+
+| Metric | Scoring Logic |
+|--------|--------------|
+| P/E    | negative→-2.5, 0-8→+2.0, 8-15→+1.5, 15-22→+0.5, 22-35→-0.5, 35-60→-1.5, >60→-2.5 |
+| ROE    | negative→-2.0, 0-5%→-1.0, 5-10%→0.0, 10-20%→+1.0, 20-35%→+2.0, >35%→+2.5 |
+| D/E    | negative→-2.0, 0-0.3→+2.0, 0.3-0.7→+1.0, 0.7-1.5→0.0, 1.5-3.0→-1.0, >3.0→-2.0 |
+| PEG    | negative→-1.5, 0-0.5→+2.5, 0.5-1.0→+1.5, 1.0-1.5→+0.5, 1.5-2.5→-0.5, >2.5→-1.5 |
+
+**Metric weights within fundamentals:** P/E 30%, ROE 25%, D/E 20%, PEG 25%.
+
+**Freshness-based confidence:** 1.0 within 48h of fetch, linear decay to 0.3 at 30 days, 0.0 beyond.
+
+**ETF fundamentals:** Weighted average of constituents' metrics (requires ≥30% of total weight to have data per metric).
+
 #### 6e. Composite Weighting — Confidence-Adjusted
 
-Nominal weights per category and term (4 sub-signals: Technical, Sentiment, Sector, Macro):
+Nominal weights per category and term (5 sub-signals: Technical, Sentiment, Sector, Macro, Fundamentals):
 
-| Category  | Term  | Technical | Sentiment | Sector | Macro |
-|-----------|-------|-----------|-----------|--------|-------|
-| Stock     | Short | 50%       | 30%       | 12%    | 20%   |
-| Stock     | Long  | 35%       | 30%       | 15%    | 35%   |
-| ETF       | Short | 45%       | 25%       | 15%    | 30%   |
-| ETF       | Long  | 30%       | 25%       | 18%    | 45%   |
-| Commodity | Short | 45%       | 30%       | 10%    | 25%   |
-| Commodity | Long  | 30%       | 30%       | 12%    | 40%   |
+| Category  | Term  | Technical | Sentiment | Sector | Macro | Fundamentals |
+|-----------|-------|-----------|-----------|--------|-------|--------------|
+| Stock     | Short | 43%       | 23%       | 11%    | 16%   | 7%           |
+| Stock     | Long  | 24%       | 20%       | 12%    | 24%   | 20%          |
+| ETF       | Short | 38%       | 18%       | 14%    | 23%   | 7%           |
+| ETF       | Long  | 20%       | 17%       | 15%    | 33%   | 15%          |
+| Commodity | Short | 42%       | 25%       | 10%    | 23%   | 0%           |
+| Commodity | Long  | 28%       | 25%       | 12%    | 35%   | 0%           |
 
 **Confidence adjustment:** Each sub-signal's effective weight is `nominal_weight * (0.5 + 0.5 * confidence)`. When sentiment has zero articles (confidence=0), its weight drops to 50% of nominal instead of anchoring the composite at zero. Weights are then renormalized.
 
@@ -256,6 +295,8 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
   - `POST /api/v1/instruments` — Add new instruments dynamically
   - `GET/POST/DELETE /api/v1/portfolio` — User portfolio/watchlist management
   - `POST /api/v1/news/prioritize/{id}` — Priority-process an instrument's unprocessed news
+  - `GET /api/v1/fundamentals/{id}` — Latest fundamental metrics (P/E, ROE, D/E, PEG) for an instrument
+  - `GET /api/v1/fundamentals/macro/indicators` — Latest FRED macro indicators (DXY, 10Y, GDP, Brent)
   - `GET /health` — Health check
 - **WebSocket (`/api/v1/ws/updates`):** Subscription-based real-time updates.
   - Clients send `{"subscribe": {"page": "dashboard"|"asset_detail"|"asset_list"|"portfolio"|"news", "instrument_ids": [...], "category": "..."}}`
@@ -269,7 +310,7 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
 - **Routes:** `/` Dashboard, `/assets` AssetList, `/portfolio` Portfolio, `/news` News, `/asset/:id` AssetDetail.
 - **Buy-Confidence Display:** Primary metric is a percentage (0-100%) with sigmoid-derived action labels. Radial SVG gauge on asset detail, percentage pills on dashboard cards.
 - **Technical Panel:** Indicators grouped by category (Trend, Momentum, Volume, Levels, Volatility, Modifiers) with per-group average scores. ADX/ATR called out as modifiers, not directly scored.
-- **Grade Detail:** Center-origin score bars (red/green from midpoint) for 4 sub-signals (technical, sentiment, sector, macro), confidence metrics per sub-signal, effective weight display, ATR risk factor annotation, consensus dampening indicator (amber warning when herd behavior detected), technical group breakdown grid. Sentiment/sector bars show term-specific decay rates.
+- **Grade Detail:** Center-origin score bars (red/green from midpoint) for 5 sub-signals (technical, sentiment, sector, macro, fundamentals), confidence metrics per sub-signal, effective weight display, ATR risk factor annotation, consensus dampening indicator (amber warning when herd behavior detected), technical group breakdown grid. Sentiment/sector bars show term-specific decay rates.
 - **News Feed:** Dual-horizon sentiment badges per article — shows short-term (ST) and long-term (LT) labels when they differ, highlighting divergent impacts.
 - **News Categories:** Markets, Politics, Conflict, Sector, Asset (single global view). Sector tab includes sub-filter dropdown for specific sectors.
 - **Sector Sentiment:** Displayed on asset detail page as `SectorSentimentCard` — dual-horizon (short-term + long-term) with color-coded labels (green/yellow/red). Sector-specific news feed shown alongside.
@@ -277,11 +318,13 @@ buy_confidence = 100 / (1 + e^(-1.5 * score))
 - **State Management:** Jotai + Jotai Query for atomic state. `@tanstack/react-query` for some data.
 - **Key Components:**
   - `GradeBadge` — Percentage pill + action label, continuous color gradient (emerald to amber to red).
-  - `GradeDetail` — SVG confidence gauge, sub-score bars (technical, sentiment, sector, macro) with consensus dampening indicator, group breakdown, effective weights.
+  - `GradeDetail` — SVG confidence gauge, sub-score bars (technical, sentiment, sector, macro, fundamentals) with consensus dampening indicator, group breakdown, effective weights.
   - `InstrumentCard` — Confidence pills for short/long term, composite confidence bar.
   - `TechnicalPanel` — Grouped indicator list with group score summary row.
   - `AIAnalysisModal` — LLM-powered analysis (system-integrated and independent modes).
   - `MacroSentimentCard` — Dual-horizon global macro sentiment display (short-term + long-term rows).
+  - `FundamentalsPanel` — 2x2 grid displaying P/E, ROE, D/E, PEG ratios with color-coded thresholds. Shown for stocks/ETFs only.
+  - `MacroIndicatorsCard` — DXY, 10Y Treasury, GDP Growth, Brent Crude with zone-based coloring (green/amber/red).
   - `SectorSentimentCard` — Dual-horizon sector sentiment on asset detail (short-term + long-term rows, color-coded).
   - `PriceChart` — Historical OHLCV chart with day selector (1D/5D/1M/3M/1Y).
   - `NewsFeed` — Article list with dual-horizon sentiment badges.
@@ -300,7 +343,8 @@ The system operates as a **unidirectional predictive pipeline**:
 1. **Ingestion Layer:** `news-fetcher` fetches RSS/search feeds (6 concurrent loops including sector feeds), `price-fetcher` fetches market data. Articles stored with `ollama_processed = false`. URL hashes cached in-memory and persisted to `news_fetch_history` for dedup across restarts. Fuzzy title matching via rapidfuzz prevents cross-source duplicates.
 2. **AI Processing Layer:** `llm-processor` polls every 3s for unprocessed articles (batch of 30). Pre-filters low-quality articles deterministically. Batch-classifies (12/call), applies deterministic post-processing for tagging (including commodity keyword expansion and ETF constituent propagation), and batch-scores DUAL-HORIZON sentiment (8/call per instrument) with explicit rules for analyst ratings, institutional trades, commodity prices, safe havens, and defense stocks. Sector-feed articles routed to dedicated sector sentiment pipeline (6/call). Sector sentiment aggregated every 60s per GICS sector. Articles marked `ollama_processed = true`.
 3. **Signal Layer:** `technical-analysis` computes 18 indicators (trend/momentum/volume/levels/volatility) from price data.
-4. **Synthesis Layer:** `grading` combines 4 sub-signals (technical, sentiment, sector, macro) via group-based weighted averaging with category/term-specific profiles, term-aware time-decayed sentiment (with behavioral science consensus dampening), sector sentiment per instrument's GICS sector, confidence-adjusted composite weights, sigmoid buy-confidence output. Short-term grades use short-term sentiment/sector/macro; long-term grades use long-term sentiment/sector/macro. Change detection triggers incremental regrading every 10s; full regrade every 60s.
+3b. **Fundamentals Layer:** `fundamentals-fetcher` fetches daily P/E, ROE, D/E, PEG from FMP Stable API (2 calls/symbol) and DXY, 10Y Treasury, GDP Growth, Brent Crude from FRED API. ETF fundamentals computed as weighted averages of constituents. Stored in `fundamental_metrics` and `macro_indicators` tables.
+4. **Synthesis Layer:** `grading` combines 5 sub-signals (technical, sentiment, sector, macro, fundamentals) via group-based weighted averaging with category/term-specific profiles, term-aware time-decayed sentiment (with behavioral science consensus dampening), sector sentiment per instrument's GICS sector, freshness-decayed fundamentals scoring, confidence-adjusted composite weights, sigmoid buy-confidence output. Short-term grades use short-term sentiment/sector/macro; long-term grades use long-term sentiment/sector/macro. Change detection triggers incremental regrading every 10s; full regrade every 60s.
 5. **Presentation Layer:** `backend` API serves only processed/scored articles via REST + WebSocket. `frontend` displays buy-confidence percentages, group breakdowns, sector sentiment, and macro sentiment with real-time updates.
 
 ## Project Structure
@@ -309,13 +353,13 @@ The system operates as a **unidirectional predictive pipeline**:
 Trade/
 ├── CLAUDE.md
 ├── docker-compose.yml
-├── .env                             # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY
+├── .env                             # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY, FMP_API_KEY, FRED_API_KEY
 ├── services/
 │   ├── postgres/init/01_init.sql    # Full DB schema + seed instruments
 │   ├── backend/                     # FastAPI REST API + WebSocket + AI analysis
 │   │   └── app/
 │   │       ├── main.py              # Lifespan, routes, WS background tasks, extra table migration
-│   │       ├── api/                 # Endpoint routers (dashboard, grades, news, prices, technical, ai_analysis, portfolio, instruments, ws)
+│   │       ├── api/                 # Endpoint routers (dashboard, grades, news, prices, technical, ai_analysis, portfolio, instruments, fundamentals, ws)
 │   │       ├── core/db.py           # async SQLAlchemy session
 │   │       └── schemas.py           # Pydantic response schemas
 │   ├── news-fetcher/                # RSS/search feed ingestion
@@ -339,6 +383,12 @@ Trade/
 │   │       ├── indicators.py        # All indicator calculations (pandas/numpy)
 │   │       └── db.py
 │   ├── price-fetcher/               # yfinance live + historical + intraday
+│   ├── fundamentals-fetcher/        # FMP (P/E, ROE, D/E, PEG) + FRED (DXY, 10Y, GDP, Brent)
+│   │   └── app/
+│   │       ├── main.py              # Daily fetch cycle (FMP stocks/ETFs + FRED macro)
+│   │       ├── fetcher.py           # FMP Stable API client
+│   │       ├── fred_client.py       # FRED API client for macro indicators
+│   │       └── db.py
 │   └── grading/                     # Signal synthesis -> buy-confidence
 │       └── app/
 │           ├── main.py              # Polling loop with change detection + priority support
@@ -369,6 +419,8 @@ Trade/
             ├── PriceChart.tsx        # OHLCV chart with day selector
             ├── PriceChange.tsx       # Price delta display
             ├── MacroSentimentCard.tsx # Dual-horizon macro sentiment
+            ├── FundamentalsPanel.tsx # P/E, ROE, D/E, PEG display (stocks/ETFs)
+            ├── MacroIndicatorsCard.tsx # DXY, 10Y Treasury, GDP, Brent Crude
             ├── AIAnalysisModal.tsx   # LLM-powered analysis (system + independent)
             ├── CategoryFilter.tsx   # News category filter tabs
             ├── Navbar.tsx
@@ -404,7 +456,7 @@ New instruments can be added dynamically via `POST /api/v1/instruments`.
 - **Frontend:** Vite dev server (hot-reload via volume mount `./frontend:/app`), 1G memory limit, `read_only: false`.
 - **Postgres:** `cap_add: CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID`, tmpfs for `/tmp` and `/run/postgresql`.
 - **Price-fetcher:** `HOME=/tmp`, `XDG_CACHE_HOME=/tmp` (yfinance cache in writable tmpfs).
-- **Environment:** All secrets via `.env` file (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY).
+- **Environment:** All secrets via `.env` file (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, NIM_API_KEY, FMP_API_KEY, FRED_API_KEY).
 
 ## Key Technical Decisions
 
@@ -414,7 +466,9 @@ New instruments can be added dynamically via `POST /api/v1/instruments`.
 - **DUAL-HORIZON sentiment** — LLM returns both short-term (1-7d) and long-term (1-6mo) sentiment per article. Short-term grades use short-term sentiment, long-term grades use long-term sentiment. Different decay rates per horizon.
 - **Behavioral science consensus dampening** — Contrarian signal at >80% agreement (×0.85), priced-in detection for stale consensus >48h (×0.90). Prevents herd behavior from dominating grades.
 - **ETF constituent-aware tagging** — News about ETF holdings auto-propagates to parent ETF with weight-proportional relevance, so NVDA news at 23% weight impacts IITU accordingly. Untracked constituents (MSFT, AVGO, CRM, etc.) have their own dedicated fetch loop.
-- **GICS sector sentiment as 4th sub-signal** — Captures industry-level dynamics (regulation, supply chains, sector rotation) between asset-specific sentiment and broad macro. Sector weight ranges 10-18% by category/term. Instruments with no sector (broad-market ETFs) receive 0.0 sector score. Sector assignment is deterministic for known instruments, LLM-classified for dynamically added ones.
+- **Fundamentals as 5th composite sub-signal** — P/E, ROE, D/E, PEG from FMP Stable API scored via piecewise-linear mapping to [-3, 3]. Freshness-based confidence (1.0 within 48h, linear decay to 0.3 at 30d, 0 beyond). ETF fundamentals = weighted average of constituents (≥30% weight coverage required). Commodities excluded (0% weight). FMP free tier: 250 req/day, 2 calls/symbol.
+- **FRED macro indicators** — DXY (DTWEXBGS), 10Y Treasury (DGS10), GDP Growth (A191RL1Q225SBEA), Brent Crude (DCOILBRENTEU) fetched daily for macro context display. Zone-based coloring (good/warn/danger) on frontend.
+- **GICS sector sentiment as sub-signal** — Captures industry-level dynamics (regulation, supply chains, sector rotation) between asset-specific sentiment and broad macro. Sector weight ranges 10-18% by category/term. Instruments with no sector (broad-market ETFs) receive 0.0 sector score. Sector assignment is deterministic for known instruments, LLM-classified for dynamically added ones.
 - **Exponential time-decay** — Term-specific: short-term sentiment 12h half-life, long-term 168h (7d); short-term sector 18h, long-term sector 168h (7d); short-term macro 24h, long-term macro 648h (27d).
 - **Logarithmic confidence** — diminishing returns on article count, more information-theoretically sound than linear ramp.
 - **Confidence-adjusted composite weights** — sub-signals with low data reduce to 50% nominal weight instead of anchoring composite at zero.

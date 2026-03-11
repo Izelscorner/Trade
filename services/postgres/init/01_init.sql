@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS grades (
     sentiment_score NUMERIC(7, 4) NOT NULL,
     macro_score NUMERIC(7, 4) NOT NULL,
     sector_score NUMERIC(7, 4) NOT NULL DEFAULT 0,
+    fundamentals_score NUMERIC(7, 4) NOT NULL DEFAULT 0,
     details JSONB,
     graded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -175,6 +176,27 @@ CREATE TABLE IF NOT EXISTS etf_constituents (
     UNIQUE(etf_instrument_id, constituent_symbol)
 );
 
+-- Fundamental metrics (P/E, ROE, D/E, PEG) — fetched daily from FMP
+CREATE TABLE IF NOT EXISTS fundamental_metrics (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    pe_ratio NUMERIC(12, 4),
+    roe NUMERIC(12, 6),
+    de_ratio NUMERIC(12, 4),
+    peg_ratio NUMERIC(12, 4),
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Macro economic indicators (DXY, 10Y Treasury, GDP Growth, Brent Crude) — fetched daily from FRED
+CREATE TABLE IF NOT EXISTS macro_indicators (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    indicator_name VARCHAR(50) NOT NULL,
+    value NUMERIC(16, 6) NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    unit VARCHAR(20) NOT NULL DEFAULT '',
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Processing priority (user-triggered, signals processor to prioritize an instrument's news)
 CREATE TABLE IF NOT EXISTS processing_priority (
     instrument_id UUID PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
@@ -196,6 +218,8 @@ CREATE INDEX idx_news_instrument_map_instrument ON news_instrument_map(instrumen
 CREATE INDEX idx_intraday_prices_instrument_ts ON intraday_prices(instrument_id, timestamp DESC);
 CREATE INDEX idx_sector_sentiment_sector_term ON sector_sentiment(sector, term, calculated_at DESC);
 CREATE INDEX idx_instruments_sector ON instruments(sector) WHERE sector IS NOT NULL;
+CREATE INDEX idx_fundamental_metrics_instrument ON fundamental_metrics(instrument_id, fetched_at DESC);
+CREATE INDEX idx_macro_indicators_name_fetched ON macro_indicators(indicator_name, fetched_at DESC);
 
 -- Seed instruments
 INSERT INTO instruments (symbol, name, category, sector, yfinance_symbol) VALUES

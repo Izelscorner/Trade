@@ -4,10 +4,12 @@ import type {
   APIResponse,
   DashboardInstrument,
   ETFConstituent,
+  FundamentalMetrics,
   Grade,
   HistoricalPrice,
   Instrument,
   LivePrice,
+  MacroIndicator,
   MacroSentiment,
   NewsArticle,
   SectorSentiment,
@@ -130,6 +132,12 @@ export const fetchTechnicalIndicators = (instrumentId: string) =>
 
 export const fetchAIAnalysis = (instrument_id: string) =>
   fetchAPI<{ analysis: string }>(`/ai-analysis/${instrument_id}`);
+
+// Fundamentals
+export const fetchFundamentals = (instrumentId: string) =>
+  fetchAPI<FundamentalMetrics>(`/fundamentals/${instrumentId}`);
+export const fetchMacroIndicators = () =>
+  fetchAPI<MacroIndicator[]>("/fundamentals/macro/indicators");
 
 // Config
 export const fetchConfig = () => fetchAPI<{ nim_model: string }>("/config");

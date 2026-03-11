@@ -10,7 +10,9 @@
       "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -t -A -c \":*)",
       "Bash(python3 -c \":*)",
       "Bash(npx tsc --noEmit)",
-      "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -c \":*)"
+      "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -c \":*)",
+      "Bash(curl -s 'https://financialmodelingprep.com/api/v3/ratios-ttm/AAPL?apikey=lGCeYnztOwyWjkwBPhFCqVoWpVATMZ6i')",
+      "Bash(python3 -m json.tool)"
     ],
     "deny": [
       "Read(./.env)"

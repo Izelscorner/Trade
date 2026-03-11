@@ -117,3 +117,19 @@ https://rss.app/feeds/v1.1/u5Ogu89DyLL0US5n.json
 Additional 
 
 make sure for all news types (macro, asset specific, sector specifc) only sentiment graded and available to fetch news from DB are valid to show and add to total grading scores across, all counts across all UI should match with this graded counts, do not consider news under sentiment processing que, or news fetcher ques, the time intervals we set for short and long term sentiment scoring should be still intact.
+
+
+For stocks
+----------
+Make sure to calculate for stocks 
+P/E Ratio	Valuation
+ROE	Profitability
+D/E Ratio	Health
+PEG Ratio	Growth
+
+For Macro
+----------
+US Dollar Index (DXY)	Stability / Slight Weakness	Sharp Spike (hurts US earnings)
+0-Year Treasury Yield	3.5% - 4.25%	> 5% (pressures valuations)
+Global GDP Growth	~2.8% - 3.3%	Below 2% (Recession warning)
+Brent Crude Oil	$70 - $85	> $100 (Inflationary spike)

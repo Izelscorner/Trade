@@ -14,6 +14,7 @@ from .api.technical import router as technical_router
 from .api.dashboard import router as dashboard_router
 from .api.ai_analysis import router as ai_analysis_router
 from .api.portfolio import router as portfolio_router
+from .api.fundamentals import router as fundamentals_router
 
 
 from .api.ws import (
@@ -84,6 +85,41 @@ async def _ensure_extra_tables():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$
         """))
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS fundamental_metrics (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+                pe_ratio NUMERIC(12, 4),
+                roe NUMERIC(12, 6),
+                de_ratio NUMERIC(12, 4),
+                peg_ratio NUMERIC(12, 4),
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(_text("""
+            CREATE INDEX IF NOT EXISTS idx_fundamental_metrics_instrument
+            ON fundamental_metrics(instrument_id, fetched_at DESC)
+        """))
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS macro_indicators (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                indicator_name VARCHAR(50) NOT NULL,
+                value NUMERIC(16, 6) NOT NULL,
+                label VARCHAR(100) NOT NULL,
+                unit VARCHAR(20) NOT NULL DEFAULT '',
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(_text("""
+            CREATE INDEX IF NOT EXISTS idx_macro_indicators_name_fetched
+            ON macro_indicators(indicator_name, fetched_at DESC)
+        """))
+        await session.execute(_text("""
+            DO $$ BEGIN
+                ALTER TABLE grades ADD COLUMN fundamentals_score NUMERIC(7, 4) DEFAULT 0;
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
         await session.commit()
 
 
@@ -125,6 +161,7 @@ app.include_router(prices_router, prefix="/api/v1/prices", tags=["prices"])
 app.include_router(technical_router, prefix="/api/v1/technical", tags=["technical"])
 app.include_router(ai_analysis_router, prefix="/api/v1/ai-analysis", tags=["ai-analysis"])
 app.include_router(portfolio_router, prefix="/api/v1/portfolio", tags=["portfolio"])
+app.include_router(fundamentals_router, prefix="/api/v1/fundamentals", tags=["fundamentals"])
 app.include_router(ws_router, prefix="/api/v1")
 
 

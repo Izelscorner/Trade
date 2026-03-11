@@ -84,13 +84,30 @@ export interface Grade {
   sentiment_score: number;
   macro_score: number;
   sector_score: number;
+  fundamentals_score: number;
   details: GradeDetails | null;
   graded_at: string;
 }
 
+export interface FundamentalMetrics {
+  pe_ratio: number | null;
+  roe: number | null;
+  de_ratio: number | null;
+  peg_ratio: number | null;
+  fetched_at: string | null;
+}
+
+export interface MacroIndicator {
+  name: string;
+  value: number;
+  label: string;
+  unit: string;
+  fetched_at: string | null;
+}
+
 export interface GradeDetails {
-  weights: { technical: number; sentiment: number; sector: number; macro: number };
-  effective_weights?: { technical: number; sentiment: number; sector: number; macro: number };
+  weights: { technical: number; sentiment: number; sector: number; macro: number; fundamentals?: number };
+  effective_weights?: { technical: number; sentiment: number; sector: number; macro: number; fundamentals?: number };
   buy_confidence?: number;  // 0–100 sigmoid-scaled buy probability
   action?: string;          // "Strong Buy" | "Buy" | "Slight Buy" | "Neutral" | "Slight Sell" | "Sell" | "Strong Sell"
   technical: {
@@ -134,6 +151,15 @@ export interface GradeDetails {
     latest_label?: string;
     decay_half_life_h?: number;
     term?: string;
+    [key: string]: unknown;
+  };
+  fundamentals?: {
+    has_data?: boolean;
+    metrics?: Record<string, { value: number | null; score: number }>;
+    raw_score?: number;
+    confidence?: number;
+    age_hours?: number;
+    fetched_at?: string;
     [key: string]: unknown;
   };
 }

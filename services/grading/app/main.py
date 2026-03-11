@@ -117,6 +117,21 @@ async def detect_changes(since: datetime) -> dict:
         except Exception:
             pass  # Table may not exist yet
 
+        # Check for new fundamental metrics
+        try:
+            result = await session.execute(
+                text("""
+                    SELECT DISTINCT instrument_id::text as iid
+                    FROM fundamental_metrics
+                    WHERE fetched_at >= :since
+                """),
+                {"since": since},
+            )
+            for row in result.fetchall():
+                changed_instruments.add(row.iid)
+        except Exception:
+            pass  # Table may not exist yet
+
     return {"instruments": changed_instruments, "macro_changed": macro_changed or sector_changed}
 
 
@@ -173,9 +188,10 @@ async def grading_loop() -> None:
             if grade:
                 await store_grade(grade)
                 logger.info(
-                    "[%s] %s-term grade: %s (score=%.4f, tech=%.4f, sent=%.4f, sect=%.4f, macro=%.4f)",
+                    "[%s] %s-term grade: %s (score=%.4f, tech=%.4f, sent=%.4f, sect=%.4f, macro=%.4f, fund=%.4f)",
                     inst["symbol"], term, grade["overall_grade"], grade["overall_score"],
-                    grade["technical_score"], grade["sentiment_score"], grade["sector_score"], grade["macro_score"],
+                    grade["technical_score"], grade["sentiment_score"], grade["sector_score"],
+                    grade["macro_score"], grade["fundamentals_score"],
                 )
         except Exception:
             logger.exception("[%s] Failed to grade (%s-term)", inst["symbol"], term)

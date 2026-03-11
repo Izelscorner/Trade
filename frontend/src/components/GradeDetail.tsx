@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Zap,
   AlertTriangle,
+  BarChart3,
 } from "lucide-react";
 
 interface GradeDetailProps {
@@ -273,6 +274,8 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
   const sectorArticles = grade.details?.sector?.articles;
   const sectorDecay = grade.details?.sector?.decay_half_life_h;
   const sectorName = grade.details?.sector?.sector;
+  const fundConf = grade.details?.fundamentals?.confidence;
+  const fundHasData = grade.details?.fundamentals?.has_data;
   const techCompleteness = grade.details?.technical?.data_completeness;
   const atrFactor = grade.details?.technical?.atr_risk_factor;
   const groups = grade.details?.technical?.group_scores as
@@ -371,6 +374,14 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           }
           extraInfo={macroDecayLabel}
         />
+        {grade.fundamentals_score !== undefined && fundHasData && (
+          <ScoreBar
+            label="Fundamentals"
+            score={grade.fundamentals_score}
+            icon={BarChart3}
+            confidence={fundConf}
+          />
+        )}
       </div>
 
       {/* Effective weights row */}
@@ -379,14 +390,18 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           <span className="text-[10px] text-text-muted flex items-center gap-1">
             <Zap size={9} /> Effective weights:
           </span>
-          {(["technical", "sentiment", "sector", "macro"] as const).map((k) => (
-            <span
-              key={k}
-              className="text-[10px] font-mono text-text-secondary bg-surface-3 px-1.5 py-0.5 rounded"
-            >
-              {k.slice(0, 4)} {((effectiveWeights[k as keyof typeof effectiveWeights] ?? 0) * 100).toFixed(0)}%
-            </span>
-          ))}
+          {(["technical", "sentiment", "sector", "macro", "fundamentals"] as const).map((k) => {
+            const w = effectiveWeights[k as keyof typeof effectiveWeights] ?? 0;
+            if (w === 0 && k === "fundamentals") return null;
+            return (
+              <span
+                key={k}
+                className="text-[10px] font-mono text-text-secondary bg-surface-3 px-1.5 py-0.5 rounded"
+              >
+                {k.slice(0, 4)} {(w * 100).toFixed(0)}%
+              </span>
+            );
+          })}
           {techCompleteness !== undefined && (
             <span className="text-[10px] text-text-muted flex items-center gap-1 ml-auto">
               <ShieldCheck size={9} />
