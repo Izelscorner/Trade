@@ -89,12 +89,34 @@ export interface Grade {
   graded_at: string;
 }
 
+export interface MetricConfig {
+  label: string;
+  sublabel: string;
+  expected_range: string;
+  direction: "lower" | "higher" | "range";
+  direction_text: string;
+  good?: number;
+  fair?: number;
+  range_good?: [number, number];
+}
+
 export interface FundamentalMetrics {
   pe_ratio: number | null;
   roe: number | null;
   de_ratio: number | null;
   peg_ratio: number | null;
   fetched_at: string | null;
+  sector: string | null;
+  config: Record<string, MetricConfig>;
+}
+
+export interface MacroIndicatorConfig {
+  expected_range: string;
+  direction: "up" | "down" | "range";
+  direction_text: string;
+  impact: string;
+  good_zone: [number, number];
+  warn_zone: [number, number];
 }
 
 export interface MacroIndicator {
@@ -103,6 +125,7 @@ export interface MacroIndicator {
   label: string;
   unit: string;
   fetched_at: string | null;
+  config: MacroIndicatorConfig;
 }
 
 export interface GradeDetails {
