@@ -23,7 +23,6 @@ MACRO_SERIES = {
     "dxy": "DTWEXBGS",
     "treasury_10y": "DGS10",
     "gdp_growth": "A191RL1Q225SBEA",
-    "brent_crude": "DCOILBRENTEU",
 }
 
 # Human-readable labels

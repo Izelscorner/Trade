@@ -1,3 +1,5 @@
 asyncpg==0.30.0
 sqlalchemy[asyncio]==2.0.36
 httpx==0.28.1
+yfinance==0.2.58
+curl_cffi==0.7.4

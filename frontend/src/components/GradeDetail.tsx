@@ -1,5 +1,3 @@
-/** Grade detail breakdown — percentage-first, math-transparent, dual-horizon sentiment */
-
 import type { Grade } from "../types";
 import { scoreToBuyConfidence, buyConfidenceToAction } from "../types";
 import {
@@ -12,6 +10,9 @@ import {
   Zap,
   AlertTriangle,
   BarChart3,
+  Scale,
+  Activity,
+  Flame,
 } from "lucide-react";
 
 interface GradeDetailProps {
@@ -287,6 +288,14 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
   const effectiveWeights =
     grade.details?.effective_weights ?? grade.details?.weights;
 
+  // Enhancement readouts
+  const positionSizeMod = grade.details?.position_size_modifier as number | undefined;
+  const divergenceDampener = grade.details?.technical?.divergence_dampener as number | undefined;
+  const isCommodityFund = grade.details?.fundamentals?.category === "commodity";
+  const commodityTrendPct = grade.details?.fundamentals?.price_trend_pct as number | undefined;
+  const commodityConf = grade.details?.fundamentals?.confidence as number | undefined;
+  const commodityLatestPrice = grade.details?.fundamentals?.latest_price as number | undefined;
+
   const actionColor =
     buyConf >= 78
       ? "text-emerald-400"
@@ -343,6 +352,14 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
               : undefined
           }
         />
+        {/* Divergence dampener warning — shown when trend & momentum disagree */}
+        {divergenceDampener !== undefined && divergenceDampener < 1.0 && (
+          <div className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/25">
+            <Activity size={10} className="text-amber-400 shrink-0" />
+            <span className="text-amber-300 font-medium">Trend↕Momentum Divergence</span>
+            <span className="text-amber-400/70 font-mono ml-auto">×{divergenceDampener.toFixed(2)} dampen</span>
+          </div>
+        )}
         <ScoreBar
           label="Sentiment"
           score={grade.sentiment_score}
@@ -374,12 +391,17 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           }
           extraInfo={macroDecayLabel}
         />
-        {grade.fundamentals_score !== undefined && fundHasData && (
+        {grade.fundamentals_score !== undefined && (isCommodityFund || fundHasData) && (
           <ScoreBar
-            label="Fundamentals"
+            label={isCommodityFund ? "Supply/Demand Trend" : "Fundamentals"}
             score={grade.fundamentals_score}
-            icon={BarChart3}
-            confidence={fundConf}
+            icon={isCommodityFund ? Flame : BarChart3}
+            confidence={isCommodityFund ? commodityConf : fundConf}
+            extraInfo={
+              isCommodityFund && commodityTrendPct !== undefined
+                ? `${commodityTrendPct > 0 ? "+" : ""}${commodityTrendPct.toFixed(2)}% trend${commodityLatestPrice ? ` · $${commodityLatestPrice}` : ""}`
+                : undefined
+            }
           />
         )}
       </div>
@@ -408,6 +430,87 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
               {(techCompleteness * 100).toFixed(0)}% data coverage
             </span>
           )}
+        </div>
+      )}
+
+      {/* Position Size Modifier — ATR-based institutional sizing signal with legend */}
+      {positionSizeMod !== undefined && (
+        <div className="pt-2 border-t border-border-subtle space-y-2">
+          {/* Header row */}
+          <div className="flex items-center gap-1.5">
+            <Scale size={11} className="text-sky-400 shrink-0" />
+            <span className="text-[10px] text-text-muted uppercase tracking-wider font-medium">
+              Position Size Modifier
+            </span>
+          </div>
+
+          {/* Main value card */}
+          <div className={`rounded-lg border p-3 ${
+            positionSizeMod >= 0.6
+              ? "bg-emerald-500/10 border-emerald-500/20"
+              : positionSizeMod >= 0.4
+              ? "bg-sky-500/10 border-sky-500/20"
+              : "bg-amber-500/10 border-amber-500/20"
+          }`}>
+            <div className="flex items-baseline justify-between mb-2">
+              <div>
+                <span className={`text-xl font-mono font-bold ${
+                  positionSizeMod >= 0.6 ? "text-emerald-400" :
+                  positionSizeMod >= 0.4 ? "text-sky-400" : "text-amber-400"
+                }`}>
+                  {(positionSizeMod * 100).toFixed(0)}%
+                </span>
+                <span className={`ml-2 text-[10px] font-semibold uppercase tracking-wider ${
+                  positionSizeMod >= 0.6 ? "text-emerald-400" :
+                  positionSizeMod >= 0.4 ? "text-sky-400" : "text-amber-400"
+                }`}>
+                  {positionSizeMod >= 0.6 ? "Full Size" : positionSizeMod >= 0.4 ? "Half Size" : "Reduced"}
+                </span>
+              </div>
+              <span className="text-[10px] text-text-muted font-mono">
+                formula: 1 ÷ (1 + ATR%/2)
+              </span>
+            </div>
+
+            {/* Progress bar */}
+            <div className="h-1.5 rounded-full bg-surface-3 overflow-hidden mb-3">
+              <div
+                className={`h-full rounded-full transition-all duration-700 ${
+                  positionSizeMod >= 0.6 ? "bg-emerald-500" :
+                  positionSizeMod >= 0.4 ? "bg-sky-500" : "bg-amber-500"
+                }`}
+                style={{ width: `${positionSizeMod * 100}%` }}
+              />
+            </div>
+
+            {/* Tier legend */}
+            <div className="border-t border-border-subtle/50 pt-2 grid grid-cols-3 gap-1.5">
+              {[
+                { label: "Low Vol", sublabel: "ATR < 2%", range: "≥ 67%", color: "text-emerald-400", active: positionSizeMod >= 0.6 },
+                { label: "Normal", sublabel: "ATR 2–4%", range: "40–67%", color: "text-sky-400", active: positionSizeMod >= 0.4 && positionSizeMod < 0.6 },
+                { label: "High Vol", sublabel: "ATR > 4%", range: "< 40%", color: "text-amber-400", active: positionSizeMod < 0.4 },
+              ].map((tier) => (
+                <div
+                  key={tier.label}
+                  className={`rounded px-1.5 py-1 text-center transition-colors ${
+                    tier.active ? "bg-surface-2/80 ring-1 ring-inset ring-white/10" : "opacity-40"
+                  }`}
+                >
+                  <div className={`text-[10px] font-semibold ${tier.active ? tier.color : "text-text-muted"}`}>
+                    {tier.label}
+                  </div>
+                  <div className="text-[9px] text-text-muted/70">{tier.sublabel}</div>
+                  <div className="text-[9px] font-mono text-text-muted mt-0.5">{tier.range}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Explanation */}
+            <p className="text-[10px] text-text-muted/60 mt-2 leading-relaxed">
+              Scales suggested position size inversely with volatility. High-ATR assets carry more
+              risk per unit — institutional desks reduce exposure to preserve portfolio variance targets.
+            </p>
+          </div>
         </div>
       )}
 

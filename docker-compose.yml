@@ -184,8 +184,9 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      FMP_API_KEY: ${FMP_API_KEY}
       FRED_API_KEY: ${FRED_API_KEY}
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp
     depends_on:
       postgres:
         condition: service_healthy

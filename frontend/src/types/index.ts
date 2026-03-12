@@ -133,11 +133,13 @@ export interface GradeDetails {
   effective_weights?: { technical: number; sentiment: number; sector: number; macro: number; fundamentals?: number };
   buy_confidence?: number;  // 0–100 sigmoid-scaled buy probability
   action?: string;          // "Strong Buy" | "Buy" | "Slight Buy" | "Neutral" | "Slight Sell" | "Sell" | "Strong Sell"
+  position_size_modifier?: number; // ATR-based sizing: 1/(1+ATR%/2), range 0–1
   technical: {
     group_scores?: Record<string, { score: number; count: number; indicators: Record<string, string> }>;
     data_completeness?: number;
     adx_multiplier?: number;
     atr_risk_factor?: number;
+    divergence_dampener?: number; // 0.8–1.0: trend vs momentum agreement factor
     adx?: string;
     atr_pct?: number;
     raw_tech_score?: number;
@@ -178,8 +180,14 @@ export interface GradeDetails {
   };
   fundamentals?: {
     has_data?: boolean;
-    metrics?: Record<string, { value: number | null; score: number }>;
+    category?: string;           // "commodity" for commodity supply-demand signal
+    price_trend_pct?: number;    // % price change over window (commodity)
+    latest_price?: number;       // most recent commodity price
+    oldest_price?: number;
+    n_readings?: number;
     raw_score?: number;
+    dxy_adjustment?: number;
+    metrics?: Record<string, { value: number | null; score: number }>;
     confidence?: number;
     age_hours?: number;
     fetched_at?: string;

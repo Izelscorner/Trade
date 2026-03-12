@@ -359,6 +359,26 @@ async def get_technical_score(
 
     raw_tech = weighted_sum / total_weight if total_weight > 0 else 0.0
 
+    # Trend-Momentum Divergence Dampener
+    # When the trend group and momentum group give opposing clear signals, it often
+    # signals a coming reversal (e.g. price above SMA200 but RSI/MACD both oversold).
+    # Institutionally, divergence = uncertainty = reduce conviction.
+    trend_score = group_scores.get("trend", {}).get("score", 0.0)
+    momentum_score = group_scores.get("momentum", {}).get("score", 0.0)
+    trend_count = group_scores.get("trend", {}).get("count", 0)
+    momentum_count = group_scores.get("momentum", {}).get("count", 0)
+    divergence_dampener = 1.0
+    if trend_count >= 2 and momentum_count >= 2:
+        divergence = abs(trend_score - momentum_score)
+        # Only dampen when both groups have clear directional conviction (|score| > 0.5)
+        # AND they disagree by >= 1.5 score points
+        if divergence >= 1.5 and abs(trend_score) > 0.5 and abs(momentum_score) > 0.5:
+            divergence_dampener = 0.80   # Significant divergence: 20% dampening
+        elif divergence >= 1.0 and abs(trend_score) > 0.5 and abs(momentum_score) > 0.5:
+            divergence_dampener = 0.90   # Mild divergence: 10% dampening
+
+    raw_tech *= divergence_dampener
+
     # ATR risk dampening on final technical score
     final_tech = _clip(raw_tech * atr_risk_factor)
 
@@ -371,6 +391,7 @@ async def get_technical_score(
         "group_scores": group_scores,
         "adx_multiplier": round(adx_multiplier, 2),
         "atr_risk_factor": round(atr_risk_factor, 2),
+        "divergence_dampener": round(divergence_dampener, 2),
         "data_completeness": round(data_completeness, 3),
         "raw_tech_score": round(raw_tech, 4),
         "adx": raw.get("ADX", {}).get("signal"),
@@ -471,8 +492,10 @@ async def get_sentiment_score(instrument_id: str, term: str = "short") -> tuple[
     avg_age_hours = total_age_hours / non_neutral_count if non_neutral_count > 0 else 0.0
 
     # Effective article count for confidence
+    # Use the actual weighted count (no *2 inflation) to correctly require
+    # `full_confidence_at` non-neutral articles for full confidence.
     effective_count = non_neutral_weighted_count
-    confidence = _log_confidence(min(round(effective_count * 2), full_at * 2), full_at=full_at)
+    confidence = _log_confidence(min(round(effective_count), full_at), full_at=full_at)
 
     # Behavioral science: consensus dampening
     consensus_mult = _consensus_adjustment(all_labels, avg_age_hours)
@@ -537,7 +560,9 @@ async def get_macro_score(term: str = "short") -> tuple[float, dict]:
         age_hours = max(0.0, (now - calc_at).total_seconds() / 3600.0)
         decay_weight = math.exp(-decay_lambda * age_hours)
 
-        score = _clip(float(row.score))
+        # Scale raw score from SENTIMENT_MULTIPLIERS range [-1,1] to [-3,3]
+        # to match all other sub-signals. Sector already does this correctly.
+        score = _clip(float(row.score) * 3.0)
         weighted_sum += score * decay_weight
         weight_total += decay_weight
         total_articles += row.article_count or 0
@@ -675,12 +700,23 @@ _SECTOR_DE_THRESHOLDS: dict[str | None, tuple[float, float, float, float, float]
 }
 
 
-def _score_pe(pe: float | None, sector: str | None = None) -> float:
-    """Score P/E ratio on [-3, 3] using sector-relative thresholds."""
+def _score_pe(pe: float | None, sector: str | None = None, revenue_growth: float | None = None) -> float:
+    """Score P/E ratio on [-3, 3] using sector-relative thresholds.
+
+    Enhancement: if P/E is negative but revenue_growth > 20%, the company is
+    investing at a loss intentionally (e.g. PLTR, TSLA historical). Score -0.5
+    instead of -2.5 to avoid penalising high-growth business models.
+    """
     if pe is None:
         return 0.0
     if pe < 0:
-        return -2.5  # Negative earnings — bad regardless of sector
+        # High-growth nuance: revenue growth > 20% YoY → intentional investment,
+        # not terminal decline. Soften penalty significantly.
+        if revenue_growth is not None and revenue_growth > 0.20:
+            return -0.5   # Loss-making but rapidly growing
+        elif revenue_growth is not None and revenue_growth > 0.10:
+            return -1.5   # Moderate growth, still loss-making
+        return -2.5       # Negative earnings — bad regardless of sector
 
     t = _SECTOR_PE_THRESHOLDS.get(sector, _SECTOR_PE_THRESHOLDS[None])
     deep_val, attractive, fair_lo, fair_hi, expensive, very_exp = t
@@ -757,25 +793,132 @@ def _score_peg(peg: float | None, sector: str | None = None) -> float:
 
 # Metric weights within fundamentals sub-signal
 _FUND_WEIGHTS = {"pe_ratio": 0.30, "roe": 0.25, "de_ratio": 0.20, "peg_ratio": 0.25}
-_FUND_SCORERS = {"pe_ratio": _score_pe, "roe": _score_roe, "de_ratio": _score_de, "peg_ratio": _score_peg}
+
+
+def _score_fundamentals_metrics(metrics: dict, sector: str | None) -> dict:
+    """Score each fundamental metric and return a dict of {metric: score}.
+
+    Separated from get_fundamentals_score() to allow reuse in ETF scoring.
+    Passes revenue_growth to _score_pe for high-growth nuance.
+    """
+    return {
+        "pe_ratio":  _score_pe(metrics["pe_ratio"], sector, metrics.get("revenue_growth")),
+        "roe":       _score_roe(metrics["roe"], sector),
+        "de_ratio":  _score_de(metrics["de_ratio"], sector),
+        "peg_ratio": _score_peg(metrics["peg_ratio"], sector),
+    }
+
+
+async def _get_commodity_supply_demand_score(instrument_id: str, term: str) -> tuple[float, dict]:
+    """Compute a supply-demand momentum signal for commodities.
+
+    Uses the macro_indicators table (where Brent Crude / commodity prices are stored)
+    to compute a recent price trend. A rising price trend → positive score.
+    Up to ±2.0, confidence scales with data recency.
+
+    For non-oil commodities (GOLD) we also use the macro_indicators oil entry
+    because oil and gold share macro-driven demand signals, but gold is inverse
+    to DXY; that cross-signal is approximated here by checking the DXY trend.
+    """
+    now = datetime.now(timezone.utc)
+    window_hours = 48 if term == "short" else 240  # 2 days / 10 days
+
+    async with async_session() as session:
+        # Fetch recent commodity price readings — stored as 'brent_crude' or 'gold' etc.
+        # We use the latest vs. earlier records to get a trend direction.
+        result = await session.execute(
+            text("""
+                SELECT indicator_name, value, fetched_at
+                FROM macro_indicators
+                WHERE indicator_name IN ('brent_crude', 'gold', 'oil')
+                AND fetched_at >= NOW() - INTERVAL '1 hour' * :window_h
+                ORDER BY fetched_at DESC
+                LIMIT 30
+            """),
+            {"window_h": window_hours},
+        )
+        price_rows = result.fetchall()
+
+        # Also get DXY for gold inverse signal
+        dxy_result = await session.execute(
+            text("""
+                SELECT value, fetched_at FROM macro_indicators
+                WHERE indicator_name = 'dxy'
+                ORDER BY fetched_at DESC LIMIT 5
+            """)
+        )
+        dxy_rows = dxy_result.fetchall()
+
+    if not price_rows:
+        return 0.0, {"category": "commodity", "confidence": 0.0, "reason": "no_price_data"}
+
+    # Compute slope: (latest value - oldest value) / oldest value
+    prices = [(float(r.value), r.fetched_at) for r in price_rows]
+    prices.sort(key=lambda x: x[1])  # oldest first
+    oldest_val = prices[0][0]
+    latest_val = prices[-1][0]
+
+    if oldest_val == 0:
+        return 0.0, {"category": "commodity", "confidence": 0.0, "reason": "zero_price"}
+
+    pct_change = (latest_val - oldest_val) / oldest_val  # e.g. 0.03 = 3% rise
+
+    # Convert % change to score [-2, 2]:
+    # >= +4% → +2.0, +2% → +1.0, 0% → 0, -2% → -1.0, <= -4% → -2.0
+    raw_score = _clip(pct_change / 0.02, lo=-2.0, hi=2.0)  # Each 2% = 1 score point
+
+    # For GOLD: DXY rising = negative for gold (inverse relationship)
+    dxy_adjustment = 0.0
+    if dxy_rows and len(dxy_rows) >= 2:
+        dxy_latest = float(dxy_rows[0].value)
+        dxy_older = float(dxy_rows[-1].value)
+        dxy_change = (dxy_latest - dxy_older) / dxy_older if dxy_older != 0 else 0
+        # Strong DXY rise (>+1%) dampens gold; DXY fall (<-1%) boosts gold
+        dxy_adjustment = _clip(-dxy_change / 0.01 * 0.5, lo=-1.0, hi=1.0)
+
+    # Confidence scales with number of data points (more readings = more reliable trend)
+    n_points = len(prices)
+    confidence = _log_confidence(min(n_points, 10), full_at=8)
+
+    # Apply DXY inverse signal only if this appears to be a gold instrument
+    # (simple heuristic: check if any price_rows are labeled 'gold')
+    is_gold = any(r.indicator_name == "gold" for r in price_rows)
+    if is_gold:
+        raw_score = _clip(raw_score + dxy_adjustment, lo=-2.0, hi=2.0)
+
+    final_score = _clip(raw_score * confidence)
+
+    return round(final_score, 4), {
+        "category": "commodity",
+        "price_trend_pct": round(pct_change * 100, 2),
+        "oldest_price": round(oldest_val, 2),
+        "latest_price": round(latest_val, 2),
+        "n_readings": n_points,
+        "raw_score": round(raw_score, 4),
+        "dxy_adjustment": round(dxy_adjustment, 4) if is_gold else 0.0,
+        "confidence": round(confidence, 4),
+        "term": term,
+    }
+
 
 
 async def get_fundamentals_score(
-    instrument_id: str, category: str = "stock", sector: str | None = None
+    instrument_id: str, category: str = "stock", sector: str | None = None, term: str = "short"
 ) -> tuple[float, dict]:
     """Compute fundamentals score from latest fundamental_metrics row.
 
     Returns (score in [-3, 3], details_dict).
-    Commodities always return 0.0 (no fundamentals for futures).
+    Commodities use supply-demand price trend signal instead of accounting ratios.
     P/E and D/E scoring is sector-relative — tech tolerates higher P/E than utilities.
     """
     if category == "commodity":
-        return 0.0, {"category": "commodity", "confidence": 0.0}
+        # Commodities don't have traditional fundamentals — use supply-demand price trend
+        return await _get_commodity_supply_demand_score(instrument_id, term)
 
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT pe_ratio, roe, de_ratio, peg_ratio, fetched_at
+                SELECT pe_ratio, roe, de_ratio, peg_ratio, revenue_growth, fetched_at
                 FROM fundamental_metrics
                 WHERE instrument_id = :iid
                 ORDER BY fetched_at DESC
@@ -789,18 +932,22 @@ async def get_fundamentals_score(
         return 0.0, {"confidence": 0.0, "has_data": False}
 
     # Score each metric
+    # Yahoo Finance returns debtToEquity as a PERCENTAGE (e.g. 102.63 = 1.0263x ratio).
+    # Divide by 100 to convert to the raw ratio our scoring thresholds expect.
+    raw_de = float(row.de_ratio) if row.de_ratio is not None else None
     metrics = {
         "pe_ratio": float(row.pe_ratio) if row.pe_ratio is not None else None,
         "roe": float(row.roe) if row.roe is not None else None,
-        "de_ratio": float(row.de_ratio) if row.de_ratio is not None else None,
+        "de_ratio": (raw_de / 100.0) if raw_de is not None else None,
         "peg_ratio": float(row.peg_ratio) if row.peg_ratio is not None else None,
+        "revenue_growth": float(row.revenue_growth) if row.revenue_growth is not None else None,
     }
 
     metric_scores = {}
     weighted_sum = 0.0
     weight_total = 0.0
-    for key, scorer in _FUND_SCORERS.items():
-        s = scorer(metrics[key], sector)
+    scored = _score_fundamentals_metrics(metrics, sector)
+    for key, s in scored.items():
         metric_scores[key] = {"value": metrics[key], "score": round(s, 2)}
         if metrics[key] is not None:
             weighted_sum += s * _FUND_WEIGHTS[key]
@@ -867,7 +1014,7 @@ async def grade_instrument(
     sentiment_score, sent_details = await get_sentiment_score(instrument_id, term)
     sector_score, sector_details = await get_sector_score(sector, term)
     macro_score, macro_details = await get_macro_score(term)
-    fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category, sector)
+    fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category, sector, term)
 
     # Composite weights
     profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
@@ -882,11 +1029,13 @@ async def grade_instrument(
     fund_conf = fund_details.get("confidence", 0.0)
 
     effective_weights = {
-        "technical":    weights["technical"]    * (0.5 + 0.5 * tech_conf),
-        "sentiment":    weights["sentiment"]    * (0.5 + 0.5 * sent_conf),
-        "sector":       weights["sector"]       * (0.5 + 0.5 * sector_conf),
-        "macro":        weights["macro"]        * (0.5 + 0.5 * macro_conf),
-        "fundamentals": weights["fundamentals"] * (0.5 + 0.5 * fund_conf),
+        # Floor = 0.1: when confidence is 0 (no data), signal nearly drops out of composite.
+        # Floor = 0.5 (old) anchored the composite too strongly toward neutral with sparse data.
+        "technical":    weights["technical"]    * (0.1 + 0.9 * tech_conf),
+        "sentiment":    weights["sentiment"]    * (0.1 + 0.9 * sent_conf),
+        "sector":       weights["sector"]       * (0.1 + 0.9 * sector_conf),
+        "macro":        weights["macro"]        * (0.1 + 0.9 * macro_conf),
+        "fundamentals": weights["fundamentals"] * (0.1 + 0.9 * fund_conf),
     }
     w_sum = sum(effective_weights.values())
     if w_sum == 0:
@@ -906,6 +1055,12 @@ async def grade_instrument(
     buy_confidence = _sigmoid_confidence(overall)
     action = _action_label(buy_confidence)
 
+    # ATR-based position size modifier: 1.0 / (1 + ATR%/2)
+    # Reduces suggested position size proportionally with volatility.
+    # ATR%=1% → 0.67, ATR%=2% → 0.50, ATR%=4% → 0.33
+    atr_pct = tech_details.get("atr_pct") or 2.0  # Default to moderate if missing
+    position_size_modifier = round(1.0 / (1.0 + atr_pct / 2.0), 3)
+
     now = datetime.now(timezone.utc)
 
     return {
@@ -924,6 +1079,7 @@ async def grade_instrument(
             "effective_weights": {k: round(v / w_sum, 4) for k, v in effective_weights.items()} if w_sum else weights,
             "buy_confidence": buy_confidence,
             "action": action,
+            "position_size_modifier": position_size_modifier,
             "technical": tech_details,
             "sentiment": sent_details,
             "sector": sector_details,

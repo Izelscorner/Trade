@@ -27,13 +27,18 @@ def calc_sma(df: pd.DataFrame, period: int = 50) -> dict:
         return {"indicator_name": f"SMA_{period}", "value": {}, "signal": "neutral"}
 
     deviation = ((price - current) / current) * 100
-    if deviation > 2.0:
+    # Period-scaled threshold: longer period = more signal required
+    # EMA_20: ±1%, SMA_50: ±2%, SMA_200: ±3%
+    strong_threshold = min(1.0 + (period // 50), 3.0)
+    weak_threshold = 0.0  # any deviation from MA is directional
+
+    if deviation > strong_threshold:
         signal = "strong_buy"
-    elif deviation > 0.0:
+    elif deviation > weak_threshold:
         signal = "buy"
-    elif deviation < -2.0:
+    elif deviation < -strong_threshold:
         signal = "strong_sell"
-    elif deviation < 0.0:
+    elif deviation < -weak_threshold:
         signal = "sell"
     else:
         signal = "neutral"
@@ -55,11 +60,14 @@ def calc_ema(df: pd.DataFrame, period: int = 20) -> dict:
         return {"indicator_name": f"EMA_{period}", "value": {}, "signal": "neutral"}
 
     deviation = ((price - current) / current) * 100
-    if deviation > 2.0:
+    # Period-scaled threshold
+    strong_threshold = min(1.0 + (period // 50), 3.0)
+
+    if deviation > strong_threshold:
         signal = "strong_buy"
     elif deviation > 0.0:
         signal = "buy"
-    elif deviation < -2.0:
+    elif deviation < -strong_threshold:
         signal = "strong_sell"
     elif deviation < 0.0:
         signal = "sell"
@@ -631,14 +639,17 @@ def calc_vwap(df: pd.DataFrame) -> dict:
 
     deviation = ((price - current_vwap) / current_vwap) * 100
 
+    # Institutional VWAP interpretation: price vs VWAP = momentum direction
+    # Price above VWAP = buyers in control (bullish). Below = sellers (bearish).
+    # Far extension (>2%) signals strong momentum, not mean-reversion.
     if deviation > 2.0:
-        signal = "strong_sell"  # Far above VWAP — overextended
+        signal = "strong_buy"   # Strong upside momentum above VWAP
     elif deviation > 0:
-        signal = "buy"  # Above VWAP — buyers in control
+        signal = "buy"          # Above VWAP — buyers in control
     elif deviation < -2.0:
-        signal = "strong_buy"  # Far below VWAP — potential bounce
+        signal = "strong_sell"  # Strong downside momentum below VWAP
     elif deviation < 0:
-        signal = "sell"  # Below VWAP — sellers in control
+        signal = "sell"         # Below VWAP — sellers in control
     else:
         signal = "neutral"
 

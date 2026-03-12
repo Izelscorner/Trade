@@ -1,7 +1,7 @@
-"""Fundamentals Fetcher Service — FMP stock metrics + FRED macro indicators.
+"""Fundamentals Fetcher Service — Yahoo Finance stock metrics + FRED macro indicators.
 
 Two daily fetch cycles:
-1. FMP: P/E, ROE, D/E, PEG for stocks + weighted-average for ETFs via constituents.
+1. Yahoo Finance: P/E, ROE, D/E, PEG for stocks + weighted-average for ETFs via constituents.
 2. FRED: DXY, 10Y Treasury, GDP Growth, Brent Crude for macro grading correlation.
 
 Runs once on startup, then sleeps until next 06:00 UTC daily.
@@ -16,7 +16,7 @@ import httpx
 from sqlalchemy import text
 
 from .db import async_session
-from .fetcher import fetch_ratios
+from .fetcher import fetch_ratios, fetch_ticker_price
 from .fred_client import fetch_all_macro_indicators, MACRO_LABELS, MACRO_UNITS
 
 logging.basicConfig(
@@ -25,10 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fundamentals-fetcher")
 
-FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
-CALL_DELAY = 2.0  # seconds between API calls
-MAX_FMP_CALLS = 120  # safety cap (250/day limit, 2 calls per symbol)
+DELAY_BETWEEN_SYMBOLS = 1.0  # 1s delay between symbols
 CLEANUP_KEEP = 30  # keep last N records per instrument
 
 
@@ -104,8 +102,8 @@ async def store_fundamentals(instrument_id: str, metrics: dict) -> None:
     async with async_session() as session:
         await session.execute(
             text("""
-                INSERT INTO fundamental_metrics (instrument_id, pe_ratio, roe, de_ratio, peg_ratio)
-                VALUES (:iid, :pe, :roe, :de, :peg)
+                INSERT INTO fundamental_metrics (instrument_id, pe_ratio, roe, de_ratio, peg_ratio, revenue_growth)
+                VALUES (:iid, :pe, :roe, :de, :peg, :rev_growth)
             """),
             {
                 "iid": instrument_id,
@@ -113,6 +111,7 @@ async def store_fundamentals(instrument_id: str, metrics: dict) -> None:
                 "roe": metrics.get("roe"),
                 "de": metrics.get("de_ratio"),
                 "peg": metrics.get("peg_ratio"),
+                "rev_growth": metrics.get("revenue_growth"),
             },
         )
         await session.commit()
@@ -186,68 +185,53 @@ async def cleanup_old_records():
         await session.commit()
 
 
-async def fetch_fmp_cycle(instruments: list[dict]) -> None:
-    """Fetch FMP fundamentals for stocks, compute weighted averages for ETFs."""
-    if not FMP_API_KEY:
-        logger.warning("FMP_API_KEY not set — skipping stock fundamentals")
-        return
-
+async def fetch_stock_fundamentals_cycle(instruments: list[dict]) -> None:
+    """Fetch fundamentals for stocks via yfinance, symbol-by-symbol with delays."""
     stocks = [i for i in instruments if i["category"] == "stock"]
     etfs = [i for i in instruments if i["category"] == "etf"]
-    call_count = 0
 
     # Collect all symbols we need (stocks + unique ETF constituents)
     constituent_cache: dict[str, dict | None] = {}
 
-    async with httpx.AsyncClient() as client:
-        # Fetch stock fundamentals
-        for inst in stocks:
-            if call_count >= MAX_FMP_CALLS:
-                logger.warning("FMP call cap reached (%d)", MAX_FMP_CALLS)
-                break
-            metrics = await fetch_ratios(inst["symbol"], FMP_API_KEY, client)
-            call_count += 1
-            if metrics:
-                await store_fundamentals(inst["id"], metrics)
-                constituent_cache[inst["symbol"]] = metrics
-            await asyncio.sleep(CALL_DELAY)
+    # 1. Individual Stocks
+    for inst in stocks:
+        search_sym = inst["yfinance"] or inst["symbol"]
+        metrics = await fetch_ratios(search_sym)
+        if metrics:
+            await store_fundamentals(inst["id"], metrics)
+            constituent_cache[inst["symbol"]] = metrics
+        else:
+            # If no data, small rest then continue
+            logger.warning("No data for %s. Resting 2s.", search_sym)
+            await asyncio.sleep(2)
+        await asyncio.sleep(DELAY_BETWEEN_SYMBOLS)
 
-        # For ETFs: fetch constituents, fetch missing constituent data, compute weighted avg
-        for etf in etfs:
-            constituents = await get_etf_constituents(etf["id"])
-            if not constituents:
-                logger.info("[%s] No ETF constituents found", etf["symbol"])
-                continue
+    # 2. ETFs
+    for etf in etfs:
+        constituents = await get_etf_constituents(etf["id"])
+        if not constituents:
+            logger.info("[%s] No ETF constituents found", etf["symbol"])
+            continue
 
-            constituent_data: list[tuple[dict, float]] = []
-            for const in constituents:
-                sym = const["symbol"]
-                if sym not in constituent_cache:
-                    if call_count >= MAX_FMP_CALLS:
-                        logger.warning("FMP call cap reached (%d)", MAX_FMP_CALLS)
-                        break
-                    metrics = await fetch_ratios(sym, FMP_API_KEY, client)
-                    call_count += 1
-                    constituent_cache[sym] = metrics
-                    await asyncio.sleep(CALL_DELAY)
+        constituent_data: list[tuple[dict, float]] = []
+        for const in constituents:
+            sym = const["symbol"]
+            if sym not in constituent_cache:
+                metrics = await fetch_ratios(sym)
+                constituent_cache[sym] = metrics
+                await asyncio.sleep(DELAY_BETWEEN_SYMBOLS)
 
-                cached = constituent_cache.get(sym)
-                if cached:
-                    constituent_data.append((cached, const["weight"]))
+            cached = constituent_cache.get(sym)
+            if cached:
+                constituent_data.append((cached, const["weight"]))
 
-            etf_metrics = _compute_etf_fundamentals(constituent_data)
-            if etf_metrics:
-                await store_fundamentals(etf["id"], etf_metrics)
-                logger.info(
-                    "[%s] ETF weighted fundamentals: P/E=%.2f ROE=%.4f D/E=%.2f PEG=%.2f",
-                    etf["symbol"],
-                    etf_metrics.get("pe_ratio") or 0,
-                    etf_metrics.get("roe") or 0,
-                    etf_metrics.get("de_ratio") or 0,
-                    etf_metrics.get("peg_ratio") or 0,
-                )
-
-    logger.info("FMP cycle complete: %d API calls", call_count)
+        etf_metrics = _compute_etf_fundamentals(constituent_data)
+        if etf_metrics:
+            await store_fundamentals(etf["id"], etf_metrics)
+            logger.info(
+                "[%s] ETF weighted fundamentals complete",
+                etf["symbol"]
+            )
 
 
 async def fetch_fred_cycle() -> None:
@@ -259,27 +243,52 @@ async def fetch_fred_cycle() -> None:
     async with httpx.AsyncClient() as client:
         indicators = await fetch_all_macro_indicators(FRED_API_KEY, client)
 
+    # Use Yahoo Finance for Oil Price as requested
+    oil_price = await fetch_ticker_price("BZ=F")
+    if oil_price:
+        indicators["brent_crude"] = oil_price
+        logger.info("[YFinance] Brent Crude Oil (Yahoo) = %.2f", oil_price)
+
     stored = 0
     for name, value in indicators.items():
         if value is not None:
             await store_macro_indicator(
                 name=name,
                 value=value,
-                label=MACRO_LABELS[name],
-                unit=MACRO_UNITS[name],
+                label=MACRO_LABELS.get(name, name),
+                unit=MACRO_UNITS.get(name, ""),
             )
             stored += 1
 
-    logger.info("FRED cycle complete: %d/%d indicators stored", stored, len(indicators))
+    logger.info("Macro cycle complete: %d/%d indicators stored", stored, len(indicators))
 
 
-def _seconds_until_next_run(hour: int = 6) -> float:
-    """Calculate seconds until next target hour UTC."""
-    now = datetime.now(timezone.utc)
-    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+
+
+
+async def macro_and_cleanup_loop() -> None:
+    """Slow loop for FRED indicators and DB cleanup (every 4 hours)."""
+    while True:
+        try:
+            await fetch_fred_cycle()
+            await cleanup_old_records()
+        except Exception:
+            logger.exception("Error in macro/cleanup loop")
+        await asyncio.sleep(43200)  # 12 hours
+
+
+async def fundamentals_loop() -> None:
+    """Continuous stock fundamentals loop with staggered delays."""
+    while True:
+        try:
+            instruments = await get_instruments()
+            logger.info("Starting fundamentals cycle for %d instruments", len(instruments))
+            await fetch_stock_fundamentals_cycle(instruments)
+            logger.info("Fundamentals cycle complete. Resting 1s.")
+            await asyncio.sleep(1)
+        except Exception:
+            logger.exception("Error in fundamentals loop")
+            await asyncio.sleep(60)
 
 
 async def main() -> None:
@@ -289,22 +298,10 @@ async def main() -> None:
     await asyncio.sleep(15)
     await _ensure_tables()
 
-    while True:
-        try:
-            instruments = await get_instruments()
-            logger.info("Starting fetch cycle for %d instruments", len(instruments))
-
-            await fetch_fmp_cycle(instruments)
-            await fetch_fred_cycle()
-            await cleanup_old_records()
-
-            sleep_secs = _seconds_until_next_run(hour=6)
-            logger.info("Cycle complete. Next run in %.0f seconds (%.1f hours)", sleep_secs, sleep_secs / 3600)
-            await asyncio.sleep(sleep_secs)
-
-        except Exception:
-            logger.exception("Error in fetch cycle")
-            await asyncio.sleep(300)  # retry in 5 min on error
+    await asyncio.gather(
+        fundamentals_loop(),
+        macro_and_cleanup_loop()
+    )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ This dramatically reduces the number of API calls to NVIDIA NIM.
 """
 
 import asyncio
+import math
 import re
 import logging
 from datetime import datetime, timedelta, timezone
@@ -1453,7 +1454,8 @@ async def update_macro_sentiment() -> None:
         result = await session.execute(
             text("""
                 SELECT COALESCE(macro_sentiment_label, 'neutral') AS macro_sentiment_label,
-                       COALESCE(macro_long_term_label, 'neutral') AS macro_long_term_label
+                       COALESCE(macro_long_term_label, 'neutral') AS macro_long_term_label,
+                       published_at
                 FROM news_articles
                 WHERE is_macro = true
                 AND ollama_processed = true
@@ -1468,12 +1470,28 @@ async def update_macro_sentiment() -> None:
             return
 
         total_cnt = len(rows)
+        now_ts = datetime.now(timezone.utc)
+        HALF_LIFE_H = 24.0  # 24h half-life: recent events heavily outweigh older ones
+        decay_lambda = math.log(2) / HALF_LIFE_H
 
-        # --- Short-term macro ---
-        short_scores = [SENTIMENT_MULTIPLIERS.get(r.macro_sentiment_label, 0.0) for r in rows
-                        if r.macro_sentiment_label != "neutral"]
-        if short_scores:
-            short_net = sum(short_scores) / len(short_scores)
+        # --- Short-term macro (time-decay weighted) ---
+        short_wsum = 0.0
+        short_wtotal = 0.0
+        for r in rows:
+            lbl = r.macro_sentiment_label
+            if lbl == "neutral":
+                continue
+            score = SENTIMENT_MULTIPLIERS.get(lbl, 0.0)
+            pub = r.published_at if hasattr(r, "published_at") and r.published_at else now_ts
+            if pub.tzinfo is None:
+                pub = pub.replace(tzinfo=timezone.utc)
+            age_h = max(0.0, (now_ts - pub).total_seconds() / 3600.0)
+            w = math.exp(-decay_lambda * age_h)
+            short_wsum += score * w
+            short_wtotal += w
+
+        if short_wtotal > 0:
+            short_net = short_wsum / short_wtotal
             short_net = max(-3.0, min(3.0, short_net))
             short_label = "positive" if short_net > 0.75 else ("negative" if short_net < -0.75 else "neutral")
 
@@ -1485,11 +1503,26 @@ async def update_macro_sentiment() -> None:
                 {"score": short_net, "label": short_label, "count": total_cnt},
             )
 
-        # --- Long-term macro ---
-        long_scores = [SENTIMENT_MULTIPLIERS.get(r.macro_long_term_label, 0.0) for r in rows
-                       if r.macro_long_term_label != "neutral"]
-        if long_scores:
-            long_net = sum(long_scores) / len(long_scores)
+        # --- Long-term macro (time-decay weighted, 96h half-life) ---
+        LT_HALF_LIFE_H = 96.0
+        lt_decay_lambda = math.log(2) / LT_HALF_LIFE_H
+        long_wsum = 0.0
+        long_wtotal = 0.0
+        for r in rows:
+            lbl = r.macro_long_term_label
+            if lbl == "neutral":
+                continue
+            score = SENTIMENT_MULTIPLIERS.get(lbl, 0.0)
+            pub = r.published_at if hasattr(r, "published_at") and r.published_at else now_ts
+            if pub.tzinfo is None:
+                pub = pub.replace(tzinfo=timezone.utc)
+            age_h = max(0.0, (now_ts - pub).total_seconds() / 3600.0)
+            w = math.exp(-lt_decay_lambda * age_h)
+            long_wsum += score * w
+            long_wtotal += w
+
+        if long_wtotal > 0:
+            long_net = long_wsum / long_wtotal
             long_net = max(-3.0, min(3.0, long_net))
             long_label = "positive" if long_net > 0.75 else ("negative" if long_net < -0.75 else "neutral")
 
