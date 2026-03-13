@@ -137,6 +137,7 @@ async def cmd_backtest(args) -> None:
         term=args.term,
         fetch_sentiment=not args.no_sentiment,
         skip_existing=not args.force,
+        ignore_sentiment=args.no_sentiment,
     )
     logger.info("Backtest done. %d grade rows produced.", len(results))
 
@@ -182,7 +183,11 @@ async def cmd_patch(args) -> None:
 async def cmd_report(args) -> None:
     from .report_generator import generate_backtest_report
 
-    await generate_backtest_report(strategy=args.strategy, term=args.term)
+    sentiment_mode ="with sentiment"
+    if args.no_sentiment:
+        sentiment_mode = "without sentiment"
+
+    await generate_backtest_report(strategy=args.strategy, term=args.term, sentiment_mode=sentiment_mode)
 
 
 async def cmd_run_all(args) -> None:
@@ -260,6 +265,7 @@ def main():
     p_rep = subparsers.add_parser("report", help="Generate HTML performance report")
     p_rep.add_argument("--strategy", choices=["portfolio", "top_pick"], default="portfolio")
     p_rep.add_argument("--term", choices=["short", "long"], default="short")
+    p_rep.add_argument("--no-sentiment", action="store_true", help="Label report as 'without sentiment'")
 
     # run-all
     subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report")

@@ -170,6 +170,7 @@ async def run_backtest(
     term: str = "short",
     fetch_sentiment: bool = True,
     skip_existing: bool = True,
+    ignore_sentiment: bool = False,
 ) -> list[dict]:
     """Run the full backtest over all instruments and trading days.
 
@@ -178,6 +179,7 @@ async def run_backtest(
         fetch_sentiment:  If True, fetch any missing sentiment from Google News + NIM.
                           If False, use only what's already cached.
         skip_existing:    If True, skip dates already in backtest_grades.
+        ignore_sentiment: If True, set all sentiment/macro/sector scores to 0.0.
 
     Returns list of result dicts for calibration.
     """
@@ -254,6 +256,11 @@ async def run_backtest(
 
             # --- Sector sentiment score (production-faithful, was hardcoded 0.0) ---
             sector_score, sector_conf = get_sector_sentiment_for_date(sector, d, sentiment_cache, term)
+
+            if ignore_sentiment:
+                sent_score, sent_conf = 0.0, 0.5
+                macro_score, macro_conf = 0.0, 0.5
+                sector_score, sector_conf = 0.0, 0.5
 
             # --- Fundamentals score + freshness confidence ---
             price_at_date = None

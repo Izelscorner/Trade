@@ -240,7 +240,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <h1>TradeSignal Analysis: {{ strategy|capitalize }} ({{ term|capitalize }})</h1>
+            <h1>TradeSignal Analysis: {{ strategy|capitalize }} ({{ term|capitalize }}) {{ sentiment_label }}</h1>
             <div class="timestamp">Generated: {{ timestamp }}</div>
         </header>
 
@@ -530,9 +530,9 @@ def generate_charts(df: pd.DataFrame) -> dict:
     }
 
 
-async def generate_backtest_report(strategy: str = "portfolio", term: str = "short") -> str:
+async def generate_backtest_report(strategy: str = "portfolio", term: str = "short", sentiment_mode: str = "with sentiment") -> str:
     """Run full reporting pipeline and save HTML."""
-    logger.info(f"Generating Backtest Report (strategy={strategy}, term={term})...")
+    logger.info(f"Generating Backtest Report (strategy={strategy}, term={term}, mode={sentiment_mode})...")
 
     df = await get_raw_results(term=term)
     if df.empty:
@@ -574,15 +574,17 @@ async def generate_backtest_report(strategy: str = "portfolio", term: str = "sho
         instrument_stats=inst_stats,
         charts=chart_data,
         weights=COMPOSITE_WEIGHT_PROFILES,
+        sentiment_label=f"({sentiment_mode})" if sentiment_mode else "",
     )
 
     report_dir = "/app/reports"
     if not os.path.exists(report_dir):
         os.makedirs(report_dir, exist_ok=True)
 
-    filename = f"report_{strategy}_{term}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    mode_slug = sentiment_mode.replace(" ", "_")
+    filename = f"report_{strategy}_{term}_{mode_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     filepath = os.path.join(report_dir, filename)
-    latest_path = os.path.join(report_dir, f"latest_report_{strategy}_{term}.html")
+    latest_path = os.path.join(report_dir, f"latest_report_{strategy}_{term}_{mode_slug}.html")
 
     with open(filepath, "w") as f:
         f.write(html)
