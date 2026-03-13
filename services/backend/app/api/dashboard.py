@@ -23,7 +23,9 @@ async def get_dashboard():
                     i.id, i.symbol, i.name, i.category, i.sector,
                     lp.price, lp.change_amount, lp.change_percent, lp.market_status,
                     gs.overall_grade as short_grade, gs.overall_score as short_score,
+                    gs.pure_grade as short_pure_grade, gs.pure_score as short_pure_score,
                     gl.overall_grade as long_grade, gl.overall_score as long_score,
+                    gl.pure_grade as long_pure_grade, gl.pure_score as long_pure_score,
                     COALESCE(gs.graded_at, gl.graded_at) as graded_at
                 FROM instruments i
                 LEFT JOIN LATERAL (
@@ -32,12 +34,12 @@ async def get_dashboard():
                     ORDER BY fetched_at DESC LIMIT 1
                 ) lp ON true
                 LEFT JOIN LATERAL (
-                    SELECT overall_grade, overall_score, graded_at
+                    SELECT overall_grade, overall_score, pure_grade, pure_score, graded_at
                     FROM grades WHERE instrument_id = i.id AND term = 'short'
                     ORDER BY graded_at DESC LIMIT 1
                 ) gs ON true
                 LEFT JOIN LATERAL (
-                    SELECT overall_grade, overall_score, graded_at
+                    SELECT overall_grade, overall_score, pure_grade, pure_score, graded_at
                     FROM grades WHERE instrument_id = i.id AND term = 'long'
                     ORDER BY graded_at DESC LIMIT 1
                 ) gl ON true
@@ -62,6 +64,10 @@ async def get_dashboard():
             short_term_score=float(r.short_score) if r.short_score is not None else None,
             long_term_grade=r.long_grade,
             long_term_score=float(r.long_score) if r.long_score is not None else None,
+            short_term_pure_grade=r.short_pure_grade,
+            short_term_pure_score=float(r.short_pure_score) if r.short_pure_score is not None else None,
+            long_term_pure_grade=r.long_pure_grade,
+            long_term_pure_score=float(r.long_pure_score) if r.long_pure_score is not None else None,
             graded_at=r.graded_at,
         )
         for r in rows

@@ -4,7 +4,7 @@ import { useState, useMemo, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useAtom } from "jotai";
 import { useQueryClient } from "@tanstack/react-query";
-import { dashboardAtom } from "../atoms";
+import { dashboardAtom, showSentimentAtom } from "../atoms";
 import { wsSubscribe } from "../ws";
 import { addInstruments } from "../api/client";
 import { usePortfolio } from "../hooks/usePortfolio";
@@ -60,6 +60,8 @@ export default function AssetList() {
     setPage(1);
   }, [category, sector, search]);
 
+  const [showSentiment] = useAtom(showSentimentAtom);
+
   // Derive available sectors from current instruments
   const availableSectors = useMemo(() => {
     const sectors = new Set<Sector>();
@@ -98,15 +100,19 @@ export default function AssetList() {
           cmp = (a.change_percent ?? 0) - (b.change_percent ?? 0);
           break;
         case "short_grade":
-          cmp = (a.short_term_score ?? -999) - (b.short_term_score ?? -999);
+          const sA = (showSentiment ? a.short_term_score : a.short_term_pure_score) ?? -999;
+          const sB = (showSentiment ? b.short_term_score : b.short_term_pure_score) ?? -999;
+          cmp = sA - sB;
           break;
         case "long_grade":
-          cmp = (a.long_term_score ?? -999) - (b.long_term_score ?? -999);
+          const lA = (showSentiment ? a.long_term_score : a.long_term_pure_score) ?? -999;
+          const lB = (showSentiment ? b.long_term_score : b.long_term_pure_score) ?? -999;
+          cmp = lA - lB;
           break;
       }
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [instruments, category, sector, sortKey, sortDir, search]);
+  }, [instruments, category, sector, sortKey, sortDir, search, showSentiment]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
   const paginated = filtered.slice(
@@ -224,6 +230,7 @@ export default function AssetList() {
               key={inst.id}
               instrument={inst}
               index={index}
+              showSentiment={showSentiment}
               starred={isInPortfolio(inst.id)}
               onToggleStar={() => togglePortfolio(inst.id)}
               onRemove={async () => {
@@ -300,17 +307,24 @@ export default function AssetList() {
 function InstrumentRow({
   instrument,
   index,
+  showSentiment,
   starred,
   onToggleStar,
   onRemove,
 }: {
   instrument: DashboardInstrument;
   index: number;
+  showSentiment: boolean;
   starred: boolean;
   onToggleStar: () => void;
   onRemove: () => void;
 }) {
   const statusColor = marketStatusColors[instrument.market_status || "closed"];
+
+  const sGrade = showSentiment ? instrument.short_term_grade : instrument.short_term_pure_grade;
+  const sScore = showSentiment ? instrument.short_term_score : instrument.short_term_pure_score;
+  const lGrade = showSentiment ? instrument.long_term_grade : instrument.long_term_pure_grade;
+  const lScore = showSentiment ? instrument.long_term_score : instrument.long_term_pure_score;
 
   return (
     <div
@@ -380,8 +394,8 @@ function InstrumentRow({
 
       <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
-          grade={instrument.short_term_grade}
-          score={instrument.short_term_score}
+          grade={sGrade}
+          score={sScore}
           size="sm"
           gradedAt={instrument.graded_at}
         />
@@ -389,8 +403,8 @@ function InstrumentRow({
 
       <Link to={`/asset/${instrument.id}`} className="flex justify-center">
         <GradeBadge
-          grade={instrument.long_term_grade}
-          score={instrument.long_term_score}
+          grade={lGrade}
+          score={lScore}
           size="sm"
           gradedAt={instrument.graded_at}
         />

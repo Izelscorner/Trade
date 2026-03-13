@@ -18,6 +18,7 @@ import {
 interface GradeDetailProps {
   shortGrade: Grade | null;
   longGrade: Grade | null;
+  showSentiment: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,10 +259,16 @@ function GroupSummary({
 // ---------------------------------------------------------------------------
 // One grade panel
 // ---------------------------------------------------------------------------
-function GradeSection({ grade, label }: { grade: Grade; label: string }) {
+function GradeSection({ grade, label, showSentiment }: { grade: Grade; label: string; showSentiment: boolean }) {
+  const score = showSentiment ? grade.overall_score : (grade.pure_score ?? grade.overall_score);
   const buyConf =
-    grade.details?.buy_confidence ?? scoreToBuyConfidence(grade.overall_score);
-  const action = grade.details?.action ?? buyConfidenceToAction(buyConf);
+    showSentiment 
+      ? (grade.details?.buy_confidence ?? scoreToBuyConfidence(score))
+      : scoreToBuyConfidence(score);
+  
+  const action = showSentiment 
+    ? (grade.details?.action ?? buyConfidenceToAction(buyConf))
+    : buyConfidenceToAction(buyConf);
   const sentConf = grade.details?.sentiment?.confidence;
   const sentArticles = grade.details?.sentiment?.articles;
   const sentConsensus = grade.details?.sentiment?.consensus_adjustment as
@@ -326,8 +333,8 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
           </h3>
         </div>
         <span className="text-[10px] text-text-muted font-mono bg-surface-3 px-2 py-0.5 rounded">
-          score {grade.overall_score > 0 ? "+" : ""}
-          {grade.overall_score.toFixed(3)}
+          score {score > 0 ? "+" : ""}
+          {score.toFixed(3)}
         </span>
       </div>
 
@@ -528,6 +535,7 @@ function GradeSection({ grade, label }: { grade: Grade; label: string }) {
 export default function GradeDetail({
   shortGrade,
   longGrade,
+  showSentiment,
 }: GradeDetailProps) {
   return (
     <div className="space-y-4">
@@ -537,14 +545,14 @@ export default function GradeDetail({
       </h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {shortGrade ? (
-          <GradeSection grade={shortGrade} label="Short-Term" />
+          <GradeSection grade={shortGrade} label="Short-Term" showSentiment={showSentiment} />
         ) : (
           <div className="rounded-xl bg-surface-2/50 border border-border-subtle p-5 flex items-center justify-center text-text-muted text-sm">
             No short-term grade available
           </div>
         )}
         {longGrade ? (
-          <GradeSection grade={longGrade} label="Long-Term" />
+          <GradeSection grade={longGrade} label="Long-Term" showSentiment={showSentiment} />
         ) : (
           <div className="rounded-xl bg-surface-2/50 border border-border-subtle p-5 flex items-center justify-center text-text-muted text-sm">
             No long-term grade available

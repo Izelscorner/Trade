@@ -50,17 +50,24 @@ function ConfBadge({ pct, label }: ConfBadgeProps) {
   );
 }
 
+import { useAtom } from "jotai";
+import { showSentimentAtom } from "../atoms";
+
 export default function InstrumentCard({ instrument, index }: InstrumentCardProps) {
+  const [showSentiment] = useAtom(showSentimentAtom);
   const statusColor = marketStatusColors[instrument.market_status || "closed"] || marketStatusColors.closed;
   const statusLabel = (instrument.market_status || "closed").replace("_", " ");
 
-  const shortPct = scoreToBuyConfidence(instrument.short_term_score ?? null);
-  const longPct  = scoreToBuyConfidence(instrument.long_term_score  ?? null);
+  const sScore = showSentiment ? instrument.short_term_score : instrument.short_term_pure_score;
+  const lScore = showSentiment ? instrument.long_term_score  : instrument.long_term_pure_score;
+
+  const shortPct = scoreToBuyConfidence(sScore ?? null);
+  const longPct  = scoreToBuyConfidence(lScore  ?? null);
 
   // Composite bar: blend of short + long (50/50)
-  const compositeConf = instrument.short_term_score !== null && instrument.long_term_score !== null
+  const compositeConf = sScore !== null && lScore !== null
     ? (shortPct + longPct) / 2
-    : instrument.short_term_score !== null ? shortPct : longPct;
+    : sScore !== null ? shortPct : longPct;
 
   const cls = confidenceClasses(compositeConf);
 
@@ -85,10 +92,10 @@ export default function InstrumentCard({ instrument, index }: InstrumentCardProp
 
         {/* Short + Long confidence badges */}
         <div className="flex items-start gap-2">
-          {instrument.short_term_score !== null && (
+          {sScore !== null && (
             <ConfBadge pct={shortPct} label="Short" />
           )}
-          {instrument.long_term_score !== null && (
+          {lScore !== null && (
             <ConfBadge pct={longPct} label="Long" />
           )}
         </div>

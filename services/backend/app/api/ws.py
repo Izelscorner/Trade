@@ -399,6 +399,8 @@ async def broadcast_latest_grades():
                     "term": r.term,
                     "overall_grade": r.overall_grade,
                     "overall_score": float(r.overall_score),
+                    "pure_grade": r.pure_grade,
+                    "pure_score": float(r.pure_score) if r.pure_score is not None else None,
                     "technical_score": float(r.technical_score),
                     "sentiment_score": float(r.sentiment_score),
                     "macro_score": float(r.macro_score),

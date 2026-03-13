@@ -61,6 +61,8 @@ class GradeSchema(BaseModel):
     macro_score: float
     sector_score: float = 0.0
     fundamentals_score: float = 0.0
+    pure_score: float | None = None
+    pure_grade: str | None = None
     details: dict | None = None
     graded_at: datetime
 
@@ -111,6 +113,10 @@ class DashboardInstrumentSchema(BaseModel):
     short_term_score: float | None = None
     long_term_grade: str | None = None
     long_term_score: float | None = None
+    short_term_pure_grade: str | None = None
+    short_term_pure_score: float | None = None
+    long_term_pure_grade: str | None = None
+    long_term_pure_score: float | None = None
     graded_at: datetime | None = None
 
 

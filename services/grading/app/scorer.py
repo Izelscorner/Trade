@@ -1030,9 +1030,8 @@ async def grade_instrument(
     macro_conf = macro_details.get("confidence", 0.0)
     fund_conf = fund_details.get("confidence", 0.0)
 
+    # 1. Full Production Score (with all available signals)
     effective_weights = {
-        # Floor = 0.1: when confidence is 0 (no data), signal nearly drops out of composite.
-        # Floor = 0.5 (old) anchored the composite too strongly toward neutral with sparse data.
         "technical":    weights["technical"]    * (0.1 + 0.9 * tech_conf),
         "sentiment":    weights["sentiment"]    * (0.1 + 0.9 * sent_conf),
         "sector":       weights["sector"]       * (0.1 + 0.9 * sector_conf),
@@ -1040,9 +1039,8 @@ async def grade_instrument(
         "fundamentals": weights["fundamentals"] * (0.1 + 0.9 * fund_conf),
     }
     w_sum = sum(effective_weights.values())
-    if w_sum == 0:
-        overall = 0.0
-    else:
+    overall = 0.0
+    if w_sum > 0:
         overall = (
             technical_score * effective_weights["technical"]
             + sentiment_score * effective_weights["sentiment"]
@@ -1051,16 +1049,35 @@ async def grade_instrument(
             + fundamentals_score * effective_weights["fundamentals"]
         ) / w_sum
 
-    overall = round(_clip(overall), 4)
+    # 2. Pure Score (No Sentiment/Macro/Sector influence)
+    # Force sentiment-related confidences to 0.0 for this branch.
+    pure_effective_weights = {
+        "technical":    weights["technical"]    * (0.1 + 0.9 * tech_conf),
+        "sentiment":    weights["sentiment"]    * 0.1,  # Force floor
+        "sector":       weights["sector"]       * 0.1,
+        "macro":        weights["macro"]        * 0.1,
+        "fundamentals": weights["fundamentals"] * (0.1 + 0.9 * fund_conf),
+    }
+    pure_w_sum = sum(pure_effective_weights.values())
+    pure_overall = 0.0
+    if pure_w_sum > 0:
+        # Note: we use 0.0 for the scores of ignored signals in this branch
+        pure_overall = (
+            technical_score * pure_effective_weights["technical"]
+            + fundamentals_score * pure_effective_weights["fundamentals"]
+        ) / pure_w_sum
 
-    # Buy confidence via sigmoid and actionable label
+    pure_overall = round(_clip(pure_overall), 4)
+
+    # Buy confidence via sigmoid and actionable labels
     buy_confidence = _sigmoid_confidence(overall)
     action = _action_label(buy_confidence)
+    
+    pure_buy_confidence = _sigmoid_confidence(pure_overall)
+    pure_action = _action_label(pure_buy_confidence)
 
-    # ATR-based position size modifier: 1.0 / (1 + ATR%/2)
-    # Reduces suggested position size proportionally with volatility.
-    # ATR%=1% → 0.67, ATR%=2% → 0.50, ATR%=4% → 0.33
-    atr_pct = tech_details.get("atr_pct") or 2.0  # Default to moderate if missing
+    # ATR-based position size modifier
+    atr_pct = tech_details.get("atr_pct") or 2.0
     position_size_modifier = round(1.0 / (1.0 + atr_pct / 2.0), 3)
 
     now = datetime.now(timezone.utc)
@@ -1069,8 +1086,10 @@ async def grade_instrument(
         "instrument_id": instrument_id,
         "symbol": symbol,
         "term": term,
-        "overall_grade": action,           # human-readable action label
+        "overall_grade": action,
         "overall_score": overall,
+        "pure_grade": pure_action,
+        "pure_score": pure_overall,
         "technical_score": technical_score,
         "sentiment_score": sentiment_score,
         "macro_score": macro_score,
@@ -1081,6 +1100,8 @@ async def grade_instrument(
             "effective_weights": {k: round(v / w_sum, 4) for k, v in effective_weights.items()} if w_sum else weights,
             "buy_confidence": buy_confidence,
             "action": action,
+            "pure_action": pure_action,
+            "pure_score": pure_overall,
             "position_size_modifier": position_size_modifier,
             "technical": tech_details,
             "sentiment": sent_details,
@@ -1097,10 +1118,18 @@ async def store_grade(grade: dict) -> None:
     async with async_session() as session:
         await session.execute(
             text("""
-                INSERT INTO grades (instrument_id, term, overall_grade, overall_score,
-                    technical_score, sentiment_score, macro_score, sector_score, fundamentals_score, details, graded_at)
-                VALUES (:instrument_id, :term, :overall_grade, :overall_score,
-                    :technical_score, :sentiment_score, :macro_score, :sector_score, :fundamentals_score, CAST(:details AS jsonb), :graded_at)
+                INSERT INTO grades (
+                    instrument_id, term, overall_grade, overall_score,
+                    pure_grade, pure_score,
+                    technical_score, sentiment_score, macro_score, sector_score, fundamentals_score, 
+                    details, graded_at
+                )
+                VALUES (
+                    :instrument_id, :term, :overall_grade, :overall_score,
+                    :pure_grade, :pure_score,
+                    :technical_score, :sentiment_score, :macro_score, :sector_score, :fundamentals_score, 
+                    CAST(:details AS jsonb), :graded_at
+                )
             """),
             grade,
         )

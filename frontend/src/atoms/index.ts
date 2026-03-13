@@ -1,6 +1,7 @@
 /** Jotai atoms for TradeSignal state management */
 
 import { atom } from "jotai";
+import { atomWithStorage } from "jotai/utils";
 import { atomWithQuery } from "jotai-tanstack-query";
 import {
   fetchDashboard,
@@ -28,6 +29,7 @@ import type {
 // --- UI State ---
 export const selectedCategoryAtom = atom<Category | "all">("all");
 export const selectedInstrumentIdAtom = atom<string | null>(null);
+export const showSentimentAtom = atomWithStorage<boolean>("showSentiment", true);
 
 // --- Dashboard ---
 export const dashboardAtom = atomWithQuery<DashboardInstrument[]>(() => ({

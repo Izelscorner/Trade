@@ -33,6 +33,7 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
                 SELECT DISTINCT ON (g.instrument_id, g.term)
                     g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
+                    g.pure_grade, g.pure_score,
                     g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
                     COALESCE(g.fundamentals_score, 0) as fundamentals_score,
                     g.details, g.graded_at
@@ -54,6 +55,8 @@ async def list_grades(instrument_id: str | None = None, term: str | None = None)
             term=r.term,
             overall_grade=r.overall_grade,
             overall_score=float(r.overall_score),
+            pure_score=float(r.pure_score) if r.pure_score is not None else None,
+            pure_grade=r.pure_grade,
             technical_score=float(r.technical_score),
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),
@@ -75,6 +78,7 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
             text("""
                 SELECT g.id, g.instrument_id, i.symbol, i.name, g.term,
                     g.overall_grade, g.overall_score,
+                    g.pure_grade, g.pure_score,
                     g.technical_score, g.sentiment_score, g.macro_score, COALESCE(g.sector_score, 0) as sector_score,
                     COALESCE(g.fundamentals_score, 0) as fundamentals_score,
                     g.details, g.graded_at
@@ -97,6 +101,8 @@ async def grade_history(instrument_id: str, term: str = "short", limit: int = 30
             term=r.term,
             overall_grade=r.overall_grade,
             overall_score=float(r.overall_score),
+            pure_score=float(r.pure_score) if r.pure_score is not None else None,
+            pure_grade=r.pure_grade,
             technical_score=float(r.technical_score),
             sentiment_score=float(r.sentiment_score),
             macro_score=float(r.macro_score),

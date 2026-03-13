@@ -51,6 +51,10 @@ export interface DashboardInstrument {
   short_term_score: number | null;
   long_term_grade: string | null;
   long_term_score: number | null;
+  short_term_pure_grade: string | null;
+  short_term_pure_score: number | null;
+  long_term_pure_grade: string | null;
+  long_term_pure_score: number | null;
   graded_at: string | null;
 }
 
@@ -85,6 +89,8 @@ export interface Grade {
   macro_score: number;
   sector_score: number;
   fundamentals_score: number;
+  pure_score?: number | null;
+  pure_grade?: string | null;
   details: GradeDetails | null;
   graded_at: string;
 }

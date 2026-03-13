@@ -14,16 +14,20 @@ import type { DashboardInstrument } from "../types";
 function sortByGrade(
   instruments: DashboardInstrument[],
   direction: "best" | "worst",
+  showSentiment: boolean
 ): DashboardInstrument[] {
   const sorted = [...instruments].sort((a, b) => {
-    const scoreA = a.short_term_score ?? -999;
-    const scoreB = b.short_term_score ?? -999;
+    const scoreA = (showSentiment ? a.short_term_score : a.short_term_pure_score) ?? -999;
+    const scoreB = (showSentiment ? b.short_term_score : b.short_term_pure_score) ?? -999;
     return direction === "best" ? scoreB - scoreA : scoreA - scoreB;
   });
   return sorted;
 }
 
+import { showSentimentAtom } from "../atoms";
+
 export default function Dashboard() {
+  const [showSentiment] = useAtom(showSentimentAtom);
   const [{ data: instruments, isLoading: loadingInstruments }] =
     useAtom(dashboardAtom);
   const [{ data: macroSentiments }] = useAtom(macroSentimentAtom);
@@ -36,8 +40,8 @@ export default function Dashboard() {
   if (loadingInstruments) return <PageSkeleton />;
 
   const instrumentList = instruments || [];
-  const topGraded = sortByGrade(instrumentList, "best").slice(0, 4);
-  const worstGraded = sortByGrade(instrumentList, "worst").slice(0, 4);
+  const topGraded = sortByGrade(instrumentList, "best", showSentiment).slice(0, 4);
+  const worstGraded = sortByGrade(instrumentList, "worst", showSentiment).slice(0, 4);
 
   return (
     <div className="max-w-[1400px] mx-auto px-6 py-8 space-y-8">

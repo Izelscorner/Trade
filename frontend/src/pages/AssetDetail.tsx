@@ -11,6 +11,7 @@ import {
   instrumentGradesAtom,
   instrumentAIAnalysisAtom,
   macroSentimentAtom,
+  showSentimentAtom,
 } from "../atoms";
 import {
   fetchInstrument,
@@ -48,6 +49,7 @@ const marketStatusConfig: Record<string, { label: string; color: string }> = {
 
 export default function AssetDetail() {
   const { id } = useParams<{ id: string }>();
+  const [showSentiment] = useAtom(showSentimentAtom);
   const [instrument, setInstrument] = useState<Instrument | null>(null);
   const [livePrice, setLivePrice] = useState<LivePrice | null>(null);
   const [loading, setLoading] = useState(true);
@@ -236,7 +238,11 @@ export default function AssetDetail() {
 
       {/* Grades */}
       <div className="animate-slide-up" style={{ animationDelay: "100ms" }}>
-        <GradeDetail shortGrade={shortGrade} longGrade={longGrade} />
+        <GradeDetail
+          shortGrade={shortGrade}
+          longGrade={longGrade}
+          showSentiment={showSentiment}
+        />
       </div>
 
       {/* Fundamentals (stocks/ETFs only) */}

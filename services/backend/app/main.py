@@ -15,6 +15,7 @@ from .api.dashboard import router as dashboard_router
 from .api.ai_analysis import router as ai_analysis_router
 from .api.portfolio import router as portfolio_router
 from .api.fundamentals import router as fundamentals_router
+from .api.settings import router as settings_router
 
 
 from .api.ws import (
@@ -120,6 +121,20 @@ async def _ensure_extra_tables():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$
         """))
+        await session.execute(_text("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key VARCHAR(50) PRIMARY KEY,
+                value JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(_text("""
+            DO $$ BEGIN
+                ALTER TABLE grades ADD COLUMN IF NOT EXISTS pure_score NUMERIC(7, 4);
+                ALTER TABLE grades ADD COLUMN IF NOT EXISTS pure_grade VARCHAR(20);
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
         await session.commit()
 
 
@@ -162,6 +177,7 @@ app.include_router(technical_router, prefix="/api/v1/technical", tags=["technica
 app.include_router(ai_analysis_router, prefix="/api/v1/ai-analysis", tags=["ai-analysis"])
 app.include_router(portfolio_router, prefix="/api/v1/portfolio", tags=["portfolio"])
 app.include_router(fundamentals_router, prefix="/api/v1/fundamentals", tags=["fundamentals"])
+app.include_router(settings_router, prefix="/api/v1/settings", tags=["settings"])
 app.include_router(ws_router, prefix="/api/v1")
 
 
