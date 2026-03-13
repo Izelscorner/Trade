@@ -146,3 +146,12 @@ Calibrate weights — Use the backtest to find optimal weights per category and 
 Add earnings calendar — Just knowing when earnings are due (from Yahoo Finance calendarEvents) would dramatically improve short-term signal quality
 Add regime detection — Simple: VIX < 15 = bull weights, VIX > 25 = bear weights, in between = current weights
 The mathematical foundation is now sound — the grading system correctly processes the signals it has. The question is whether those signals, weighted the way they are, have positive predictive alpha. That requires backtesting data to answer.
+
+
+Run backtest for following settings for 11 assets which has enough sentiment news for now
+what I need to see 4 reports like below
+
+top pick short term with sentiment
+top pick short term without sentiment
+top pick long term with sentiment 
+top pick long term without sentiment 
