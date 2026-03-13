@@ -67,7 +67,17 @@ Check the `backtest_grades` and `backtest_returns` tables to ensure scores and f
 
 ---
 
-## 4. Calibration & Deployment
+## 4. Visual Performance Analysis
+
+To generate a comprehensive HTML report with interactive charts (Equity Curve, Alpha Distributions):
+```bash
+docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main report
+```
+The report will be saved to `./backtest_reports/report_[TIMESTAMP].html`. Open this file in any browser to view detailed analytics.
+
+---
+
+## 5. Calibration & Deployment
 
 ### Step 1: Optimize Weights
 Run the optimizer to find the weights that maximize the Sharpe ratio:
@@ -98,5 +108,6 @@ docker compose up -d --build grading
 | **Store Data** | `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main fetch-sentiment` | Once per new instrument/year |
 | **Verify Status** | `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main status` | As needed |
 | **Run Simulation**| `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main backtest` | Whenever logic changes |
+| **Generate Report**| `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main report` | After simulation |
 | **Calibrate** | `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main calibrate` | After simulation |
 | **Deploy** | `docker compose -f docker-compose.backtest.yml run --rm backtester python -m app.main patch` | Monthly or as markets shift |

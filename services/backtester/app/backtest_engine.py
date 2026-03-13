@@ -108,7 +108,7 @@ async def store_backtest_grade(
                 "iid": instrument_id, "sym": symbol, "date": d, "term": term,
                 "overall": overall_score,
                 "tech": technical_score, "tech_conf": technical_conf,
-                "sent": sent_score, "sent_conf": sentiment_conf,
+                "sent": sentiment_score, "sent_conf": sentiment_conf,
                 "macro": macro_score, "macro_conf": macro_conf,
                 "sector": sector_score, "sec_conf": sector_conf,
                 "fund": fundamentals_score, "fund_conf": fundamentals_conf,

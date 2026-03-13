@@ -179,6 +179,12 @@ async def cmd_patch(args) -> None:
     patch_scorer_py(results, dry_run=args.dry_run)
 
 
+async def cmd_report(args) -> None:
+    from .report_generator import generate_backtest_report
+
+    await generate_backtest_report()
+
+
 async def cmd_run_all(args) -> None:
     from .backtest_engine import load_backtest_results, run_backtest
     from .calibrator import run_all_calibrations, save_calibration_run
@@ -205,6 +211,10 @@ async def cmd_run_all(args) -> None:
 
     logger.info("=== Step 5: Patch scorer.py ===")
     patch_scorer_py(cal_results, dry_run=False)
+
+    logger.info("=== Step 6: Generate Performance Report ===")
+    from .report_generator import generate_backtest_report
+    await generate_backtest_report()
 
     logger.info("=== Pipeline complete ===")
 
@@ -246,8 +256,11 @@ def main():
     p_patch = subparsers.add_parser("patch", help="Apply optimized weights to scorer.py")
     p_patch.add_argument("--dry-run", action="store_true", help="Print changes without writing")
 
+    # report
+    subparsers.add_parser("report", help="Generate HTML performance report")
+
     # run-all
-    subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch")
+    subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report")
 
     args = parser.parse_args()
 
@@ -257,6 +270,7 @@ def main():
         "backtest":        cmd_backtest,
         "calibrate":       cmd_calibrate,
         "patch":           cmd_patch,
+        "report":          cmd_report,
         "run-all":         cmd_run_all,
     }
 

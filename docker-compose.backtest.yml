@@ -49,6 +49,7 @@ services:
       SCORER_PY_PATH: /scorer/scorer.py
     volumes:
       - ./services/grading/app:/scorer:rw
+      - ./backtest_reports:/app/reports:rw
     depends_on:
       postgres:
         condition: service_healthy
