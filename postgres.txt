@@ -1,0 +1,60 @@
+docker compose exec postgres psql -U tradesignal -d tradesignal
+Once inside psql:
+
+
+-- Row counts for all backtest tables
+SELECT 'backtest_grades' as tbl, COUNT(*) FROM backtest_grades
+UNION ALL SELECT 'backtest_returns', COUNT(*) FROM backtest_returns
+UNION ALL SELECT 'backtest_av_cache', COUNT(*) FROM backtest_av_cache
+UNION ALL SELECT 'calibration_runs', COUNT(*) FROM calibration_runs;
+
+-- LLM sentiment cache progress (per symbol)
+SELECT symbol, COUNT(*) as weeks_cached,
+       ROUND(AVG(avg_score)::numeric, 3) as avg_score,
+       MIN(week_start) as earliest, MAX(week_start) as latest
+FROM backtest_av_cache
+GROUP BY symbol ORDER BY symbol;
+
+-- Sample backtest grades (latest 20 rows)
+SELECT symbol, date, term,
+       ROUND(overall_score::numeric,3) as score,
+       ROUND(technical_score::numeric,3) as tech,
+       ROUND(sentiment_score::numeric,3) as sent,
+       ROUND(macro_score::numeric,3) as macro
+FROM backtest_grades
+ORDER BY date DESC LIMIT 20;
+
+-- Forward returns distribution by symbol
+SELECT symbol,
+       COUNT(*) as n,
+       ROUND(AVG(return_5d)::numeric*100, 2) as avg_5d_pct,
+       ROUND(AVG(return_20d)::numeric*100, 2) as avg_20d_pct,
+       ROUND(STDDEV(return_20d)::numeric*100, 2) as std_20d_pct
+FROM backtest_returns
+GROUP BY symbol ORDER BY avg_20d_pct DESC;
+
+-- Grade score quintile vs forward return (signal quality check)
+SELECT
+  width_bucket(overall_score, -3, 3, 5) as quintile,
+  COUNT(*) as n,
+  ROUND(AVG(br.return_20d)::numeric*100, 2) as avg_20d_return_pct
+FROM backtest_grades bg
+JOIN backtest_returns br ON br.instrument_id = bg.instrument_id AND br.date = bg.date
+WHERE bg.term = 'short'
+GROUP BY quintile ORDER BY quintile;
+
+-- Per-category score vs return correlation check
+SELECT bg.term, i.category,
+       COUNT(*) as n,
+       ROUND(CORR(bg.overall_score, br.return_20d)::numeric, 4) as pearson_corr
+FROM backtest_grades bg
+JOIN backtest_returns br ON br.instrument_id = bg.instrument_id AND br.date = bg.date
+JOIN instruments i ON i.id = bg.instrument_id
+WHERE br.return_20d IS NOT NULL
+GROUP BY bg.term, i.category ORDER BY bg.term, i.category;
+
+-- Calibration run results (after running 'calibrate')
+SELECT category, term, sharpe_before, sharpe_after,
+       directional_accuracy_before, directional_accuracy_after,
+       n_samples, created_at
+FROM calibration_runs ORDER BY created_at DESC;

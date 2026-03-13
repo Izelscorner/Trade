@@ -1,0 +1,309 @@
+"""Reconstruct historical fundamental metrics from yfinance quarterly data.
+
+For each backtest date, uses only the most recent quarterly filing available
+before that date (no look-ahead bias).
+
+Metrics: P/E, ROE, D/E (debt-to-equity), PEG.
+
+P/E is computed as: price[date] / trailing_EPS_from_quarterly_income_stmt
+ROE = net_income_ttm / avg_book_equity
+D/E = total_debt / total_equity
+PEG = (P/E) / EPS_growth_rate_yoy
+"""
+
+import logging
+from datetime import date
+
+import pandas as pd
+import yfinance as yf
+
+logger = logging.getLogger(__name__)
+
+# The scorer's metric scoring functions (duplicated from scorer.py for self-containment)
+_SECTOR_PE_THRESHOLDS = {
+    "technology":            (10, 18, 25, 38, 55, 80),
+    "communication":         (10, 16, 22, 35, 50, 75),
+    "consumer_discretionary": (8, 15, 20, 35, 55, 80),
+    "healthcare":            (10, 16, 22, 35, 50, 70),
+    "financials":            (5,  8, 12, 18, 25, 40),
+    "industrials":           (8, 13, 18, 28, 40, 60),
+    "consumer_staples":      (8, 13, 18, 25, 35, 50),
+    "energy":                (5,  8, 12, 20, 30, 50),
+    "materials":             (6, 10, 15, 22, 35, 50),
+    "utilities":             (5,  8, 12, 18, 25, 40),
+    "real_estate":           (8, 14, 20, 30, 45, 65),
+    None:                    (8, 15, 18, 28, 45, 65),
+}
+
+_SECTOR_DE_THRESHOLDS = {
+    "financials": (1.0, 3.0, 6.0, 10.0, 15.0),
+    "utilities":  (0.5, 1.0, 2.0,  4.0,  6.0),
+    "real_estate": (0.5, 1.0, 2.0, 4.0,  6.0),
+    "energy":     (0.3, 0.7, 1.5,  3.0,  5.0),
+    None:         (0.3, 0.7, 1.5,  3.0,  5.0),
+}
+
+_FUND_WEIGHTS = {"pe_ratio": 0.30, "roe": 0.25, "de_ratio": 0.20, "peg_ratio": 0.25}
+
+
+def _clip(v: float, lo=-3.0, hi=3.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _score_pe(pe, sector=None, revenue_growth=None) -> float:
+    if pe is None:
+        return 0.0
+    if pe < 0:
+        if revenue_growth and revenue_growth > 0.20:
+            return -0.5
+        elif revenue_growth and revenue_growth > 0.10:
+            return -1.5
+        return -2.5
+    t = _SECTOR_PE_THRESHOLDS.get(sector, _SECTOR_PE_THRESHOLDS[None])
+    dv, attr, fl, fh, exp, vexp = t
+    if pe <= dv:
+        return 2.0
+    if pe <= attr:
+        return 1.5
+    if pe <= fh:
+        return 0.5
+    if pe <= exp:
+        return -0.5
+    if pe <= vexp:
+        return -1.5
+    return -2.5
+
+
+def _score_roe(roe, sector=None) -> float:
+    if roe is None:
+        return 0.0
+    if roe < 0:
+        return -2.0
+    if roe <= 0.05:
+        return -1.0
+    if roe <= 0.10:
+        return 0.0
+    if roe <= 0.20:
+        return 1.0
+    if roe <= 0.35:
+        return 2.0
+    return 2.5
+
+
+def _score_de(de, sector=None) -> float:
+    if de is None:
+        return 0.0
+    if de < 0:
+        return -2.0
+    t = _SECTOR_DE_THRESHOLDS.get(sector, _SECTOR_DE_THRESHOLDS[None])
+    vc, c, m, h, e = t
+    if de <= vc:
+        return 2.0
+    if de <= c:
+        return 1.0
+    if de <= m:
+        return 0.0
+    if de <= h:
+        return -1.0
+    if de <= e:
+        return -1.5
+    return -2.0
+
+
+def _score_peg(peg, sector=None) -> float:
+    if peg is None:
+        return 0.0
+    if peg < 0:
+        return -1.5
+    if peg <= 0.5:
+        return 2.5
+    if peg <= 1.0:
+        return 1.5
+    if peg <= 1.5:
+        return 0.5
+    if peg <= 2.5:
+        return -0.5
+    return -1.5
+
+
+def _latest_before(series: pd.Series, cutoff: pd.Timestamp):
+    """Return the most recent value in series with index <= cutoff, or None."""
+    valid = series[series.index <= cutoff].dropna()
+    if valid.empty:
+        return None
+    return float(valid.iloc[-1])
+
+
+def fetch_fundamentals_history(yf_symbol: str) -> dict:
+    """Fetch quarterly financials from yfinance.
+
+    Returns a dict with DataFrames for income statement and balance sheet,
+    indexed by quarter date. Call once per instrument before the backtest loop.
+    """
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        income = ticker.quarterly_income_stmt
+        balance = ticker.quarterly_balance_sheet
+        return {"income": income, "balance": balance, "symbol": yf_symbol}
+    except Exception:
+        logger.exception("Failed to fetch fundamentals for %s", yf_symbol)
+        return {"income": None, "balance": None, "symbol": yf_symbol}
+
+
+def _fundamentals_freshness_confidence(quarters_df_index: "pd.DatetimeIndex", target_date: date) -> float:
+    """Mirrors production get_fundamentals_score() freshness confidence.
+
+    Production: 1.0 within 48h of fetch, linear decay to 0.3 at 30 days, 0.0 beyond.
+    For backtest, we estimate data age as days since the most recent quarterly filing.
+    Quarterly data is typically filed 30–90 days after quarter end; we use 45-day lag.
+    """
+    import pandas as pd
+    cutoff = pd.Timestamp(target_date)
+    valid = quarters_df_index[quarters_df_index <= cutoff]
+    if len(valid) == 0:
+        return 0.0
+    latest_quarter = valid[-1]
+    # Approximate filing date: quarter end + 45 days
+    filing_date = latest_quarter + pd.Timedelta(days=45)
+    age_days = max(0, (cutoff - filing_date).days)
+    if age_days <= 2:        # within 48h of "fetch" (analogous to freshly fetched FMP data)
+        return 1.0
+    if age_days >= 120:      # beyond ~4 months → confidence 0 (next quarter due)
+        return 0.0
+    # Linear decay: 1.0 at day 2 → 0.3 at day 30 → 0.0 at day 120
+    if age_days <= 30:
+        return 1.0 - (age_days - 2) * (0.7 / 28)
+    return max(0.0, 0.3 - (age_days - 30) * (0.3 / 90))
+
+
+def calc_fundamentals_score_for_date(
+    fund_data: dict,
+    target_date: date,
+    price_at_date: float | None,
+    sector: str | None = None,
+    category: str = "stock",
+) -> tuple[float, float]:
+    """Compute fundamentals score + freshness confidence for a specific backtest date.
+
+    Returns (score ∈ [-3, 3], confidence ∈ [0, 1]).
+    Returns (0.0, 0.0) for commodities or on missing data.
+    Uses only data available up to target_date (no look-ahead bias).
+    """
+    if category == "commodity":
+        return 0.0, 0.0
+
+    income: pd.DataFrame | None = fund_data.get("income")
+    balance: pd.DataFrame | None = fund_data.get("balance")
+
+    if income is None or balance is None:
+        return 0.0, 0.0
+    if income.empty or balance.empty:
+        return 0.0, 0.0
+
+    cutoff = pd.Timestamp(target_date)
+
+    try:
+        # Transpose so index = dates, columns = line items
+        inc = income.T
+        bal = balance.T
+
+        # Ensure datetime index
+        inc.index = pd.to_datetime(inc.index)
+        bal.index = pd.to_datetime(bal.index)
+
+        # --- P/E ---
+        pe = None
+        if price_at_date is not None:
+            # Trailing EPS: sum of diluted EPS over last 4 quarters before cutoff
+            eps_col = None
+            for col in ["Diluted EPS", "Basic EPS", "EPS"]:
+                if col in inc.columns:
+                    eps_col = col
+                    break
+            if eps_col:
+                eps_series = inc[eps_col][inc.index <= cutoff].dropna()
+                if len(eps_series) >= 4:
+                    trailing_eps = float(eps_series.iloc[-4:].sum())
+                    if trailing_eps > 0:
+                        pe = price_at_date / trailing_eps
+
+        # --- ROE ---
+        roe = None
+        ni_col = None
+        for col in ["Net Income", "Net Income Common Stockholders"]:
+            if col in inc.columns:
+                ni_col = col
+                break
+
+        eq_col = None
+        for col in ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"]:
+            if col in bal.columns:
+                eq_col = col
+                break
+
+        if ni_col and eq_col:
+            ni_series = inc[ni_col][inc.index <= cutoff].dropna()
+            eq_series = bal[eq_col][bal.index <= cutoff].dropna()
+            if len(ni_series) >= 4 and not eq_series.empty:
+                net_income_ttm = float(ni_series.iloc[-4:].sum())
+                book_equity = float(eq_series.iloc[-1])
+                if book_equity > 0:
+                    roe = net_income_ttm / book_equity
+
+        # --- D/E ---
+        de = None
+        debt_col = None
+        for col in ["Total Debt", "Long Term Debt And Capital Lease Obligation"]:
+            if col in bal.columns:
+                debt_col = col
+                break
+        if debt_col and eq_col:
+            debt = _latest_before(bal[debt_col], cutoff)
+            equity = _latest_before(bal[eq_col], cutoff)
+            if debt is not None and equity and equity > 0:
+                de = debt / equity
+
+        # --- PEG ---
+        peg = None
+        if pe is not None and pe > 0 and ni_col:
+            ni_series = inc[ni_col][inc.index <= cutoff].dropna()
+            if len(ni_series) >= 8:
+                ttm_now = float(ni_series.iloc[-4:].sum())
+                ttm_prev = float(ni_series.iloc[-8:-4].sum())
+                if ttm_prev and ttm_prev != 0:
+                    eps_growth = (ttm_now - ttm_prev) / abs(ttm_prev)
+                    if eps_growth > 0:
+                        peg = pe / (eps_growth * 100)
+
+        # Score each metric
+        metrics = {"pe_ratio": pe, "roe": roe, "de_ratio": de, "peg_ratio": peg}
+        weighted_sum = 0.0
+        weight_total = 0.0
+
+        scored = {
+            "pe_ratio": _score_pe(pe, sector),
+            "roe": _score_roe(roe, sector),
+            "de_ratio": _score_de(de, sector),
+            "peg_ratio": _score_peg(peg, sector),
+        }
+
+        for key, s in scored.items():
+            if metrics[key] is not None:
+                weighted_sum += s * _FUND_WEIGHTS[key]
+                weight_total += _FUND_WEIGHTS[key]
+
+        if weight_total == 0:
+            return 0.0, 0.0
+
+        raw_score = weighted_sum / weight_total
+
+        # Freshness confidence — mirrors production get_fundamentals_score()
+        inc_t = income.T
+        inc_t.index = pd.to_datetime(inc_t.index)
+        confidence = _fundamentals_freshness_confidence(inc_t.index, target_date)
+
+        return round(_clip(raw_score), 4), round(confidence, 4)
+
+    except Exception:
+        logger.exception("Fundamentals calc error for %s on %s", fund_data.get("symbol"), target_date)
+        return 0.0, 0.0

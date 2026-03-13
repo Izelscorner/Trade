@@ -242,3 +242,79 @@ INSERT INTO instruments (symbol, name, category, sector, yfinance_symbol) VALUES
     ('GOLD', 'Gold Futures', 'commodity', 'materials', 'GC=F'),
     ('OIL', 'Crude Oil Futures', 'commodity', 'energy', 'CL=F')
 ON CONFLICT (symbol) DO NOTHING;
+
+-- Backtesting: retroactive grade simulations
+CREATE TABLE IF NOT EXISTS backtest_grades (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instrument_id UUID NOT NULL REFERENCES instruments(id),
+    symbol VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    term VARCHAR(10) NOT NULL,
+    overall_score NUMERIC(7, 4),
+    technical_score NUMERIC(7, 4),
+    sentiment_score NUMERIC(7, 4),
+    macro_score NUMERIC(7, 4),
+    sector_score NUMERIC(7, 4),
+    fundamentals_score NUMERIC(7, 4),
+    weights JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(instrument_id, date, term)
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_grades_instrument_date ON backtest_grades(instrument_id, date, term);
+
+-- Backtesting: forward returns for validation
+CREATE TABLE IF NOT EXISTS backtest_returns (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instrument_id UUID NOT NULL REFERENCES instruments(id),
+    symbol VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    return_5d NUMERIC(10, 6),
+    return_20d NUMERIC(10, 6),
+    UNIQUE(instrument_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_returns_instrument_date ON backtest_returns(instrument_id, date);
+
+-- Backtesting: weight calibration run results
+CREATE TABLE IF NOT EXISTS calibration_runs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    term VARCHAR(10) NOT NULL,
+    category VARCHAR(20) NOT NULL,
+    weights_before JSONB,
+    weights_after JSONB,
+    sharpe_before NUMERIC(8, 4),
+    sharpe_after NUMERIC(8, 4),
+    directional_accuracy_before NUMERIC(6, 4),
+    directional_accuracy_after NUMERIC(6, 4),
+    n_samples INT
+);
+
+-- Backtesting: cached Alpha Vantage sentiment to avoid re-fetching
+CREATE TABLE IF NOT EXISTS backtest_av_cache (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    symbol VARCHAR(20) NOT NULL,
+    week_start DATE NOT NULL,
+    avg_score NUMERIC(7, 4),
+    article_count INT,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(symbol, week_start)
+);
+
+-- Backtesting: daily LLM sentiment cache for asset/macro/sector (production-faithful)
+-- type: 'asset' | 'macro' | 'sector'
+-- key:  symbol (asset), 'global' (macro), sector_name (sector)
+-- short_score/long_score: average label score in [-1, 1] (multiply ×3 at use time = [-3, 3])
+-- positive_count/negative_count: non-neutral articles for consensus dampening
+CREATE TABLE IF NOT EXISTS backtest_sentiment_cache (
+    type VARCHAR(10) NOT NULL CHECK (type IN ('asset', 'macro', 'sector')),
+    key VARCHAR(50) NOT NULL,
+    date DATE NOT NULL,
+    short_score NUMERIC(7, 4) NOT NULL DEFAULT 0,
+    long_score NUMERIC(7, 4) NOT NULL DEFAULT 0,
+    article_count INT NOT NULL DEFAULT 0,
+    non_neutral_count INT NOT NULL DEFAULT 0,
+    positive_count INT NOT NULL DEFAULT 0,
+    negative_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (type, key, date)
+);
+CREATE INDEX IF NOT EXISTS idx_bsc_type_key_date ON backtest_sentiment_cache (type, key, date DESC);

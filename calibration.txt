@@ -1,0 +1,67 @@
+First check you have enough backtest data, then run calibrate:
+
+1. Check status
+
+
+docker compose run --rm backtester python -m app.main status
+Look for backtest_grades rows — you need a decent number (ideally 2000+) before calibrating.
+
+2. Run calibration
+
+
+# Short-term weights (validated against 5-day returns)
+docker compose run --rm backtester python -m app.main calibrate --term short
+
+# Long-term weights (validated against 20-day returns)
+docker compose run --rm backtester python -m app.main calibrate --term long
+3. Check results in DB
+
+
+SELECT category, term,
+       ROUND(sharpe_before::numeric, 3) as sharpe_before,
+       ROUND(sharpe_after::numeric, 3) as sharpe_after,
+       ROUND(directional_accuracy_before::numeric, 3) as dir_acc_before,
+       ROUND(directional_accuracy_after::numeric, 3) as dir_acc_after,
+       n_samples, created_at
+FROM calibration_runs ORDER BY created_at DESC;
+4. Preview proposed weight changes (dry run)
+
+
+docker compose run --rm backtester python -m app.main patch --dry-run
+5. Apply weights to scorer.py (only if calibration improved Sharpe by >10%)
+
+
+docker compose run --rm backtester python -m app.main patch
+Or run the full pipeline in one shot:
+
+
+docker compose run --rm backtester python -m app.main run-all
+
+
+
+
+
+The minimum you need is ~200 rows per category/term for the calibrator's walk-forward split (18 months train + 6 months holdout) to be statistically meaningful. You're well above that.
+
+One caveat — the backtest grades were computed without LLM sentiment (sentiment cache was empty when they ran). The LLM fetch is still running in the background (731/1992 weeks cached). You have two options:
+
+Option A — Calibrate now with existing data (sentiment scores are mostly 0.0)
+
+
+docker compose run --rm backtester python -m app.main calibrate --term short
+docker compose run --rm backtester python -m app.main calibrate --term long
+Option B — Wait for LLM fetch to finish, rerun backtest, then calibrate (better results)
+
+
+# Check cache progress
+docker compose exec postgres psql -U tradesignal -d tradesignal -c \
+  "SELECT COUNT(*) as cached FROM backtest_av_cache;"
+
+# Once all ~2490 weeks are cached, rerun with sentiment:
+docker compose run --rm backtester python -m app.main backtest --term short --force
+docker compose run --rm backtester python -m app.main backtest --term long --force
+
+# Then calibrate
+docker compose run --rm backtester python -m app.main calibrate --term short
+docker compose run --rm backtester python -m app.main calibrate --term long
+I'd recommend Option B — calibrating without sentiment data will underweight sentiment in the output weights, which would be misleading.
