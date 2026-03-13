@@ -266,18 +266,18 @@ def run_all_calibrations(backtest_rows: list[dict]) -> dict[tuple[str, str], dic
     Returns dict: {(category, term): calibration_result}.
     """
     combinations = [
-        ("stock",     "short"),
-        ("stock",     "long"),
-        ("etf",       "short"),
-        ("etf",       "long"),
-        ("commodity", "short"),
-        ("commodity", "long"),
+        ("stock",     "short", "return_5d"),
+        ("stock",     "long",  "return_20d"),
+        ("etf",       "short", "return_5d"),
+        ("etf",       "long",  "return_20d"),
+        ("commodity", "short", "return_5d"),
+        ("commodity", "long",  "return_20d"),
     ]
 
     results = {}
-    for category, term in combinations:
-        logger.info("=== Calibrating %s/%s ===", category, term)
-        result = calibrate_weights(backtest_rows, category, term)
+    for category, term, return_col in combinations:
+        logger.info("=== Calibrating %s/%s (%s) ===", category, term, return_col)
+        result = calibrate_weights(backtest_rows, category, term, return_col=return_col)
         results[(category, term)] = result
 
         # Print summary

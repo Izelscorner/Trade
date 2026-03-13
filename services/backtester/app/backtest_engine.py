@@ -60,10 +60,15 @@ async def store_backtest_grade(
     term: str,
     overall_score: float,
     technical_score: float,
+    technical_conf: float,
     sentiment_score: float,
+    sentiment_conf: float,
     macro_score: float,
+    macro_conf: float,
     sector_score: float,
+    sector_conf: float,
     fundamentals_score: float,
+    fundamentals_conf: float,
     weights: dict,
 ) -> None:
     async with async_session() as session:
@@ -71,25 +76,42 @@ async def store_backtest_grade(
             text("""
                 INSERT INTO backtest_grades
                   (instrument_id, symbol, date, term, overall_score,
-                   technical_score, sentiment_score, macro_score,
-                   sector_score, fundamentals_score, weights)
+                   technical_score, technical_conf,
+                   sentiment_score, sentiment_conf,
+                   macro_score, macro_conf,
+                   sector_score, sector_conf,
+                   fundamentals_score, fundamentals_conf,
+                   weights)
                 VALUES
                   (:iid, :sym, :date, :term, :overall,
-                   :tech, :sent, :macro, :sector, :fund, CAST(:weights AS jsonb))
+                   :tech, :tech_conf,
+                   :sent, :sent_conf,
+                   :macro, :macro_conf,
+                   :sector, :sec_conf,
+                   :fund, :fund_conf,
+                   CAST(:weights AS jsonb))
                 ON CONFLICT (instrument_id, date, term) DO UPDATE
                   SET overall_score      = EXCLUDED.overall_score,
                       technical_score    = EXCLUDED.technical_score,
+                      technical_conf      = EXCLUDED.technical_conf,
                       sentiment_score    = EXCLUDED.sentiment_score,
+                      sentiment_conf      = EXCLUDED.sentiment_conf,
                       macro_score        = EXCLUDED.macro_score,
+                      macro_conf          = EXCLUDED.macro_conf,
                       sector_score       = EXCLUDED.sector_score,
+                      sector_conf         = EXCLUDED.sector_conf,
                       fundamentals_score = EXCLUDED.fundamentals_score,
+                      fundamentals_conf   = EXCLUDED.fundamentals_conf,
                       weights            = EXCLUDED.weights
             """),
             {
                 "iid": instrument_id, "sym": symbol, "date": d, "term": term,
-                "overall": overall_score, "tech": technical_score,
-                "sent": sentiment_score, "macro": macro_score,
-                "sector": sector_score, "fund": fundamentals_score,
+                "overall": overall_score,
+                "tech": technical_score, "tech_conf": technical_conf,
+                "sent": sent_score, "sent_conf": sentiment_conf,
+                "macro": macro_score, "macro_conf": macro_conf,
+                "sector": sector_score, "sec_conf": sector_conf,
+                "fund": fundamentals_score, "fund_conf": fundamentals_conf,
                 "weights": str(weights).replace("'", '"'),
             },
         )
@@ -263,8 +285,13 @@ async def run_backtest(
 
             await store_backtest_grade(
                 iid, symbol, d, term,
-                grade["overall_score"], tech_score, sent_score,
-                macro_score, sector_score, fund_score, nominal_weights,
+                grade["overall_score"],
+                tech_score, tech_conf,
+                sent_score, sent_conf,
+                macro_score, macro_conf,
+                sector_score, sector_conf,
+                fund_score, fund_conf,
+                nominal_weights,
             )
             if return_5d is not None or return_20d is not None:
                 await store_backtest_return(iid, symbol, d, return_5d, return_20d)
@@ -306,8 +333,12 @@ async def load_backtest_results(term: str = "short") -> list[dict]:
         result = await session.execute(
             text("""
                 SELECT bg.instrument_id, bg.symbol, bg.date,
-                       bg.overall_score, bg.technical_score, bg.sentiment_score,
-                       bg.macro_score, bg.sector_score, bg.fundamentals_score,
+                       bg.overall_score,
+                       bg.technical_score, bg.technical_conf,
+                       bg.sentiment_score, bg.sentiment_conf,
+                       bg.macro_score, bg.macro_conf,
+                       bg.sector_score, bg.sector_conf,
+                       bg.fundamentals_score, bg.fundamentals_conf,
                        br.return_5d, br.return_20d,
                        i.category
                 FROM backtest_grades bg
@@ -325,22 +356,22 @@ async def load_backtest_results(term: str = "short") -> list[dict]:
     results = []
     for r in rows:
         results.append({
-            "instrument_id":   str(r.instrument_id),
-            "symbol":          r.symbol,
-            "date":            r.date,
-            "category":        r.category,
-            "overall_score":   float(r.overall_score or 0),
-            "technical":       float(r.technical_score or 0),
-            "technical_conf":  1.0 if r.technical_score else 0.0,
-            "sentiment":       float(r.sentiment_score or 0),
-            "sentiment_conf":  1.0 if r.sentiment_score else 0.5,
-            "sector":          float(r.sector_score or 0),
-            "sector_conf":     0.5 if r.sector_score else 0.0,
-            "macro":           float(r.macro_score or 0),
-            "macro_conf":      1.0 if r.macro_score else 0.0,
-            "fundamentals":    float(r.fundamentals_score or 0),
-            "fundamentals_conf": 0.7 if r.fundamentals_score else 0.0,
-            "return_5d":       float(r.return_5d) if r.return_5d is not None else None,
-            "return_20d":      float(r.return_20d) if r.return_20d is not None else None,
+            "instrument_id":     str(r.instrument_id),
+            "symbol":            r.symbol,
+            "date":              r.date,
+            "category":          r.category,
+            "overall_score":     float(r.overall_score or 0),
+            "technical":         float(r.technical_score or 0),
+            "technical_conf":    float(r.technical_conf or 1.0),
+            "sentiment":         float(r.sentiment_score or 0),
+            "sentiment_conf":    float(r.sentiment_conf or 0.5),
+            "sector":            float(r.sector_score or 0),
+            "sector_conf":       float(r.sector_conf or 0.5),
+            "macro":             float(r.macro_score or 0),
+            "macro_conf":        float(r.macro_conf or 1.0),
+            "fundamentals":      float(r.fundamentals_score or 0),
+            "fundamentals_conf": float(r.fundamentals_conf or 0.7),
+            "return_5d":         float(r.return_5d) if r.return_5d is not None else None,
+            "return_20d":        float(r.return_20d) if r.return_20d is not None else None,
         })
     return results

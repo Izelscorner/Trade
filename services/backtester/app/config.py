@@ -3,7 +3,6 @@
 import os
 
 DATABASE_URL: str = os.environ["DATABASE_URL"]
-AV_API_KEY: str = os.environ.get("AV_API_KEY", "")
 FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
 
 # NIM (NVIDIA API) — same as production llm-processor
@@ -11,10 +10,6 @@ NIM_API_KEY: str = os.environ.get("NIM_API_KEY", "")
 NIM_BASE_URL: str = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NIM_MODEL: str = os.environ.get("NIM_MODEL", "qwen/qwen3.5-122b-a10b")
 
-# Alpha Vantage rate limit (free=25/day, premium=75/min)
-# Free tier: 25 req/day. We pace at 4 req/min (one per 15s) to avoid hitting
-# per-minute limits. The daily budget is enforced via --max-requests (default 24).
-AV_REQUESTS_PER_MINUTE: int = int(os.environ.get("AV_RPM", "4"))
 
 # Backtest date range
 BACKTEST_START: str = os.environ.get("BACKTEST_START", "2023-01-01")
