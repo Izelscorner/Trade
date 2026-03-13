@@ -64,7 +64,11 @@ def _information_coefficient(scores: list[float], returns: list[float]) -> float
 
 def _filter_rows(rows: list[dict], category: str, term_return_col: str = "return_20d") -> list[dict]:
     """Filter rows by category, remove rows with missing returns."""
-    return [r for r in rows if r.get("category") == category and r.get(term_return_col) is not None]
+    target_cat = category.lower()
+    return [
+        r for r in rows 
+        if r.get("category", "").lower() == target_cat and r.get(term_return_col) is not None
+    ]
 
 
 def _train_test_split(rows: list[dict], holdout_months: int = 6) -> tuple[list[dict], list[dict]]:
@@ -91,7 +95,8 @@ def calibrate_weights(
     and whether the weights should be applied (based on validation improvement).
     """
     # Get current (baseline) weights
-    profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
+    cat_key = category.lower()
+    profile = COMPOSITE_WEIGHT_PROFILES.get(cat_key, COMPOSITE_WEIGHT_PROFILES["stock"])
     current_weights = profile.get(term, profile["short"]).copy()
 
     # Filter and split

@@ -531,7 +531,8 @@ def calc_technical_score(
         elif atr_pct > 2.5:
             atr_risk_factor = 0.92
 
-    group_profile = GROUP_WEIGHT_PROFILES.get(category, GROUP_WEIGHT_PROFILES["stock"])
+    cat_key = category.lower()
+    group_profile = GROUP_WEIGHT_PROFILES.get(cat_key, GROUP_WEIGHT_PROFILES["stock"])
     group_weights = group_profile.get(term, group_profile["short"])
 
     group_scores: dict[str, tuple[float, int]] = {}

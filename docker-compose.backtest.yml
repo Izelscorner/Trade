@@ -48,6 +48,7 @@ services:
       XDG_CACHE_HOME: /tmp
       SCORER_PY_PATH: /scorer/scorer.py
     volumes:
+      - ./services/backtester/app:/app/app:rw
       - ./services/grading/app:/scorer:rw
       - ./backtest_reports:/app/reports:rw
     depends_on:

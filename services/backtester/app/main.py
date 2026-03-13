@@ -182,7 +182,7 @@ async def cmd_patch(args) -> None:
 async def cmd_report(args) -> None:
     from .report_generator import generate_backtest_report
 
-    await generate_backtest_report()
+    await generate_backtest_report(strategy=args.strategy, term=args.term)
 
 
 async def cmd_run_all(args) -> None:
@@ -257,7 +257,9 @@ def main():
     p_patch.add_argument("--dry-run", action="store_true", help="Print changes without writing")
 
     # report
-    subparsers.add_parser("report", help="Generate HTML performance report")
+    p_rep = subparsers.add_parser("report", help="Generate HTML performance report")
+    p_rep.add_argument("--strategy", choices=["portfolio", "top_pick"], default="portfolio")
+    p_rep.add_argument("--term", choices=["short", "long"], default="short")
 
     # run-all
     subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report")

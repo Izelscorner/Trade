@@ -222,9 +222,10 @@ async def run_backtest(
         logger.info("[%s] Fetching fundamentals history (%s)...", symbol, yf_symbol)
         fund_data = fetch_fundamentals_history(yf_symbol)
 
+        cat_key = category.lower()
         nominal_weights = (
             COMPOSITE_WEIGHT_PROFILES
-            .get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
+            .get(cat_key, COMPOSITE_WEIGHT_PROFILES["stock"])
             .get(term, {})
         )
 

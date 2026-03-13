@@ -10,10 +10,13 @@ Safety checks:
 """
 
 import logging
+import os
 import re
 
 from .config import SCORER_PY_PATH
 from .simulator import COMPOSITE_WEIGHT_PROFILES
+
+SIMULATOR_PY_PATH = os.path.join(os.path.dirname(__file__), "simulator.py")
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +142,24 @@ def patch_scorer_py(
         f.write(new_source)
 
     print(f"\n✓ scorer.py updated at {SCORER_PY_PATH}")
-    print("  Restart the grading service to apply new weights:")
+
+    # ALSO patch simulator.py
+    try:
+        with open(SIMULATOR_PY_PATH, "r") as f:
+            sim_original = f.read()
+        
+        sim_match = _FULL_BLOCK_PATTERN.search(sim_original)
+        if sim_match:
+            sim_old_block = sim_original[sim_match.start():sim_match.end()]
+            sim_new_source = sim_original.replace(sim_old_block, new_block)
+            with open(SIMULATOR_PY_PATH, "w") as f:
+                f.write(sim_new_source)
+            print(f"✓ simulator.py updated at {SIMULATOR_PY_PATH}")
+        else:
+            logger.warning("Could not find COMPOSITE_WEIGHT_PROFILES in simulator.py")
+    except Exception as e:
+        logger.error("Failed to patch simulator.py: %s", e)
+
+    print("\n  Restart the grading service to apply new weights to production:")
     print("  docker compose restart grading")
     return True

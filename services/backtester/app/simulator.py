@@ -13,7 +13,7 @@ from typing import TypedDict
 # Composite weight profiles (same as scorer.py COMPOSITE_WEIGHT_PROFILES)
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short": {"technical": 0.43, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.07},
+        "short": {"technical": 0.10, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.40},
         "long":  {"technical": 0.24, "sentiment": 0.20, "sector": 0.12, "macro": 0.24, "fundamentals": 0.20},
     },
     "etf": {
@@ -69,7 +69,8 @@ def simulate_grade(
     if weight_override is not None:
         weights = weight_override
     else:
-        profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
+        cat_key = category.lower()
+        profile = COMPOSITE_WEIGHT_PROFILES.get(cat_key, COMPOSITE_WEIGHT_PROFILES["stock"])
         weights = profile.get(term, profile["short"])
 
     # Confidence-adjusted effective weights (same formula as scorer.py grade_instrument)

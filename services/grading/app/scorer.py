@@ -115,7 +115,7 @@ GROUP_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
 # Long-term: fundamentals matter more (value investing, mean reversion to fair value).
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short": {"technical": 0.43, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.07},
+        "short": {"technical": 0.10, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.40},
         "long":  {"technical": 0.24, "sentiment": 0.20, "sector": 0.12, "macro": 0.24, "fundamentals": 0.20},
     },
     "etf": {
@@ -325,7 +325,8 @@ async def get_technical_score(
             atr_risk_factor = 0.92   # Elevated volatility
 
     # Compute per-group scores
-    group_profile = GROUP_WEIGHT_PROFILES.get(category, GROUP_WEIGHT_PROFILES["stock"])
+    cat_key = category.lower()
+    group_profile = GROUP_WEIGHT_PROFILES.get(cat_key, GROUP_WEIGHT_PROFILES["stock"])
     group_weights = group_profile.get(term, group_profile["short"])
 
     group_scores: dict[str, dict] = {}
@@ -1017,7 +1018,8 @@ async def grade_instrument(
     fundamentals_score, fund_details = await get_fundamentals_score(instrument_id, category, sector, term)
 
     # Composite weights
-    profile = COMPOSITE_WEIGHT_PROFILES.get(category, COMPOSITE_WEIGHT_PROFILES["stock"])
+    cat_key = category.lower()
+    profile = COMPOSITE_WEIGHT_PROFILES.get(cat_key, COMPOSITE_WEIGHT_PROFILES["stock"])
     weights = profile.get(term, profile["short"])
 
     # Confidence-weighted composite: if a sub-signal has near-zero confidence,
