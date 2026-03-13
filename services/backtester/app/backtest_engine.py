@@ -262,7 +262,7 @@ async def run_backtest(
                 price_at_date = float(price_rows["close"].iloc[-1])
 
             fund_score, fund_conf = calc_fundamentals_score_for_date(
-                fund_data, d, price_at_date, sector, category
+                fund_data, d, price_at_date, sector, category, ohlcv_df, term
             )
 
             sub: SubScores = {

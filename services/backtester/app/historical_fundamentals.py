@@ -150,6 +150,47 @@ def fetch_fundamentals_history(yf_symbol: str) -> dict:
         return {"income": None, "balance": None, "symbol": yf_symbol}
 
 
+def _calc_commodity_supply_demand_score(
+    ohlcv_df: pd.DataFrame,
+    target_date: date,
+    term: str = "short",
+) -> tuple[float, float]:
+    """Commodity supply-demand trend calculation (exact copy of production).
+
+    Short-term: 2-day price trend.
+    Long-term: 10-day price trend.
+    """
+    import math
+    import pandas as pd
+    cutoff = pd.Timestamp(target_date)
+    # window_hours = 48 if term == "short" else 240
+    window_days = 2 if term == "short" else 10
+    
+    # get data in window
+    window_start = cutoff - pd.Timedelta(days=window_days)
+    df_window = ohlcv_df[(ohlcv_df.index >= window_start) & (ohlcv_df.index <= cutoff)]
+    
+    if len(df_window) < 2:
+        return 0.0, 0.0
+        
+    oldest_val = float(df_window["close"].iloc[0])
+    latest_val = float(df_window["close"].iloc[-1])
+    
+    if oldest_val == 0:
+        return 0.0, 0.0
+        
+    pct_change = (latest_val - oldest_val) / oldest_val
+    # Score mapping: each 2% move = 1 point, capped at ±2.0
+    raw_score = _clip(pct_change / 0.02, lo=-2.0, hi=2.0)
+    
+    # Confidence: mirrors production _log_confidence
+    n_points = len(df_window)
+    # Log confidence: n=8 -> 1.0, n=2 -> ~0.47
+    confidence = min(1.0, math.log(1 + n_points) / math.log(1 + 8))
+    
+    return round(_clip(raw_score * confidence), 4), round(confidence, 4)
+
+
 def _fundamentals_freshness_confidence(quarters_df_index: "pd.DatetimeIndex", target_date: date) -> float:
     """Mirrors production get_fundamentals_score() freshness confidence.
 
@@ -182,15 +223,19 @@ def calc_fundamentals_score_for_date(
     price_at_date: float | None,
     sector: str | None = None,
     category: str = "stock",
+    ohlcv_df: pd.DataFrame | None = None,
+    term: str = "short",
 ) -> tuple[float, float]:
     """Compute fundamentals score + freshness confidence for a specific backtest date.
 
     Returns (score ∈ [-3, 3], confidence ∈ [0, 1]).
-    Returns (0.0, 0.0) for commodities or on missing data.
+    Commodities use supply-demand price trend signal instead of accounting ratios.
     Uses only data available up to target_date (no look-ahead bias).
     """
     if category == "commodity":
-        return 0.0, 0.0
+        if ohlcv_df is None:
+            return 0.0, 0.0
+        return _calc_commodity_supply_demand_score(ohlcv_df, target_date, term)
 
     income: pd.DataFrame | None = fund_data.get("income")
     balance: pd.DataFrame | None = fund_data.get("balance")
