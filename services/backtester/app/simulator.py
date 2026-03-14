@@ -14,15 +14,15 @@ from typing import TypedDict
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
         "short": {"technical": 0.10, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.40},
-        "long":  {"technical": 0.24, "sentiment": 0.20, "sector": 0.12, "macro": 0.24, "fundamentals": 0.20},
+        "long":  {"technical": 0.27, "sentiment": 0.10, "sector": 0.12, "macro": 0.24, "fundamentals": 0.27},
     },
     "etf": {
         "short": {"technical": 0.38, "sentiment": 0.18, "sector": 0.14, "macro": 0.23, "fundamentals": 0.07},
-        "long":  {"technical": 0.20, "sentiment": 0.17, "sector": 0.15, "macro": 0.33, "fundamentals": 0.15},
+        "long":  {"technical": 0.20, "sentiment": 0.09, "sector": 0.15, "macro": 0.36, "fundamentals": 0.20},
     },
     "commodity": {
         "short": {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23, "fundamentals": 0.0},
-        "long":  {"technical": 0.28, "sentiment": 0.25, "sector": 0.12, "macro": 0.35, "fundamentals": 0.0},
+        "long":  {"technical": 0.31, "sentiment": 0.15, "sector": 0.12, "macro": 0.42, "fundamentals": 0.0},
     },
 }
 
@@ -94,13 +94,13 @@ def simulate_grade(
         + sub_scores["fundamentals"] * effective_weights["fundamentals"]
     ) / w_sum
 
-    overall = round(_clip(overall), 4)
-    buy_confidence = round(_sigmoid(overall), 1)
+    overall = _clip(overall)
+    buy_confidence = _sigmoid(overall)
 
     return {
         "overall_score": overall,
         "buy_confidence": buy_confidence,
-        "effective_weights": {k: round(v / w_sum, 4) for k, v in effective_weights.items()},
+        "effective_weights": {k: v / w_sum for k, v in effective_weights.items()},
     }
 
 

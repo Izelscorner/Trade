@@ -115,17 +115,17 @@ GROUP_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
 # Long-term: fundamentals matter more (value investing, mean reversion to fair value).
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short": {"technical": 0.10, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.40},
-        "long":  {"technical": 0.24, "sentiment": 0.20, "sector": 0.12, "macro": 0.24, "fundamentals": 0.20},
+        "short":  {"technical": 0.1, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.4},
+        "long":  {"technical": 0.27, "sentiment": 0.10, "sector": 0.12, "macro": 0.24, "fundamentals": 0.27}
     },
     "etf": {
-        "short": {"technical": 0.38, "sentiment": 0.18, "sector": 0.14, "macro": 0.23, "fundamentals": 0.07},
-        "long":  {"technical": 0.20, "sentiment": 0.17, "sector": 0.15, "macro": 0.33, "fundamentals": 0.15},
+        "short":  {"technical": 0.38, "sentiment": 0.18, "sector": 0.14, "macro": 0.23, "fundamentals": 0.07},
+        "long":  {"technical": 0.20, "sentiment": 0.09, "sector": 0.15, "macro": 0.36, "fundamentals": 0.20}
     },
     "commodity": {
-        "short": {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23, "fundamentals": 0.0},
-        "long":  {"technical": 0.28, "sentiment": 0.25, "sector": 0.12, "macro": 0.35, "fundamentals": 0.0},
-    },
+        "short":  {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23, "fundamentals": 0.0},
+        "long":  {"technical": 0.31, "sentiment": 0.15, "sector": 0.12, "macro": 0.42, "fundamentals": 0.0}
+    }
 }
 
 # ---------------------------------------------------------------------------

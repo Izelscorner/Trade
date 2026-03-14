@@ -8,5 +8,6 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY app/ ./app/
+RUN mkdir -p /cache && chown appuser:appgroup /cache
 USER appuser
 CMD ["python", "-m", "app.main", "run-all"]

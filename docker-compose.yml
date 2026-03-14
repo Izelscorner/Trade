@@ -268,8 +268,46 @@ services:
           cpus: "1.0"
           pids: 100
 
+  backtester:
+    build:
+      context: ./services/backtester
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      NIM_API_KEY: ${NIM_API_KEY}
+      NIM_BASE_URL: https://integrate.api.nvidia.com/v1
+      NIM_MODEL: ${NIM_MODEL}
+      FRED_API_KEY: ${FRED_API_KEY}
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp
+      SCORER_PY_PATH: /scorer/scorer.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./services/grading/app:/scorer:rw
+      - ./backtest_reports:/reports:rw
+      - backtest_cache:/cache
+    networks:
+      - internal
+      - egress
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+          pids: 100
+
 volumes:
   postgres-data:
+  backtest_cache:
 
 networks:
   internal:

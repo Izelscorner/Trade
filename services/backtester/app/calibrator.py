@@ -22,9 +22,9 @@ from .simulator import COMPOSITE_WEIGHT_PROFILES, WEIGHT_KEYS, compute_composite
 logger = logging.getLogger(__name__)
 
 # Calibration constraints
-MIN_WEIGHT = 0.05   # No signal < 5%
-MAX_WEIGHT = 0.60   # No signal > 60%
-MIN_SHARPE_IMPROVEMENT = 0.10  # Only update weights if validation Sharpe improves by this much
+MIN_WEIGHT = 0.07   # No signal < 7% — prevents zeroing out signals
+MAX_WEIGHT = 0.45   # No signal > 45% — prevents over-concentration
+MIN_SHARPE_IMPROVEMENT = 0.20  # Only update weights if validation metric improves by this much
 
 
 def _sharpe(scores: list[float], returns: list[float]) -> float:
@@ -38,7 +38,7 @@ def _sharpe(scores: list[float], returns: list[float]) -> float:
         return 0.0
     pnl = [s * r for s, r in zip(scores, returns)]
     mean_pnl = np.mean(pnl)
-    std_pnl = np.std(pnl)
+    std_pnl = np.std(pnl, ddof=1)
     if std_pnl == 0:
         return 0.0
     # Annualization factor: assume weekly sampling (52 samples/year)
@@ -135,19 +135,23 @@ def calibrate_weights(
     baseline_scores_test = compute_composite_with_weights(test_rows, current_weights, term) if test_rows else []
     baseline_sharpe_test = _sharpe(baseline_scores_test, test_returns) if test_rows else 0.0
 
+    baseline_ic_train_pre = _information_coefficient(baseline_scores_train, train_returns)
+    baseline_ic_test_pre = _information_coefficient(baseline_scores_test, test_returns) if test_rows else 0.0
+
     logger.info(
-        "[%s/%s] Baseline — train Sharpe: %.3f, DA: %.1f%%, test Sharpe: %.3f",
-        category, term, baseline_sharpe_train, baseline_da_train * 100, baseline_sharpe_test,
+        "[%s/%s] Baseline — train Sharpe: %.3f, IC: %.4f, DA: %.1f%%, test Sharpe: %.3f, IC: %.4f",
+        category, term, baseline_sharpe_train, baseline_ic_train_pre, baseline_da_train * 100,
+        baseline_sharpe_test, baseline_ic_test_pre,
     )
 
-    # Optimization objective: maximize Sharpe on training set
-    def neg_sharpe(weights_arr: np.ndarray) -> float:
+    # Blended objective: 70% IC (rank correlation) + 30% Sharpe
+    # IC is smoother and more robust to weight changes than pure Sharpe
+    def neg_objective(weights_arr: np.ndarray) -> float:
         w = dict(zip(WEIGHT_KEYS, weights_arr))
         scores = compute_composite_with_weights(train_rows, w, term)
-        return -_sharpe(scores, train_returns)
-
-    # Constraints: weights sum to 1.0; commodity has 0% fundamentals
-    constraints = [{"type": "eq", "fun": lambda w: sum(w) - 1.0}]
+        sharpe = _sharpe(scores, train_returns)
+        ic = _information_coefficient(scores, train_returns)
+        return -(0.7 * ic + 0.3 * sharpe)
 
     # Bounds: each weight in [MIN_WEIGHT, MAX_WEIGHT]
     # For commodity, fundamentals must be 0
@@ -166,15 +170,52 @@ def calibrate_weights(
     x0_sum = sum(x0)
     x0 = [v / x0_sum for v in x0]
 
+    # Constraints: weights sum to 1.0
+    constraints = [{"type": "eq", "fun": lambda w: sum(w) - 1.0}]
+
     try:
-        result = minimize(
-            neg_sharpe,
+        # Strategy 1: SLSQP with proper step size (local optimizer)
+        result_slsqp = minimize(
+            neg_objective,
             x0=x0,
             method="SLSQP",
             bounds=bounds,
             constraints=constraints,
-            options={"ftol": 1e-9, "maxiter": 500, "disp": False},
+            options={"ftol": 1e-6, "eps": 1e-4, "maxiter": 500, "disp": False},
         )
+
+        # Strategy 2: Multi-start with random initial points on the simplex
+        best_result = result_slsqp
+        n_restarts = 20
+        rng = np.random.default_rng(42)
+
+        for _ in range(n_restarts):
+            # Random point on the simplex via Dirichlet distribution
+            if category == "commodity":
+                # 4 free weights (fundamentals=0)
+                raw = rng.dirichlet([1.0] * 4)
+                x_rand = list(raw) + [0.0]
+            else:
+                x_rand = list(rng.dirichlet([1.0] * 5))
+
+            # Clip to bounds
+            x_rand = [max(b[0], min(b[1], v)) for v, b in zip(x_rand, bounds)]
+            x_sum = sum(x_rand)
+            if x_sum > 0:
+                x_rand = [v / x_sum for v in x_rand]
+
+            trial = minimize(
+                neg_objective,
+                x0=x_rand,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+                options={"ftol": 1e-6, "eps": 1e-4, "maxiter": 500, "disp": False},
+            )
+            if trial.fun < best_result.fun:
+                best_result = trial
+
+        result = best_result
 
         if not result.success:
             logger.warning("[%s/%s] Optimizer did not converge: %s", category, term, result.message)
@@ -191,28 +232,40 @@ def calibrate_weights(
     opt_scores_train = compute_composite_with_weights(train_rows, optimized_weights, term)
     opt_sharpe_train = _sharpe(opt_scores_train, train_returns)
     opt_da_train = _directional_accuracy(opt_scores_train, train_returns)
+    opt_ic_train = _information_coefficient(opt_scores_train, train_returns)
 
     opt_scores_test = compute_composite_with_weights(test_rows, optimized_weights, term) if test_rows else []
     opt_sharpe_test = _sharpe(opt_scores_test, test_returns) if test_rows else 0.0
+    opt_ic_test = _information_coefficient(opt_scores_test, test_returns) if test_rows else 0.0
+
+    # Also compute baseline IC for comparison
+    baseline_ic_train = _information_coefficient(baseline_scores_train, train_returns)
+    baseline_ic_test = _information_coefficient(baseline_scores_test, test_returns) if test_rows else 0.0
 
     logger.info(
-        "[%s/%s] Optimized — train Sharpe: %.3f, DA: %.1f%%, test Sharpe: %.3f",
-        category, term, opt_sharpe_train, opt_da_train * 100, opt_sharpe_test,
+        "[%s/%s] Optimized — train Sharpe: %.3f, IC: %.4f, DA: %.1f%%, test Sharpe: %.3f, IC: %.4f",
+        category, term, opt_sharpe_train, opt_ic_train, opt_da_train * 100, opt_sharpe_test, opt_ic_test,
     )
 
-    # Decide whether to apply (only if test Sharpe improves by threshold)
-    should_apply = bool(
-        test_rows and (opt_sharpe_test - baseline_sharpe_test) >= MIN_SHARPE_IMPROVEMENT
-    ) or (
-        # If no test data, apply if training improvement is significant
-        not test_rows and (opt_sharpe_train - baseline_sharpe_train) >= MIN_SHARPE_IMPROVEMENT
-    )
+    # Decide whether to apply: blended metric (IC + Sharpe) must improve on test set
+    if test_rows:
+        baseline_blend = 0.7 * baseline_ic_test + 0.3 * baseline_sharpe_test
+        opt_blend = 0.7 * opt_ic_test + 0.3 * opt_sharpe_test
+        blend_delta = opt_blend - baseline_blend
+    else:
+        baseline_blend = 0.7 * baseline_ic_train_pre + 0.3 * baseline_sharpe_train
+        opt_blend = 0.7 * opt_ic_train + 0.3 * opt_sharpe_train
+        blend_delta = opt_blend - baseline_blend
+
+    should_apply = blend_delta >= MIN_SHARPE_IMPROVEMENT
 
     logger.info(
-        "[%s/%s] Decision: %s (test Sharpe delta: %.3f, threshold: %.3f)",
+        "[%s/%s] Decision: %s (blended delta: %.4f, Sharpe delta: %.3f, IC delta: %.4f, threshold: %.3f)",
         category, term,
         "APPLY" if should_apply else "KEEP CURRENT",
+        blend_delta,
         opt_sharpe_test - baseline_sharpe_test if test_rows else opt_sharpe_train - baseline_sharpe_train,
+        opt_ic_test - baseline_ic_test if test_rows else opt_ic_train - baseline_ic_train_pre,
         MIN_SHARPE_IMPROVEMENT,
     )
 
@@ -224,6 +277,8 @@ def calibrate_weights(
         "weights_after": optimized_weights if should_apply else current_weights,
         "sharpe_before": round(baseline_sharpe_test or baseline_sharpe_train, 4),
         "sharpe_after": round(opt_sharpe_test or opt_sharpe_train, 4),
+        "ic_before": round(baseline_ic_test or baseline_ic_train_pre, 4),
+        "ic_after": round(opt_ic_test or opt_ic_train, 4),
         "directional_accuracy_before": round(baseline_da_train, 4),
         "directional_accuracy_after": round(opt_da_train, 4),
         "n_train": len(train_rows),
@@ -292,6 +347,8 @@ def run_all_calibrations(backtest_rows: list[dict]) -> dict[tuple[str, str], dic
         print(f"  Samples: {result.get('n_samples', 0)}")
         print(f"  Sharpe before: {result.get('sharpe_before', 0):.3f}")
         print(f"  Sharpe after:  {result.get('sharpe_after', 0):.3f}")
+        print(f"  IC before:     {result.get('ic_before', 0):.4f}")
+        print(f"  IC after:      {result.get('ic_after', 0):.4f}")
         print(f"  DA before: {(result.get('directional_accuracy_before', 0)*100):.1f}%")
         print(f"  DA after:  {(result.get('directional_accuracy_after', 0)*100):.1f}%")
         if result["status"] == "apply":

@@ -70,6 +70,7 @@ async def store_backtest_grade(
     fundamentals_score: float,
     fundamentals_conf: float,
     weights: dict,
+    sentiment_mode: str = "on",
 ) -> None:
     async with async_session() as session:
         await session.execute(
@@ -81,7 +82,7 @@ async def store_backtest_grade(
                    macro_score, macro_conf,
                    sector_score, sector_conf,
                    fundamentals_score, fundamentals_conf,
-                   weights)
+                   weights, sentiment_mode)
                 VALUES
                   (:iid, :sym, :date, :term, :overall,
                    :tech, :tech_conf,
@@ -89,8 +90,8 @@ async def store_backtest_grade(
                    :macro, :macro_conf,
                    :sector, :sec_conf,
                    :fund, :fund_conf,
-                   CAST(:weights AS jsonb))
-                ON CONFLICT (instrument_id, date, term) DO UPDATE
+                   CAST(:weights AS jsonb), :smode)
+                ON CONFLICT (instrument_id, date, term, sentiment_mode) DO UPDATE
                   SET overall_score      = EXCLUDED.overall_score,
                       technical_score    = EXCLUDED.technical_score,
                       technical_conf      = EXCLUDED.technical_conf,
@@ -113,6 +114,7 @@ async def store_backtest_grade(
                 "sector": sector_score, "sec_conf": sector_conf,
                 "fund": fundamentals_score, "fund_conf": fundamentals_conf,
                 "weights": str(weights).replace("'", '"'),
+                "smode": sentiment_mode,
             },
         )
         await session.commit()
@@ -183,6 +185,7 @@ async def run_backtest(
 
     Returns list of result dicts for calibration.
     """
+    sentiment_mode = "off" if ignore_sentiment else "on"
     start_date = date.fromisoformat(BACKTEST_START)
     end_date = date.fromisoformat(BACKTEST_END)
 
@@ -238,8 +241,8 @@ async def run_backtest(
             if skip_existing:
                 async with async_session() as session:
                     existing = await session.execute(
-                        text("SELECT 1 FROM backtest_grades WHERE instrument_id=:iid AND date=:d AND term=:t"),
-                        {"iid": iid, "d": d, "t": term},
+                        text("SELECT 1 FROM backtest_grades WHERE instrument_id=:iid AND date=:d AND term=:t AND sentiment_mode=:sm"),
+                        {"iid": iid, "d": d, "t": term, "sm": sentiment_mode},
                     )
                     if existing.fetchone():
                         skipped += 1
@@ -300,6 +303,7 @@ async def run_backtest(
                 sector_score, sector_conf,
                 fund_score, fund_conf,
                 nominal_weights,
+                sentiment_mode=sentiment_mode,
             )
             if return_5d is not None or return_20d is not None:
                 await store_backtest_return(iid, symbol, d, return_5d, return_20d)
@@ -335,7 +339,7 @@ async def run_backtest(
     return all_results
 
 
-async def load_backtest_results(term: str = "short") -> list[dict]:
+async def load_backtest_results(term: str = "short", sentiment_mode: str = "on") -> list[dict]:
     """Load existing backtest results from DB for calibration."""
     async with async_session() as session:
         result = await session.execute(
@@ -353,11 +357,11 @@ async def load_backtest_results(term: str = "short") -> list[dict]:
                 JOIN instruments i ON i.id = bg.instrument_id
                 LEFT JOIN backtest_returns br
                     ON br.instrument_id = bg.instrument_id AND br.date = bg.date
-                WHERE bg.term = :term
+                WHERE bg.term = :term AND bg.sentiment_mode = :smode
                   AND br.return_20d IS NOT NULL
                 ORDER BY bg.date ASC
             """),
-            {"term": term},
+            {"term": term, "smode": sentiment_mode},
         )
         rows = result.fetchall()
 

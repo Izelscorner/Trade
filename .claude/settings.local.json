@@ -16,6 +16,9 @@
     ],
     "deny": [
       "Read(./.env)"
+    ],
+    "additionalDirectories": [
+      "/Users/main/Projects/Trade/backtest_reports"
     ]
   }
 }

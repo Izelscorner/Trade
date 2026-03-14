@@ -134,17 +134,40 @@ def _latest_before(series: pd.Series, cutoff: pd.Timestamp):
     return float(valid.iloc[-1])
 
 
+_FUND_CACHE_DIR = "/cache/fundamentals"
+
+
 def fetch_fundamentals_history(yf_symbol: str) -> dict:
-    """Fetch quarterly financials from yfinance.
+    """Fetch quarterly financials from yfinance with persistent cache.
 
     Returns a dict with DataFrames for income statement and balance sheet,
     indexed by quarter date. Call once per instrument before the backtest loop.
+    Caches to /tmp/fundamentals_cache/ so subsequent runs skip the API call.
     """
+    import os
+    import pickle
+
+    os.makedirs(_FUND_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(_FUND_CACHE_DIR, f"{yf_symbol.replace('=', '_')}.pkl")
+
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            logger.info("Loaded fundamentals cache for %s", yf_symbol)
+            return data
+        except Exception:
+            pass
+
     try:
         ticker = yf.Ticker(yf_symbol)
         income = ticker.quarterly_income_stmt
         balance = ticker.quarterly_balance_sheet
-        return {"income": income, "balance": balance, "symbol": yf_symbol}
+        data = {"income": income, "balance": balance, "symbol": yf_symbol}
+        with open(cache_path, "wb") as f:
+            pickle.dump(data, f)
+        logger.info("Cached fundamentals for %s", yf_symbol)
+        return data
     except Exception:
         logger.exception("Failed to fetch fundamentals for %s", yf_symbol)
         return {"income": None, "balance": None, "symbol": yf_symbol}
