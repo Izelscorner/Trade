@@ -1574,6 +1574,7 @@ async def cleanup_priority() -> None:
 
 # Known sector assignments — deterministic fallback when LLM is unavailable
 _KNOWN_SECTORS: dict[str, str | None] = {
+    # ── Original 15 ──
     "RTX": "industrials",
     "NVDA": "technology",
     "GOOGL": "communication",
@@ -1589,6 +1590,56 @@ _KNOWN_SECTORS: dict[str, str | None] = {
     "VOO": None,
     "GOLD": "materials",
     "OIL": "energy",
+    # ── Technology ──
+    "MSFT": "technology",
+    "AMD": "technology",
+    "CRM": "technology",
+    # ── Financials ──
+    "JPM": "financials",
+    "GS": "financials",
+    "BAC": "financials",
+    "V": "financials",
+    "MA": "financials",
+    # ── Healthcare ──
+    "JNJ": "healthcare",
+    "UNH": "healthcare",
+    "PFE": "healthcare",
+    # ── Consumer Discretionary ──
+    "AMZN": "consumer_discretionary",
+    "HD": "consumer_discretionary",
+    "NKE": "consumer_discretionary",
+    # ── Consumer Staples ──
+    "PG": "consumer_staples",
+    "KO": "consumer_staples",
+    "COST": "consumer_staples",
+    # ── Communication ──
+    "META": "communication",
+    "DIS": "communication",
+    # ── Energy ──
+    "CVX": "energy",
+    "COP": "energy",
+    "SLB": "energy",
+    # ── Industrials ──
+    "CAT": "industrials",
+    "BA": "industrials",
+    "GE": "industrials",
+    # ── Materials ──
+    "LIN": "materials",
+    "FCX": "materials",
+    # ── Utilities ──
+    "NEE": "utilities",
+    "DUK": "utilities",
+    # ── Real Estate ──
+    "AMT": "real_estate",
+    "PLD": "real_estate",
+    # ── ETFs ──
+    "QQQ": "technology",
+    "IWM": None,
+    "XLF": "financials",
+    "XLE": "energy",
+    # ── Commodities ──
+    "SILVER": "materials",
+    "NATGAS": "energy",
 }
 
 VALID_SECTORS = {

@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS fundamental_metrics (
     roe NUMERIC(12, 6),
     de_ratio NUMERIC(12, 4),
     peg_ratio NUMERIC(12, 4),
+    revenue_growth NUMERIC(12, 6),
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -221,26 +222,74 @@ CREATE INDEX idx_instruments_sector ON instruments(sector) WHERE sector IS NOT N
 CREATE INDEX idx_fundamental_metrics_instrument ON fundamental_metrics(instrument_id, fetched_at DESC);
 CREATE INDEX idx_macro_indicators_name_fetched ON macro_indicators(indicator_name, fetched_at DESC);
 
--- Seed instruments
+-- Seed instruments (50 total: 37 stocks, 7 ETFs, 4 commodities, 2 crypto-commodities)
 INSERT INTO instruments (symbol, name, category, sector, yfinance_symbol) VALUES
-    -- Stocks
-    ('RTX', 'RTX Corporation', 'stock', 'industrials', 'RTX'),
-    ('NVDA', 'NVIDIA Corporation', 'stock', 'technology', 'NVDA'),
-    ('GOOGL', 'Alphabet Inc.', 'stock', 'communication', 'GOOGL'),
-    ('AAPL', 'Apple Inc.', 'stock', 'technology', 'AAPL'),
-    ('TSLA', 'Tesla, Inc.', 'stock', 'consumer_discretionary', 'TSLA'),
-    ('PLTR', 'Palantir Technologies Inc.', 'stock', 'technology', 'PLTR'),
-    ('LLY', 'Eli Lilly and Company', 'stock', 'healthcare', 'LLY'),
-    ('NVO', 'Novo Nordisk A/S', 'stock', 'healthcare', 'NVO'),
-    ('WMT', 'Walmart Inc.', 'stock', 'consumer_staples', 'WMT'),
-    ('XOM', 'Exxon Mobil Corporation', 'stock', 'energy', 'XOM'),
-    -- ETFs
-    ('IITU', 'iShares US Technology ETF', 'etf', 'technology', 'IITU.L'),
-    ('SMH', 'VanEck Semiconductor ETF', 'etf', 'technology', 'SMH'),
-    ('VOO', 'Vanguard S&P 500 ETF', 'etf', NULL, 'VOO'),
-    -- Commodities
-    ('GOLD', 'Gold Futures', 'commodity', 'materials', 'GC=F'),
-    ('OIL', 'Crude Oil Futures', 'commodity', 'energy', 'CL=F')
+    -- ── Original 10 Stocks ──
+    ('RTX',   'RTX Corporation',              'stock', 'industrials',            'RTX'),
+    ('NVDA',  'NVIDIA Corporation',            'stock', 'technology',             'NVDA'),
+    ('GOOGL', 'Alphabet Inc.',                 'stock', 'communication',          'GOOGL'),
+    ('AAPL',  'Apple Inc.',                    'stock', 'technology',             'AAPL'),
+    ('TSLA',  'Tesla, Inc.',                   'stock', 'consumer_discretionary', 'TSLA'),
+    ('PLTR',  'Palantir Technologies Inc.',    'stock', 'technology',             'PLTR'),
+    ('LLY',   'Eli Lilly and Company',         'stock', 'healthcare',             'LLY'),
+    ('NVO',   'Novo Nordisk A/S',              'stock', 'healthcare',             'NVO'),
+    ('WMT',   'Walmart Inc.',                  'stock', 'consumer_staples',       'WMT'),
+    ('XOM',   'Exxon Mobil Corporation',       'stock', 'energy',                 'XOM'),
+    -- ── Technology (3) ──
+    ('MSFT',  'Microsoft Corporation',         'stock', 'technology',             'MSFT'),
+    ('AMD',   'Advanced Micro Devices',        'stock', 'technology',             'AMD'),
+    ('CRM',   'Salesforce Inc.',               'stock', 'technology',             'CRM'),
+    -- ── Financials (5) ──
+    ('JPM',   'JPMorgan Chase & Co.',          'stock', 'financials',             'JPM'),
+    ('GS',    'Goldman Sachs Group',           'stock', 'financials',             'GS'),
+    ('BAC',   'Bank of America Corp.',         'stock', 'financials',             'BAC'),
+    ('V',     'Visa Inc.',                     'stock', 'financials',             'V'),
+    ('MA',    'Mastercard Incorporated',       'stock', 'financials',             'MA'),
+    -- ── Healthcare (3) ──
+    ('JNJ',   'Johnson & Johnson',             'stock', 'healthcare',             'JNJ'),
+    ('UNH',   'UnitedHealth Group',            'stock', 'healthcare',             'UNH'),
+    ('PFE',   'Pfizer Inc.',                   'stock', 'healthcare',             'PFE'),
+    -- ── Consumer Discretionary (3) ──
+    ('AMZN',  'Amazon.com Inc.',               'stock', 'consumer_discretionary', 'AMZN'),
+    ('HD',    'The Home Depot Inc.',            'stock', 'consumer_discretionary', 'HD'),
+    ('NKE',   'Nike Inc.',                     'stock', 'consumer_discretionary', 'NKE'),
+    -- ── Consumer Staples (3) ──
+    ('PG',    'Procter & Gamble Co.',           'stock', 'consumer_staples',       'PG'),
+    ('KO',    'The Coca-Cola Company',          'stock', 'consumer_staples',       'KO'),
+    ('COST',  'Costco Wholesale Corp.',         'stock', 'consumer_staples',       'COST'),
+    -- ── Communication (2) ──
+    ('META',  'Meta Platforms Inc.',            'stock', 'communication',          'META'),
+    ('DIS',   'The Walt Disney Company',       'stock', 'communication',          'DIS'),
+    -- ── Energy (3) ──
+    ('CVX',   'Chevron Corporation',            'stock', 'energy',                 'CVX'),
+    ('COP',   'ConocoPhillips',                'stock', 'energy',                 'COP'),
+    ('SLB',   'Schlumberger Limited',           'stock', 'energy',                 'SLB'),
+    -- ── Industrials (3) ──
+    ('CAT',   'Caterpillar Inc.',               'stock', 'industrials',            'CAT'),
+    ('BA',    'The Boeing Company',             'stock', 'industrials',            'BA'),
+    ('GE',    'GE Aerospace',                  'stock', 'industrials',            'GE'),
+    -- ── Materials (2) ──
+    ('LIN',   'Linde plc',                     'stock', 'materials',              'LIN'),
+    ('FCX',   'Freeport-McMoRan Inc.',          'stock', 'materials',              'FCX'),
+    -- ── Utilities (2) ──
+    ('NEE',   'NextEra Energy Inc.',            'stock', 'utilities',              'NEE'),
+    ('DUK',   'Duke Energy Corporation',        'stock', 'utilities',              'DUK'),
+    -- ── Real Estate (2) ──
+    ('AMT',   'American Tower Corp.',           'stock', 'real_estate',            'AMT'),
+    ('PLD',   'Prologis Inc.',                  'stock', 'real_estate',            'PLD'),
+    -- ── ETFs (7) ──
+    ('IITU',  'iShares US Technology ETF',      'etf',   'technology',             'IITU.L'),
+    ('SMH',   'VanEck Semiconductor ETF',       'etf',   'technology',             'SMH'),
+    ('VOO',   'Vanguard S&P 500 ETF',           'etf',   NULL,                     'VOO'),
+    ('QQQ',   'Invesco QQQ Trust',              'etf',   'technology',             'QQQ'),
+    ('IWM',   'iShares Russell 2000 ETF',       'etf',   NULL,                     'IWM'),
+    ('XLF',   'Financial Select Sector SPDR',   'etf',   'financials',             'XLF'),
+    ('XLE',   'Energy Select Sector SPDR',      'etf',   'energy',                 'XLE'),
+    -- ── Commodities (4) ──
+    ('GOLD',   'Gold Futures',                  'commodity', 'materials',           'GC=F'),
+    ('OIL',    'Crude Oil Futures',             'commodity', 'energy',              'CL=F'),
+    ('SILVER', 'Silver Futures',                'commodity', 'materials',           'SI=F'),
+    ('NATGAS', 'Natural Gas Futures',           'commodity', 'energy',              'NG=F')
 ON CONFLICT (symbol) DO NOTHING;
 
 -- Backtesting: retroactive grade simulations
@@ -250,6 +299,7 @@ CREATE TABLE IF NOT EXISTS backtest_grades (
     symbol VARCHAR(20) NOT NULL,
     date DATE NOT NULL,
     term VARCHAR(10) NOT NULL,
+    sentiment_mode VARCHAR(5) NOT NULL DEFAULT 'on',
     overall_score NUMERIC(7, 4),
     technical_score NUMERIC(7, 4),
     technical_conf NUMERIC(7, 4),
@@ -263,9 +313,9 @@ CREATE TABLE IF NOT EXISTS backtest_grades (
     fundamentals_conf NUMERIC(7, 4),
     weights JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(instrument_id, date, term)
+    UNIQUE(instrument_id, date, term, sentiment_mode)
 );
-CREATE INDEX IF NOT EXISTS idx_backtest_grades_instrument_date ON backtest_grades(instrument_id, date, term);
+CREATE INDEX IF NOT EXISTS idx_backtest_grades_instrument_date ON backtest_grades(instrument_id, date, term, sentiment_mode);
 
 -- Backtesting: forward returns for validation
 CREATE TABLE IF NOT EXISTS backtest_returns (
@@ -323,3 +373,23 @@ CREATE TABLE IF NOT EXISTS backtest_sentiment_cache (
     PRIMARY KEY (type, key, date)
 );
 CREATE INDEX IF NOT EXISTS idx_bsc_type_key_date ON backtest_sentiment_cache (type, key, date DESC);
+
+-- Backtesting: article-level news storage (production-faithful)
+-- Stores individual articles with sentiment labels for precise time-decay scoring
+CREATE TABLE IF NOT EXISTS backtest_articles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    type VARCHAR(10) NOT NULL CHECK (type IN ('asset', 'macro', 'sector')),
+    key VARCHAR(50) NOT NULL,
+    date DATE NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT,
+    url_hash VARCHAR(32),
+    published_at TIMESTAMPTZ,
+    short_label VARCHAR(20) NOT NULL DEFAULT 'neutral',
+    long_label VARCHAR(20) NOT NULL DEFAULT 'neutral',
+    short_confidence NUMERIC(4, 3) NOT NULL DEFAULT 0.5,
+    long_confidence NUMERIC(4, 3) NOT NULL DEFAULT 0.5,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ba_type_key_date ON backtest_articles (type, key, date DESC);
+CREATE INDEX IF NOT EXISTS idx_ba_url_hash ON backtest_articles (url_hash);

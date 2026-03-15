@@ -47,7 +47,8 @@ def _clip(v: float, lo=-3.0, hi=3.0) -> float:
 
 
 def _sigmoid(score: float, k: float = 1.5) -> float:
-    return 100.0 / (1.0 + math.exp(-k * score))
+    """Production scorer.py rounds to 1 decimal place."""
+    return round(100.0 / (1.0 + math.exp(-k * score)), 1)
 
 
 def simulate_grade(

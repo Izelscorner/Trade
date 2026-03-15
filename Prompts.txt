@@ -148,10 +148,26 @@ Add regime detection — Simple: VIX < 15 = bull weights, VIX > 25 = bear weight
 The mathematical foundation is now sound — the grading system correctly processes the signals it has. The question is whether those signals, weighted the way they are, have positive predictive alpha. That requires backtesting data to answer.
 
 
-Run backtest for following settings for 11 assets which has enough sentiment news for now
-what I need to see 4 reports like below
 
-top pick short term with sentiment
-top pick short term without sentiment
-top pick long term with sentiment 
-top pick long term without sentiment 
+
+
+
+
+Extend backtest to include 2022 bear market and 2020 COVID crash
+Test on 50+ instruments you didn't hand-pick
+Add transaction costs (I'm using revolut and it says it's free but there is some spread)
+Compare against naive benchmarks: equal-weight buy-and-hold, momentum-only, random picking
+Out-of-sample walk-forward test (train on 12mo, test on next 3mo, roll forward)
+If correlation stays positive after all that, you have something
+
+
+
+
+- make sure in production turning sentiment toggle on / off actually add or fully removes sentiment scores from grade composition completely for each page where we display asset and asset score.
+
+- make sure when production app starts all instruments has all historical and last intradate prices available and there won't be any gaps between system restarts.
+
+
+
+
+

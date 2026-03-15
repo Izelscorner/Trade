@@ -43,9 +43,14 @@ async def get_historical_stats(instrument_id: str) -> tuple[date | None, int, in
 
 
 def compute_period(last_date: date | None, row_count: int = 0) -> str:
-    """Compute yfinance-compatible period string based on last stored date."""
+    """Compute yfinance-compatible period string based on last stored date.
+
+    Initial fetch uses "max" to get full history since instrument inception,
+    matching the backtester's yfinance period="max" for consistency.
+    Subsequent fetches use incremental periods to minimise API calls.
+    """
     if last_date is None or row_count < MIN_HISTORICAL_ROWS:
-        return "5y"
+        return "max"
 
     days_diff = (date.today() - last_date).days
     if days_diff <= 5:
@@ -61,7 +66,7 @@ def compute_period(last_date: date | None, row_count: int = 0) -> str:
     elif days_diff <= 730:
         return "2y"
     else:
-        return "5y"
+        return "max"
 
 
 async def fetch_and_store_historical(instrument: dict, force: bool = False) -> int:

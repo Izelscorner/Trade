@@ -3,22 +3,33 @@
 Commands:
   fetch-sentiment   — Pre-fetch historical news sentiment (Google News + NIM LLM)
   status            — Show cache and backtest progress
-  backtest          — Run retroactive grade simulation over historical date grid
+  backtest          — Run retroactive grade simulation (all 4 variations automatically)
   calibrate         — Optimize composite signal weights using backtest results
   patch             — Apply optimized weights to scorer.py (requires SCORER_PY_PATH mount)
-  run-all           — Full pipeline: fetch-sentiment → backtest → calibrate → patch
+  report            — Generate multi-variation HTML report for one strategy
+  report-all        — Generate reports for ALL strategies + summary report
+  list-strategies   — Print available strategies
+  walk-forward      — Out-of-sample test (12mo train, 3mo test, rolling)
+  run-all           — Full pipeline: fetch-sentiment → backtest → calibrate → patch → report-all
 
 Usage examples (via docker compose):
   docker compose run --rm backtester python -m app.main fetch-sentiment
   docker compose run --rm backtester python -m app.main status
-  docker compose run --rm backtester python -m app.main backtest --term short
-  docker compose run --rm backtester python -m app.main backtest --term long --no-sentiment
-  docker compose run --rm backtester python -m app.main calibrate --term short
-  docker compose run --rm backtester python -m app.main patch --dry-run
+  docker compose run --rm backtester python -m app.main backtest
+  docker compose run --rm backtester python -m app.main backtest --fetch-sentiment
+  docker compose run --rm backtester python -m app.main report --strategy top_n
+  docker compose run --rm backtester python -m app.main report-all
+  docker compose run --rm backtester python -m app.main report-all --cost-bps 5
   docker compose run --rm backtester python -m app.main run-all
 
-Sentiment source: Google News RSS + NIM/Qwen 122B (same model as production).
-Covers all 15 instruments + macro + 11 GICS sectors. No API limits. Resumes from cache.
+Each strategy report contains all 4 variations:
+  - Short-term + Sentiment
+  - Short-term (No Sentiment)
+  - Long-term + Sentiment
+  - Long-term (No Sentiment)
+
+report-all generates one report per strategy + a summary report ranking all
+strategies × variations, highlighting the best overall configuration.
 """
 
 import argparse
@@ -40,11 +51,24 @@ def _print_summary_table(results: list[dict]) -> None:
     if not results:
         return
 
-    print(f"\n{'=' * 140}")
-    print(f"  {'Strategy':<20} {'Horizon':<12} {'Sentiment':<18} {'Return':>10} {'Bench':>10} {'Alpha':>10} {'$1K->':>10} {'Sharpe':>8} {'Win Rate':>10} {'Trades':>8}")
-    print(f"  {'-'*20} {'-'*12} {'-'*18} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*8}")
+    # Flatten: each strategy has multiple variations
+    flat = []
+    for r in results:
+        for v in r.get("variations", []):
+            flat.append({
+                "strategy": r.get("strategy", "?"),
+                "label": v.get("label", "?"),
+                "kpis": v.get("kpis", {}),
+            })
 
-    for r in sorted(results, key=lambda x: x.get("kpis", {}).get("alpha", 0), reverse=True):
+    if not flat:
+        return
+
+    print(f"\n{'=' * 150}")
+    print(f"  {'Strategy':<20} {'Variation':<30} {'Return':>10} {'Bench':>10} {'Alpha':>10} {'$1K->':>10} {'Sharpe':>8} {'Win Rate':>10} {'Trades':>8}")
+    print(f"  {'-'*20} {'-'*30} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*8}")
+
+    for r in sorted(flat, key=lambda x: x.get("kpis", {}).get("alpha", 0), reverse=True):
         k = r.get("kpis", {})
         if not k:
             continue
@@ -59,8 +83,7 @@ def _print_summary_table(results: list[dict]) -> None:
 
         print(
             f"  {r.get('strategy', '?'):<20} "
-            f"{r.get('horizon', '?'):<12} "
-            f"{r.get('sentiment_mode', '?'):<18} "
+            f"{r.get('label', '?'):<30} "
             f"{cum:>+9.1f}% "
             f"{bench:>+9.1f}% "
             f"{alpha:>+9.1f}% "
@@ -70,7 +93,7 @@ def _print_summary_table(results: list[dict]) -> None:
             f"{trades:>5} ({exposure:.0f}%)"
         )
 
-    print(f"{'=' * 140}\n")
+    print(f"{'=' * 150}\n")
 
 
 async def cmd_fetch_sentiment(args) -> None:
@@ -91,6 +114,9 @@ async def cmd_fetch_sentiment(args) -> None:
 
 
 async def cmd_status(args) -> None:
+    import glob as glob_mod
+    import os
+
     from .backtest_engine import load_instruments
     from .config import BACKTEST_END, BACKTEST_START
     from .db import async_session
@@ -105,12 +131,11 @@ async def cmd_status(args) -> None:
 
     n_assets = len(instruments)
     n_sectors = len(SECTOR_QUERIES)
-    # asset + macro(1) + sector
     total_needed = total_days * (n_assets + 1 + n_sectors)
 
     async with async_session() as session:
         cached_r = await session.execute(
-            text("SELECT type, COUNT(*) as n FROM backtest_sentiment_cache GROUP BY type")
+            text("SELECT type, COUNT(DISTINCT (key, date)) as n FROM backtest_articles GROUP BY type")
         )
         cached_by_type = {r.type: r.n for r in cached_r.fetchall()}
 
@@ -134,54 +159,158 @@ async def cmd_status(args) -> None:
     print(f"  Remaining:              {remaining}")
     print(f"{'=' * 60}\n")
 
+    # ── Price OHLCV Cache (parquet files in /cache/ohlcv) ──
+    ohlcv_dir = "/cache/ohlcv"
+    ohlcv_files = sorted(glob_mod.glob(os.path.join(ohlcv_dir, "*.parquet"))) if os.path.isdir(ohlcv_dir) else []
+    # Build expected set from instruments
+    expected_ohlcv = set()
+    inst_by_yf = {}
+    for inst in instruments:
+        yf_sym = inst.get("yfinance_symbol") or inst.get("symbol")
+        if yf_sym:
+            safe = yf_sym.replace("=", "_").replace("/", "_")
+            expected_ohlcv.add(safe)
+            inst_by_yf[safe] = inst["symbol"]
+
+    cached_ohlcv = {}
+    for fp in ohlcv_files:
+        name = os.path.basename(fp).replace(".parquet", "")
+        try:
+            import pandas as pd
+            df = pd.read_parquet(fp)
+            cached_ohlcv[name] = {
+                "rows": len(df),
+                "start": str(df.index[0].date()) if len(df) > 0 else "?",
+                "end": str(df.index[-1].date()) if len(df) > 0 else "?",
+            }
+        except Exception:
+            cached_ohlcv[name] = {"rows": 0, "start": "?", "end": "?"}
+
+    print(f"{'=' * 60}")
+    print(f"  Price OHLCV Cache (/cache/ohlcv parquet files)")
+    print(f"{'=' * 60}")
+    print(f"  Expected instruments:   {len(expected_ohlcv)}")
+    print(f"  Cached files:           {len(cached_ohlcv)}")
+    missing_ohlcv = expected_ohlcv - set(cached_ohlcv.keys())
+    print(f"  Missing:                {len(missing_ohlcv)}")
+    if missing_ohlcv:
+        missing_syms = [inst_by_yf.get(s, s) for s in sorted(missing_ohlcv)]
+        print(f"    → {', '.join(missing_syms[:15])}{'...' if len(missing_syms) > 15 else ''}")
+    if cached_ohlcv:
+        print(f"\n  {'Symbol':<12} {'yfinance':<14} {'Rows':>6} {'Start':>12} {'End':>12}")
+        print(f"  {'-'*12} {'-'*14} {'-'*6} {'-'*12} {'-'*12}")
+        for safe_name in sorted(cached_ohlcv.keys()):
+            info = cached_ohlcv[safe_name]
+            sym = inst_by_yf.get(safe_name, "?")
+            print(f"  {sym:<12} {safe_name:<14} {info['rows']:>6} {info['start']:>12} {info['end']:>12}")
+    print()
+
+    # ── Fundamentals Cache (pickle files in /cache/fundamentals) ──
+    fund_dir = "/cache/fundamentals"
+    fund_files = sorted(glob_mod.glob(os.path.join(fund_dir, "*.pkl"))) if os.path.isdir(fund_dir) else []
+
+    # Expected: stocks and ETFs only (commodities have no fundamentals)
+    expected_fund = set()
+    fund_by_yf = {}
+    for inst in instruments:
+        if inst.get("category", "").lower() == "commodity":
+            continue
+        yf_sym = inst.get("yfinance_symbol") or inst.get("symbol")
+        if yf_sym:
+            safe = yf_sym.replace("=", "_").replace("/", "_")
+            expected_fund.add(safe)
+            fund_by_yf[safe] = inst["symbol"]
+
+    cached_fund = {}
+    for fp in fund_files:
+        name = os.path.basename(fp).replace(".pkl", "")
+        try:
+            import pickle
+            with open(fp, "rb") as f:
+                data = pickle.load(f)
+            income = data.get("income")
+            balance = data.get("balance")
+            source = data.get("source", "yfinance")
+            n_income = len(income.columns) if income is not None and not income.empty else 0
+            n_balance = len(balance.columns) if balance is not None and not balance.empty else 0
+            # Date range from income columns
+            inc_start = inc_end = "?"
+            if income is not None and not income.empty:
+                import pandas as pd
+                dates = sorted(pd.to_datetime(income.columns))
+                inc_start = str(dates[0].date())
+                inc_end = str(dates[-1].date())
+            cached_fund[name] = {
+                "income_quarters": n_income, "balance_quarters": n_balance,
+                "source": source, "start": inc_start, "end": inc_end,
+            }
+        except Exception:
+            cached_fund[name] = {
+                "income_quarters": 0, "balance_quarters": 0,
+                "source": "?", "start": "?", "end": "?",
+            }
+
+    n_edgar = sum(1 for v in cached_fund.values() if v["source"] == "edgar")
+    n_yf = sum(1 for v in cached_fund.values() if v["source"] == "yfinance")
+
+    print(f"{'=' * 60}")
+    print(f"  Fundamentals Cache (/cache/fundamentals pickle files)")
+    print(f"{'=' * 60}")
+    print(f"  Expected (stocks+ETFs): {len(expected_fund)}")
+    print(f"  Cached files:           {len(cached_fund)}  (EDGAR: {n_edgar}, yfinance: {n_yf})")
+    missing_fund = expected_fund - set(cached_fund.keys())
+    print(f"  Missing:                {len(missing_fund)}")
+    if missing_fund:
+        missing_syms = [fund_by_yf.get(s, s) for s in sorted(missing_fund)]
+        print(f"    → {', '.join(missing_syms[:15])}{'...' if len(missing_syms) > 15 else ''}")
+    if cached_fund:
+        print(f"\n  {'Symbol':<12} {'Source':<8} {'Income Q':>8} {'Balance Q':>9} {'Start':>12} {'End':>12}")
+        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*9} {'-'*12} {'-'*12}")
+        for safe_name in sorted(cached_fund.keys()):
+            info = cached_fund[safe_name]
+            sym = fund_by_yf.get(safe_name, "?")
+            print(f"  {sym:<12} {info['source']:<8} {info['income_quarters']:>8} {info['balance_quarters']:>9} {info['start']:>12} {info['end']:>12}")
+    print()
+
+    # ── Backtest Results ──
     async with async_session() as session:
         bg = await session.execute(text("SELECT COUNT(*) FROM backtest_grades"))
         br = await session.execute(text("SELECT COUNT(*) FROM backtest_returns"))
         cr = await session.execute(text("SELECT COUNT(*) FROM calibration_runs"))
 
+    print(f"{'=' * 60}")
+    print(f"  Backtest Results")
+    print(f"{'=' * 60}")
     print(f"  backtest_grades rows:   {bg.scalar() or 0}")
     print(f"  backtest_returns rows:  {br.scalar() or 0}")
-    print(f"  calibration_runs rows:  {cr.scalar() or 0}\n")
+    print(f"  calibration_runs rows:  {cr.scalar() or 0}")
 
-    # Signal quality preview if grades exist
+    # Grade coverage per variation
     async with async_session() as session:
-        qr = await session.execute(text("""
-            SELECT width_bucket(bg.overall_score::float, -3, 3, 5) as q,
-                   COUNT(*) as n,
-                   ROUND(AVG(br.return_20d)::numeric * 100, 2) as avg_20d
-            FROM backtest_grades bg
-            JOIN backtest_returns br ON br.instrument_id = bg.instrument_id AND br.date = bg.date
-            WHERE bg.term = 'short' AND br.return_20d IS NOT NULL
-            GROUP BY q ORDER BY q
+        var_r = await session.execute(text("""
+            SELECT term, sentiment_mode, COUNT(*) as n
+            FROM backtest_grades
+            GROUP BY term, sentiment_mode
+            ORDER BY term, sentiment_mode
         """))
-        quintiles = qr.fetchall()
+        var_rows = var_r.fetchall()
 
-    if quintiles:
-        print(f"  Short-term grade quintile → avg 20-day return:")
-        for row in quintiles:
-            bar = "▓" * max(0, int((row.avg_20d or 0) * 10 + 10))
-            print(f"    Q{row.q}: {row.n:4d} grades, {row.avg_20d:+.2f}%  {bar}")
-        print()
+    if var_rows:
+        print(f"\n  Grade coverage by variation:")
+        for r in var_rows:
+            print(f"    {r.term:>5} / sentiment={'on' if r.sentiment_mode == 'on' else 'off':>3}: {r.n:,} grades")
+    print()
 
 
 async def cmd_backtest(args) -> None:
     from .backtest_engine import run_backtest
 
-    ignore_sent = args.no_sentiment
-    # Don't fetch new sentiment unless explicitly requested
-    fetch_sent = args.fetch_sentiment
-
-    logger.info(
-        "Starting backtest (term=%s, fetch_sentiment=%s, ignore_sentiment=%s)...",
-        args.term, fetch_sent, ignore_sent,
-    )
-    results = await run_backtest(
-        term=args.term,
-        fetch_sentiment=fetch_sent,
+    logger.info("Starting backtest (all 4 variations: short/long × sentiment on/off)...")
+    total = await run_backtest(
+        fetch_sentiment=args.fetch_sentiment,
         skip_existing=not args.force,
-        ignore_sentiment=ignore_sent,
     )
-    logger.info("Backtest done. %d grade rows produced.", len(results))
+    logger.info("Backtest done. %d grade rows produced.", total)
 
 
 async def cmd_calibrate(args) -> None:
@@ -223,27 +352,23 @@ async def cmd_patch(args) -> None:
 
 
 async def cmd_report(args) -> None:
-    from .report_generator import generate_backtest_report
+    from .report_generator import generate_strategy_report
     from .strategies import StrategyParams
-
-    sentiment_mode = "with sentiment"
-    if args.no_sentiment:
-        sentiment_mode = "without sentiment"
 
     params = StrategyParams(
         threshold=args.threshold,
         top_n=args.top_n,
         long_pct=args.long_pct,
+        cost_bps=args.cost_bps,
     )
 
-    result = await generate_backtest_report(
+    result = await generate_strategy_report(
         strategy=args.strategy,
-        term=args.term,
-        sentiment_mode=sentiment_mode,
         strategy_params=params,
     )
-    if result.get("kpis"):
+    if result.get("variations"):
         _print_summary_table([result])
+        logger.info("Report saved: %s", result.get("filepath", ""))
 
 
 async def cmd_list_strategies(args) -> None:
@@ -252,27 +377,74 @@ async def cmd_list_strategies(args) -> None:
 
 
 async def cmd_report_all(args) -> None:
-    from .report_generator import generate_backtest_report
+    from .report_generator import generate_strategy_report, generate_summary_report, generate_walk_forward_report
     from .strategies import STRATEGIES, StrategyParams
 
-    sentiment_mode = "with sentiment"
-    if args.no_sentiment:
-        sentiment_mode = "without sentiment"
+    params = StrategyParams(cost_bps=args.cost_bps)
+    strategy_names = list(STRATEGIES.keys())
+    include_wf = getattr(args, "walk_forward", False)
+    all_results = []
 
-    params = StrategyParams()
-    results = []
     for name in STRATEGIES:
-        logger.info("=== Generating report: %s ===", name)
-        result = await generate_backtest_report(
+        result = await generate_strategy_report(
             strategy=name,
-            term=args.term,
-            sentiment_mode=sentiment_mode,
             strategy_params=params,
+            strategy_names=strategy_names,
+            include_walk_forward=include_wf,
         )
-        if result.get("kpis"):
-            results.append(result)
-    logger.info("All %d strategy reports generated.", len(STRATEGIES))
-    _print_summary_table(results)
+        if result.get("variations"):
+            all_results.append(result)
+
+    logger.info("Generated %d strategy reports.", len(all_results))
+    _print_summary_table(all_results)
+
+    # Generate walk-forward report if requested
+    wf_report = ""
+    if include_wf:
+        from .backtest_engine import load_backtest_results
+        from .walk_forward import run_walk_forward
+
+        wf_term = getattr(args, "wf_term", "short")
+        logger.info("Running walk-forward analysis (term=%s)...", wf_term)
+        rows = await load_backtest_results(term=wf_term)
+        if rows:
+            wf_results = run_walk_forward(rows, term=wf_term)
+            if wf_results:
+                wf_report = generate_walk_forward_report(
+                    wf_results, term=wf_term, strategy_names=strategy_names,
+                )
+                logger.info("Walk-forward report: %s", wf_report)
+        else:
+            logger.warning("No backtest data for walk-forward. Skipping.")
+
+    # Generate summary report (index.html)
+    summary_path = await generate_summary_report(all_results, include_walk_forward=include_wf)
+    logger.info("Summary report: %s", summary_path)
+    total = len(all_results) + 1 + (1 if wf_report else 0)
+    logger.info("Total reports: %d strategy + 1 summary%s = %d",
+                len(all_results), " + 1 walk-forward" if wf_report else "", total)
+
+
+async def cmd_walk_forward(args) -> None:
+    from .backtest_engine import load_backtest_results
+    from .report_generator import generate_walk_forward_report
+    from .walk_forward import print_walk_forward_results, run_walk_forward
+
+    logger.info("Loading backtest results for walk-forward analysis...")
+    rows = await load_backtest_results(term=args.term)
+    logger.info("Loaded %d rows", len(rows))
+
+    if not rows:
+        logger.error("No backtest data found. Run 'backtest' first.")
+        sys.exit(1)
+
+    results = run_walk_forward(rows, term=args.term)
+    print_walk_forward_results(results)
+
+    # Also generate HTML report
+    filepath = generate_walk_forward_report(results, term=args.term)
+    if filepath:
+        logger.info("Walk-forward HTML report: %s", filepath)
 
 
 async def cmd_run_all(args) -> None:
@@ -280,13 +452,10 @@ async def cmd_run_all(args) -> None:
     from .calibrator import run_all_calibrations, save_calibration_run
     from .patch_weights import patch_scorer_py
 
-    logger.info("=== Step 1: Backtest (short-term) ===")
-    await run_backtest(term="short", fetch_sentiment=True, skip_existing=True)
+    logger.info("=== Step 1: Backtest (all 4 variations) ===")
+    await run_backtest(fetch_sentiment=True, skip_existing=True)
 
-    logger.info("=== Step 2: Backtest (long-term) — reuses cached sentiment ===")
-    await run_backtest(term="long", fetch_sentiment=False, skip_existing=True)
-
-    logger.info("=== Step 3: Load all results ===")
+    logger.info("=== Step 2: Load results for calibration ===")
     short_rows = await load_backtest_results("short")
     long_rows  = await load_backtest_results("long")
     all_rows   = short_rows + long_rows
@@ -294,27 +463,51 @@ async def cmd_run_all(args) -> None:
         logger.error("No backtest data produced. Check instrument OHLCV coverage.")
         sys.exit(1)
 
-    logger.info("=== Step 4: Calibrate weights ===")
+    logger.info("=== Step 3: Calibrate weights ===")
     cal_results = run_all_calibrations(all_rows)
     for result in cal_results.values():
         await save_calibration_run(result)
 
-    logger.info("=== Step 5: Patch scorer.py ===")
+    logger.info("=== Step 4: Patch scorer.py ===")
     patch_scorer_py(cal_results, dry_run=False)
 
-    logger.info("=== Step 6: Generate Performance Reports (all strategies) ===")
-    from .report_generator import generate_backtest_report
+    logger.info("=== Step 5: Generate all strategy reports + summary ===")
+    from .report_generator import generate_strategy_report, generate_summary_report, generate_walk_forward_report
     from .strategies import STRATEGIES, StrategyParams
-    params = StrategyParams()
-    results = []
-    for name in STRATEGIES:
-        for t in ("short", "long"):
-            result = await generate_backtest_report(strategy=name, term=t, strategy_params=params)
-            if result.get("kpis"):
-                results.append(result)
 
-    _print_summary_table(results)
-    logger.info("=== Pipeline complete ===")
+    params = StrategyParams()
+    strategy_names = list(STRATEGIES.keys())
+    include_wf = getattr(args, "walk_forward", False)
+    all_results = []
+    for name in STRATEGIES:
+        result = await generate_strategy_report(
+            strategy=name, strategy_params=params,
+            strategy_names=strategy_names, include_walk_forward=include_wf,
+        )
+        if result.get("variations"):
+            all_results.append(result)
+
+    _print_summary_table(all_results)
+
+    # Walk-forward report
+    wf_report = ""
+    if include_wf:
+        from .walk_forward import run_walk_forward
+        logger.info("=== Step 5b: Walk-forward analysis ===")
+        wf_term = getattr(args, "wf_term", "short")
+        wf_rows = await load_backtest_results(term=wf_term)
+        if wf_rows:
+            wf_results = run_walk_forward(wf_rows, term=wf_term)
+            if wf_results:
+                wf_report = generate_walk_forward_report(
+                    wf_results, term=wf_term, strategy_names=strategy_names,
+                )
+
+    summary_path = await generate_summary_report(all_results, include_walk_forward=include_wf)
+    logger.info("Summary report: %s", summary_path)
+    total = len(all_results) + 1 + (1 if wf_report else 0)
+    logger.info("=== Pipeline complete (%d strategy reports + 1 summary%s) ===",
+                len(all_results), " + 1 walk-forward" if wf_report else "")
 
 
 async def cmd_export_data(args) -> None:
@@ -323,7 +516,10 @@ async def cmd_export_data(args) -> None:
     from .db import async_session
     from sqlalchemy import text
 
-    tables = ["backtest_sentiment_cache", "backtest_grades", "backtest_returns", "calibration_runs"]
+    tables = [
+        "backtest_articles", "backtest_sentiment_cache", "backtest_av_cache",
+        "backtest_grades", "backtest_returns", "calibration_runs",
+    ]
     out_dir = "/reports"
     dump_path = os.path.join(out_dir, f"backtest_data_export.sql")
 
@@ -334,7 +530,6 @@ async def cmd_export_data(args) -> None:
         for table in tables:
             logger.info("Exporting %s...", table)
             async with async_session() as session:
-                # Get column names
                 cols_r = await session.execute(text(
                     f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}' ORDER BY ordinal_position"
                 ))
@@ -351,26 +546,36 @@ async def cmd_export_data(args) -> None:
                 f.write(f"-- Table: {table} ({total} rows)\n")
                 f.write(f"DELETE FROM {table};\n")
 
-                # Batch export
                 batch = 500
                 for offset in range(0, total, batch):
                     rows_r = await session.execute(text(
                         f"SELECT {col_list} FROM {table} ORDER BY 1 OFFSET {offset} LIMIT {batch}"
                     ))
                     rows = rows_r.fetchall()
+                    import json as _json
+                    import uuid as _uuid
+                    from decimal import Decimal as _Decimal
                     for row in rows:
                         vals = []
                         for v in row:
                             if v is None:
                                 vals.append("NULL")
+                            elif isinstance(v, bool):
+                                vals.append("TRUE" if v else "FALSE")
                             elif isinstance(v, str):
                                 vals.append("'" + v.replace("'", "''") + "'")
-                            elif isinstance(v, (dict,)):
-                                vals.append("'" + str(v).replace("'", "''") + "'::jsonb")
+                            elif isinstance(v, _uuid.UUID):
+                                vals.append(f"'{v}'")
+                            elif isinstance(v, dict):
+                                vals.append("'" + _json.dumps(v).replace("'", "''") + "'::jsonb")
                             elif isinstance(v, (__import__('datetime').date, __import__('datetime').datetime)):
                                 vals.append(f"'{v}'")
-                            else:
+                            elif isinstance(v, _Decimal):
                                 vals.append(str(v))
+                            elif isinstance(v, (int, float)):
+                                vals.append(str(v))
+                            else:
+                                vals.append("'" + str(v).replace("'", "''") + "'")
                         f.write(f"INSERT INTO {table} ({col_list}) VALUES ({', '.join(vals)});\n")
                 f.write("\n")
 
@@ -392,7 +597,6 @@ async def cmd_import_data(args) -> None:
     with open(dump_path, "r") as f:
         sql = f.read()
 
-    # Split into individual statements and execute
     statements = [s.strip() for s in sql.split(";\n") if s.strip() and not s.strip().startswith("--")]
     logger.info("Found %d SQL statements", len(statements))
 
@@ -429,23 +633,21 @@ def main():
     # status
     subparsers.add_parser("status", help="Show cache and backtest progress")
 
-    # backtest
-    p_bt = subparsers.add_parser("backtest", help="Run retroactive grade simulation")
-    p_bt.add_argument("--term", choices=["short", "long"], default="short")
-    p_bt.add_argument(
-        "--no-sentiment", action="store_true",
-        help="Zero out sentiment/macro/sector scores (technical+fundamentals only)",
+    # backtest — runs all 4 variations automatically
+    p_bt = subparsers.add_parser(
+        "backtest",
+        help="Run retroactive grade simulation (all 4 variations: short/long × sentiment on/off)",
     )
     p_bt.add_argument(
         "--fetch-sentiment", action="store_true",
-        help="Fetch missing sentiment from Google News + NIM (slow, only when needed)",
+        help="Fetch missing sentiment from Google News + NIM before backtesting (slow, only when needed)",
     )
     p_bt.add_argument(
         "--force", action="store_true",
         help="Re-compute even if grades already exist in DB",
     )
 
-    # calibrate
+    # calibrate (keeps --term since calibration is per-term)
     p_cal = subparsers.add_parser("calibrate", help="Optimize signal weights from backtest results")
     p_cal.add_argument("--term", choices=["short", "long"], default="short")
 
@@ -453,31 +655,44 @@ def main():
     p_patch = subparsers.add_parser("patch", help="Apply optimized weights to scorer.py")
     p_patch.add_argument("--dry-run", action="store_true", help="Print changes without writing")
 
-    # report
-    p_rep = subparsers.add_parser("report", help="Generate HTML performance report")
+    # report — generates multi-variation report for one strategy
+    p_rep = subparsers.add_parser(
+        "report",
+        help="Generate multi-variation HTML report for one strategy (4 variations: short/long × sentiment on/off)",
+    )
     p_rep.add_argument(
         "--strategy",
         choices=["portfolio", "top_pick", "high_conviction", "top_n",
-                 "long_short", "sector_rotation", "contrarian", "risk_adjusted"],
+                 "long_short", "sector_rotation", "contrarian", "risk_adjusted",
+                 "momentum", "random"],
         default="portfolio",
         help="Trading strategy to evaluate (use 'list-strategies' to see descriptions)",
     )
-    p_rep.add_argument("--term", choices=["short", "long"], default="short")
-    p_rep.add_argument("--no-sentiment", action="store_true", help="Label report as 'without sentiment'")
     p_rep.add_argument("--threshold", type=float, default=60.0, help="Buy-confidence threshold for high_conviction (default 60)")
     p_rep.add_argument("--top-n", type=int, default=3, help="Number of instruments for top_n strategy (default 3)")
     p_rep.add_argument("--long-pct", type=float, default=0.20, help="Percentile for long_short/contrarian legs (default 0.20)")
+    p_rep.add_argument("--cost-bps", type=float, default=0.0, help="Round-trip transaction cost in basis points (default 0, suggest 5-10)")
 
-    # report-all: run all strategies at once
-    p_repall = subparsers.add_parser("report-all", help="Generate reports for ALL strategies at once")
-    p_repall.add_argument("--term", choices=["short", "long"], default="short")
-    p_repall.add_argument("--no-sentiment", action="store_true")
+    # report-all: all strategies + summary
+    p_repall = subparsers.add_parser(
+        "report-all",
+        help="Generate reports for ALL strategies + summary report (each with 4 variations)",
+    )
+    p_repall.add_argument("--cost-bps", type=float, default=0.0, help="Round-trip transaction cost in basis points (default 0, suggest 5-10)")
+    p_repall.add_argument("--walk-forward", action="store_true", help="Include walk-forward out-of-sample report")
+    p_repall.add_argument("--wf-term", choices=["short", "long"], default="short", help="Term for walk-forward analysis (default short)")
 
     # list-strategies
     subparsers.add_parser("list-strategies", help="Show all available trading strategies")
 
+    # walk-forward (keeps --term since it's per-term analysis)
+    p_wf = subparsers.add_parser("walk-forward", help="Walk-forward out-of-sample test (12mo train, 3mo test)")
+    p_wf.add_argument("--term", choices=["short", "long"], default="short")
+
     # run-all
-    subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report")
+    p_runall = subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report-all")
+    p_runall.add_argument("--walk-forward", action="store_true", help="Include walk-forward out-of-sample report")
+    p_runall.add_argument("--wf-term", choices=["short", "long"], default="short", help="Term for walk-forward analysis (default short)")
 
     # export-data
     subparsers.add_parser("export-data", help="Export backtest tables to SQL dump (saved to /reports/)")
@@ -497,6 +712,7 @@ def main():
         "report":           cmd_report,
         "report-all":       cmd_report_all,
         "list-strategies":  cmd_list_strategies,
+        "walk-forward":     cmd_walk_forward,
         "run-all":          cmd_run_all,
         "export-data":      cmd_export_data,
         "import-data":      cmd_import_data,

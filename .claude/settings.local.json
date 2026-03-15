@@ -12,7 +12,10 @@
       "Bash(npx tsc --noEmit)",
       "Bash(docker exec trade-postgres-1 psql -U tradesignal -d tradesignal -c \":*)",
       "Bash(curl -s 'https://financialmodelingprep.com/api/v3/ratios-ttm/AAPL?apikey=lGCeYnztOwyWjkwBPhFCqVoWpVATMZ6i')",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\(''services/backtester/app/historical_sentiment.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(source .env)",
+      "Bash(curl -s https://api.ipify.org)"
     ],
     "deny": [
       "Read(./.env)"

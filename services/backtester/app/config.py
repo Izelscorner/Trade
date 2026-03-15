@@ -12,7 +12,7 @@ NIM_MODEL: str = os.environ.get("NIM_MODEL", "qwen/qwen3.5-122b-a10b")
 
 
 # Backtest date range
-BACKTEST_START: str = os.environ.get("BACKTEST_START", "2023-01-01")
+BACKTEST_START: str = os.environ.get("BACKTEST_START", "2020-01-01")
 BACKTEST_END: str = os.environ.get("BACKTEST_END", "2026-03-01")
 
 # How many days between sampled backtest dates (1 = daily)

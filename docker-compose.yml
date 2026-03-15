@@ -18,6 +18,7 @@ services:
       retries: 5
     networks:
       - internal
+      - egress
     read_only: true
     tmpfs:
       - /tmp

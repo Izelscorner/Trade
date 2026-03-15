@@ -24,11 +24,97 @@ import {
   Star,
   Trash2,
   X,
+  SlidersHorizontal,
 } from "lucide-react";
 import { removeInstrument } from "../api/client";
+import { scoreToBuyConfidence } from "../types";
 
 type SortKey = "symbol" | "price" | "change" | "short_grade" | "long_grade";
 type SortDir = "asc" | "desc";
+
+/** Strategy sort presets — each maps to the sorting logic a real trader would use */
+interface StrategyPreset {
+  label: string;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  /** Short explanation shown as subtitle */
+  hint: string;
+  /** Term to use for grade column ('short' or 'long') */
+  term: "short" | "long";
+}
+
+const STRATEGY_PRESETS: Record<string, StrategyPreset> = {
+  top_pick: {
+    label: "Top Pick",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Highest Buy Confidence first — pick #1",
+    term: "short",
+  },
+  top_n: {
+    label: "Top N",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Highest first — buy top 3 equal-weight",
+    term: "short",
+  },
+  high_conviction: {
+    label: "High Conviction",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Highest first — buy all above 60%",
+    term: "short",
+  },
+  contrarian: {
+    label: "Contrarian",
+    sortKey: "short_grade",
+    sortDir: "asc",
+    hint: "Lowest Buy Confidence first — buy bottom 20%, bet on rebound",
+    term: "short",
+  },
+  long_short: {
+    label: "Long / Short",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Top 20% = long, bottom 20% = short",
+    term: "short",
+  },
+  sector_rotation: {
+    label: "Sector Rotation",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Highest per sector — pick each sector's champion",
+    term: "short",
+  },
+  risk_adjusted: {
+    label: "Risk Adjusted",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Favour high score + low volatility assets",
+    term: "short",
+  },
+  portfolio: {
+    label: "Portfolio",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Score-weighted allocation — buy all, weight by score",
+    term: "short",
+  },
+  top_pick_long: {
+    label: "Top Pick (Long-term)",
+    sortKey: "long_grade",
+    sortDir: "desc",
+    hint: "Highest long-term confidence — hold 20 days",
+    term: "long",
+  },
+  contrarian_long: {
+    label: "Contrarian (Long-term)",
+    sortKey: "long_grade",
+    sortDir: "asc",
+    hint: "Lowest long-term confidence — long-term rebound bet",
+    term: "long",
+  },
+};
 
 const ITEMS_PER_PAGE = 20;
 
@@ -47,6 +133,7 @@ export default function AssetList() {
   const [sector, setSector] = useState<Sector | "all">("all");
   const [sortKey, setSortKey] = useState<SortKey>("symbol");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [strategyPreset, setStrategyPreset] = useState<string>("none");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -114,6 +201,69 @@ export default function AssetList() {
     });
   }, [instruments, category, sector, sortKey, sortDir, search, showSentiment]);
 
+  /** Compute which instruments are "selected" by the active strategy */
+  const strategyHighlights = useMemo(() => {
+    if (strategyPreset === "none" || !STRATEGY_PRESETS[strategyPreset]) return new Map<string, "long" | "short" | "buy">();
+    const preset = STRATEGY_PRESETS[strategyPreset];
+    const highlights = new Map<string, "long" | "short" | "buy">();
+    const scoreKey = preset.term === "short"
+      ? (showSentiment ? "short_term_score" : "short_term_pure_score")
+      : (showSentiment ? "long_term_score" : "long_term_pure_score");
+
+    const baseKey = strategyPreset.replace(/_long$/, "");
+
+    if (baseKey === "top_pick") {
+      // Single best
+      if (filtered.length > 0) {
+        const best = filtered.reduce((a, b) =>
+          ((a as any)[scoreKey] ?? -999) >= ((b as any)[scoreKey] ?? -999) ? a : b
+        );
+        if (scoreToBuyConfidence((best as any)[scoreKey]) >= 55) {
+          highlights.set(best.id, "buy");
+        }
+      }
+    } else if (baseKey === "top_n") {
+      // Top 3
+      filtered.slice(0, 3).forEach(i => highlights.set(i.id, "buy"));
+    } else if (baseKey === "high_conviction") {
+      // All above 60% buy confidence
+      filtered.forEach(i => {
+        const conf = scoreToBuyConfidence((i as any)[scoreKey]);
+        if (conf >= 60) highlights.set(i.id, "buy");
+      });
+    } else if (baseKey === "contrarian") {
+      // Bottom 20% (at least 1, at most 5)
+      const n = Math.max(1, Math.min(5, Math.floor(filtered.length * 0.2)));
+      // For contrarian, list is sorted ascending, so first N are the picks
+      filtered.slice(0, n).forEach(i => highlights.set(i.id, "buy"));
+    } else if (baseKey === "long_short") {
+      const n = Math.max(1, Math.floor(filtered.length * 0.2));
+      // Sorted descending: top N = long, bottom N = short
+      filtered.slice(0, n).forEach(i => highlights.set(i.id, "long"));
+      filtered.slice(-n).forEach(i => highlights.set(i.id, "short"));
+    } else if (baseKey === "sector_rotation") {
+      // Best per sector
+      const sectorBest = new Map<string, DashboardInstrument>();
+      filtered.forEach(i => {
+        const sec = i.sector || "__none__";
+        const existing = sectorBest.get(sec);
+        if (!existing || ((i as any)[scoreKey] ?? -999) > ((existing as any)[scoreKey] ?? -999)) {
+          sectorBest.set(sec, i);
+        }
+      });
+      sectorBest.forEach(i => highlights.set(i.id, "buy"));
+    } else if (baseKey === "portfolio") {
+      // All with positive score = long, negative = short
+      filtered.forEach(i => {
+        const score = (i as any)[scoreKey] ?? 0;
+        if (score > 0) highlights.set(i.id, "long");
+        else if (score < 0) highlights.set(i.id, "short");
+      });
+    }
+
+    return highlights;
+  }, [filtered, strategyPreset, showSentiment]);
+
   const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
   const paginated = filtered.slice(
     (page - 1) * ITEMS_PER_PAGE,
@@ -121,11 +271,23 @@ export default function AssetList() {
   );
 
   const handleSort = (key: SortKey) => {
+    setStrategyPreset("none"); // Clear preset when manually sorting
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
       setSortDir(key === "symbol" ? "asc" : "desc");
+    }
+  };
+
+  const handleStrategyPreset = (presetKey: string) => {
+    setStrategyPreset(presetKey);
+    if (presetKey === "none") return;
+    const preset = STRATEGY_PRESETS[presetKey];
+    if (preset) {
+      setSortKey(preset.sortKey);
+      setSortDir(preset.sortDir);
+      setPage(1);
     }
   };
 
@@ -178,6 +340,40 @@ export default function AssetList() {
             Add Asset
           </button>
         </div>
+      </div>
+
+      {/* Strategy Sort Presets */}
+      <div className="flex items-center gap-3 animate-fade-in">
+        <div className="flex items-center gap-2 text-xs text-text-muted">
+          <SlidersHorizontal size={13} />
+          <span className="uppercase tracking-wider font-semibold">Strategy Sort</span>
+        </div>
+        <select
+          value={strategyPreset}
+          onChange={(e) => handleStrategyPreset(e.target.value)}
+          className={`px-3 py-1.5 text-sm rounded-lg border focus:outline-none focus:border-accent-cyan/50 appearance-none cursor-pointer transition-colors ${
+            strategyPreset !== "none"
+              ? "bg-accent-cyan/10 border-accent-cyan/30 text-accent-cyan font-medium"
+              : "bg-surface-2 border-border-subtle text-text-primary"
+          }`}
+        >
+          <option value="none">Manual Sort</option>
+          <optgroup label="Short-term (5-day hold)">
+            {Object.entries(STRATEGY_PRESETS).filter(([, p]) => p.term === "short").map(([key, preset]) => (
+              <option key={key} value={key}>{preset.label}</option>
+            ))}
+          </optgroup>
+          <optgroup label="Long-term (20-day hold)">
+            {Object.entries(STRATEGY_PRESETS).filter(([, p]) => p.term === "long").map(([key, preset]) => (
+              <option key={key} value={key}>{preset.label}</option>
+            ))}
+          </optgroup>
+        </select>
+        {strategyPreset !== "none" && STRATEGY_PRESETS[strategyPreset] && (
+          <span className="text-xs text-text-muted italic">
+            {STRATEGY_PRESETS[strategyPreset].hint}
+          </span>
+        )}
       </div>
 
       {/* Table */}
@@ -233,6 +429,7 @@ export default function AssetList() {
               showSentiment={showSentiment}
               starred={isInPortfolio(inst.id)}
               onToggleStar={() => togglePortfolio(inst.id)}
+              strategyHighlight={strategyHighlights.get(inst.id)}
               onRemove={async () => {
                 if (
                   window.confirm(
@@ -311,6 +508,7 @@ function InstrumentRow({
   starred,
   onToggleStar,
   onRemove,
+  strategyHighlight,
 }: {
   instrument: DashboardInstrument;
   index: number;
@@ -318,6 +516,7 @@ function InstrumentRow({
   starred: boolean;
   onToggleStar: () => void;
   onRemove: () => void;
+  strategyHighlight?: "long" | "short" | "buy";
 }) {
   const statusColor = marketStatusColors[instrument.market_status || "closed"];
 
@@ -326,28 +525,46 @@ function InstrumentRow({
   const lGrade = showSentiment ? instrument.long_term_grade : instrument.long_term_pure_grade;
   const lScore = showSentiment ? instrument.long_term_score : instrument.long_term_pure_score;
 
+  const highlightClass = strategyHighlight === "buy"
+    ? "border-l-2 border-l-accent-emerald bg-accent-emerald/5"
+    : strategyHighlight === "long"
+    ? "border-l-2 border-l-accent-emerald bg-accent-emerald/5"
+    : strategyHighlight === "short"
+    ? "border-l-2 border-l-accent-rose bg-accent-rose/5"
+    : "";
+
   return (
     <div
-      className="grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px_40px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in"
+      className={`grid grid-cols-[40px_1fr_2fr_1fr_1fr_120px_120px_40px] gap-4 items-center px-5 py-4 border-b border-border-subtle hover:bg-surface-2/30 transition-all duration-200 group animate-fade-in ${highlightClass}`}
       style={{ animationDelay: `${index * 30}ms` }}
     >
-      <button
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onToggleStar();
-        }}
-        className="flex items-center justify-center"
-      >
-        <Star
-          size={16}
-          className={`transition-colors ${
-            starred
-              ? "text-accent-amber fill-accent-amber"
-              : "text-text-muted hover:text-accent-amber"
-          }`}
-        />
-      </button>
+      <div className="flex items-center justify-center relative">
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onToggleStar();
+          }}
+        >
+          <Star
+            size={16}
+            className={`transition-colors ${
+              starred
+                ? "text-accent-amber fill-accent-amber"
+                : "text-text-muted hover:text-accent-amber"
+            }`}
+          />
+        </button>
+        {strategyHighlight && (
+          <span className={`absolute -top-1 -right-1 text-[8px] font-bold px-1 rounded ${
+            strategyHighlight === "short"
+              ? "bg-accent-rose/20 text-accent-rose"
+              : "bg-accent-emerald/20 text-accent-emerald"
+          }`}>
+            {strategyHighlight === "short" ? "S" : strategyHighlight === "long" ? "L" : "B"}
+          </span>
+        )}
+      </div>
 
       <Link to={`/asset/${instrument.id}`} className="flex items-center gap-2">
         <div className={`w-1.5 h-1.5 rounded-full ${statusColor} bg-current`} />

@@ -136,81 +136,135 @@ def _latest_before(series: pd.Series, cutoff: pd.Timestamp):
 
 _FUND_CACHE_DIR = "/cache/fundamentals"
 
+# Minimum acceptable quarters for EDGAR data to be considered useful
+_MIN_EDGAR_QUARTERS = 8
 
-def fetch_fundamentals_history(yf_symbol: str) -> dict:
-    """Fetch quarterly financials from yfinance with persistent cache.
+
+def fetch_fundamentals_history(yf_symbol: str, ticker_symbol: str | None = None) -> dict:
+    """Fetch quarterly financials with persistent cache.
+
+    Primary source: SEC EDGAR (18+ years of quarterly data, free, no API key).
+    Fallback: yfinance (only ~5 quarters but covers non-US filers).
+
+    Args:
+        yf_symbol: yfinance symbol (e.g. "AAPL", "IITU.L", "GC=F")
+        ticker_symbol: Stock ticker for SEC lookup (e.g. "AAPL"). If None,
+                       derived from yf_symbol by stripping suffixes.
 
     Returns a dict with DataFrames for income statement and balance sheet,
     indexed by quarter date. Call once per instrument before the backtest loop.
-    Caches to /tmp/fundamentals_cache/ so subsequent runs skip the API call.
+    Caches to /cache/fundamentals/ so subsequent runs skip the API call.
     """
     import os
     import pickle
 
+    from .edgar_client import fetch_edgar_fundamentals
+
     os.makedirs(_FUND_CACHE_DIR, exist_ok=True)
-    cache_path = os.path.join(_FUND_CACHE_DIR, f"{yf_symbol.replace('=', '_')}.pkl")
+    safe_name = yf_symbol.replace("=", "_").replace("/", "_")
+    cache_path = os.path.join(_FUND_CACHE_DIR, f"{safe_name}.pkl")
 
     if os.path.exists(cache_path):
         try:
             with open(cache_path, "rb") as f:
                 data = pickle.load(f)
-            logger.info("Loaded fundamentals cache for %s", yf_symbol)
-            return data
+            source = data.get("source", "yfinance")
+            inc_cols = len(data.get("income", pd.DataFrame()).columns) if data.get("income") is not None else 0
+            bal_cols = len(data.get("balance", pd.DataFrame()).columns) if data.get("balance") is not None else 0
+            logger.info("Loaded fundamentals cache for %s (source=%s, income=%d, balance=%d)",
+                        yf_symbol, source, inc_cols, bal_cols)
+            # If cached from old yfinance-only run with few quarters, re-fetch from EDGAR
+            if source != "edgar" and inc_cols < _MIN_EDGAR_QUARTERS:
+                logger.info("Cache has only %d quarters (yfinance) — trying EDGAR upgrade", inc_cols)
+            else:
+                return data
         except Exception:
             pass
 
+    # Derive ticker for SEC lookup
+    sec_ticker = ticker_symbol
+    if sec_ticker is None:
+        # Strip yfinance suffixes: "IITU.L" -> "IITU", "GC=F" -> skip
+        if "=" not in yf_symbol and "^" not in yf_symbol:
+            sec_ticker = yf_symbol.split(".")[0]
+
+    # Try SEC EDGAR first (deep history)
+    if sec_ticker:
+        edgar_data = fetch_edgar_fundamentals(sec_ticker)
+        if edgar_data is not None:
+            inc_cols = len(edgar_data["income"].columns) if edgar_data["income"] is not None else 0
+            if inc_cols >= _MIN_EDGAR_QUARTERS:
+                with open(cache_path, "wb") as f:
+                    pickle.dump(edgar_data, f)
+                logger.info("Cached EDGAR fundamentals for %s (%d income quarters)", yf_symbol, inc_cols)
+                return edgar_data
+            else:
+                logger.info("[%s] EDGAR returned only %d quarters, falling back to yfinance", yf_symbol, inc_cols)
+
+    # Fallback: yfinance (~5 quarters, covers non-US filers)
     try:
         ticker = yf.Ticker(yf_symbol)
         income = ticker.quarterly_income_stmt
         balance = ticker.quarterly_balance_sheet
-        data = {"income": income, "balance": balance, "symbol": yf_symbol}
+        data = {"income": income, "balance": balance, "symbol": yf_symbol, "source": "yfinance"}
         with open(cache_path, "wb") as f:
             pickle.dump(data, f)
-        logger.info("Cached fundamentals for %s", yf_symbol)
+        inc_cols = len(income.columns) if income is not None else 0
+        logger.info("Cached yfinance fundamentals for %s (%d income quarters)", yf_symbol, inc_cols)
         return data
     except Exception:
         logger.exception("Failed to fetch fundamentals for %s", yf_symbol)
-        return {"income": None, "balance": None, "symbol": yf_symbol}
+        return {"income": None, "balance": None, "symbol": yf_symbol, "source": "none"}
 
 
 def _calc_commodity_supply_demand_score(
     ohlcv_df: pd.DataFrame,
     target_date: date,
     term: str = "short",
+    is_gold: bool = False,
+    dxy_df: pd.DataFrame | None = None,
 ) -> tuple[float, float]:
-    """Commodity supply-demand trend calculation (exact copy of production).
+    """Commodity supply-demand trend calculation — aligned with production scorer.py.
 
     Short-term: 2-day price trend.
     Long-term: 10-day price trend.
+    For GOLD: DXY rising = negative for gold (inverse relationship) — production lines 871-888.
     """
     import math
     import pandas as pd
     cutoff = pd.Timestamp(target_date)
-    # window_hours = 48 if term == "short" else 240
     window_days = 2 if term == "short" else 10
-    
-    # get data in window
+
     window_start = cutoff - pd.Timedelta(days=window_days)
     df_window = ohlcv_df[(ohlcv_df.index >= window_start) & (ohlcv_df.index <= cutoff)]
-    
+
     if len(df_window) < 2:
         return 0.0, 0.0
-        
+
     oldest_val = float(df_window["close"].iloc[0])
     latest_val = float(df_window["close"].iloc[-1])
-    
+
     if oldest_val == 0:
         return 0.0, 0.0
-        
+
     pct_change = (latest_val - oldest_val) / oldest_val
-    # Score mapping: each 2% move = 1 point, capped at ±2.0
     raw_score = _clip(pct_change / 0.02, lo=-2.0, hi=2.0)
-    
-    # Confidence: mirrors production _log_confidence
+
+    # DXY inverse signal for GOLD (production scorer.py lines 871-888)
+    dxy_adjustment = 0.0
+    if is_gold and dxy_df is not None and not dxy_df.empty:
+        dxy_window = dxy_df[(dxy_df.index >= window_start) & (dxy_df.index <= cutoff)]
+        if len(dxy_window) >= 2:
+            dxy_oldest = float(dxy_window["close"].iloc[0])
+            dxy_latest = float(dxy_window["close"].iloc[-1])
+            if dxy_oldest != 0:
+                dxy_change = (dxy_latest - dxy_oldest) / dxy_oldest
+                dxy_adjustment = _clip(-dxy_change / 0.01 * 0.5, lo=-1.0, hi=1.0)
+                raw_score = _clip(raw_score + dxy_adjustment, lo=-2.0, hi=2.0)
+
     n_points = len(df_window)
-    # Log confidence: n=8 -> 1.0, n=2 -> ~0.47
     confidence = min(1.0, math.log(1 + n_points) / math.log(1 + 8))
-    
+
     return round(_clip(raw_score * confidence), 4), round(confidence, 4)
 
 
@@ -223,7 +277,7 @@ def _fundamentals_freshness_confidence(quarters_df_index: "pd.DatetimeIndex", ta
     """
     import pandas as pd
     cutoff = pd.Timestamp(target_date)
-    valid = quarters_df_index[quarters_df_index <= cutoff]
+    valid = quarters_df_index[quarters_df_index <= cutoff].sort_values()
     if len(valid) == 0:
         return 0.0
     latest_quarter = valid[-1]
@@ -258,7 +312,11 @@ def calc_fundamentals_score_for_date(
     if category == "commodity":
         if ohlcv_df is None:
             return 0.0, 0.0
-        return _calc_commodity_supply_demand_score(ohlcv_df, target_date, term)
+        return _calc_commodity_supply_demand_score(
+            ohlcv_df, target_date, term,
+            is_gold=fund_data.get("is_gold", False),
+            dxy_df=fund_data.get("dxy_df"),
+        )
 
     income: pd.DataFrame | None = fund_data.get("income")
     balance: pd.DataFrame | None = fund_data.get("balance")
@@ -272,12 +330,14 @@ def calc_fundamentals_score_for_date(
 
     try:
         # Transpose so index = dates, columns = line items
-        inc = income.T
-        bal = balance.T
+        inc = income.T.copy()
+        bal = balance.T.copy()
 
-        # Ensure datetime index
+        # Ensure datetime index, sorted ascending (EDGAR can be descending)
         inc.index = pd.to_datetime(inc.index)
         bal.index = pd.to_datetime(bal.index)
+        inc = inc.sort_index()
+        bal = bal.sort_index()
 
         # --- P/E ---
         pe = None
@@ -331,6 +391,21 @@ def calc_fundamentals_score_for_date(
             if debt is not None and equity and equity > 0:
                 de = debt / equity
 
+        # --- Revenue Growth (YoY) ---
+        revenue_growth = None
+        rev_col = None
+        for col in ["Total Revenue", "Revenue"]:
+            if col in inc.columns:
+                rev_col = col
+                break
+        if rev_col:
+            rev_series = inc[rev_col][inc.index <= cutoff].dropna()
+            if len(rev_series) >= 8:
+                rev_ttm_now = float(rev_series.iloc[-4:].sum())
+                rev_ttm_prev = float(rev_series.iloc[-8:-4].sum())
+                if rev_ttm_prev and rev_ttm_prev != 0:
+                    revenue_growth = (rev_ttm_now - rev_ttm_prev) / abs(rev_ttm_prev)
+
         # --- PEG ---
         peg = None
         if pe is not None and pe > 0 and ni_col:
@@ -349,7 +424,7 @@ def calc_fundamentals_score_for_date(
         weight_total = 0.0
 
         scored = {
-            "pe_ratio": _score_pe(pe, sector),
+            "pe_ratio": _score_pe(pe, sector, revenue_growth),
             "roe": _score_roe(roe, sector),
             "de_ratio": _score_de(de, sector),
             "peg_ratio": _score_peg(peg, sector),
