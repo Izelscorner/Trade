@@ -10,6 +10,7 @@ Commands:
   report-all        — Generate reports for ALL strategies + summary report
   list-strategies   — Print available strategies
   walk-forward      — Out-of-sample test (12mo train, 3mo test, rolling)
+  deepfill          — Enrich sparse dates with broader queries (assets + macro + sectors)
   run-all           — Full pipeline: fetch-sentiment → backtest → calibrate → patch → report-all
 
 Usage examples (via docker compose):
@@ -20,7 +21,9 @@ Usage examples (via docker compose):
   docker compose run --rm backtester python -m app.main report --strategy top_n
   docker compose run --rm backtester python -m app.main report-all
   docker compose run --rm backtester python -m app.main report-all --cost-bps 5
-  docker compose run --rm backtester python -m app.main run-all
+  docker compose run --rm backtester python -m app.main export-data
+  docker compose run --rm backtester python -m app.main import-data
+  docker compose run --rm backtester python -m app.main import-data --file /reports/backtest_full_export.tar.gz
 
 Each strategy report contains all 4 variations:
   - Short-term + Sentiment
@@ -305,10 +308,12 @@ async def cmd_status(args) -> None:
 async def cmd_backtest(args) -> None:
     from .backtest_engine import run_backtest
 
-    logger.info("Starting backtest (all 4 variations: short/long × sentiment on/off)...")
+    mode = getattr(args, "mode", "production")
+    logger.info("Starting backtest [mode=%s] (all 4 variations: short/long x sentiment on/off)...", mode)
     total = await run_backtest(
         fetch_sentiment=args.fetch_sentiment,
         skip_existing=not args.force,
+        mode=mode,
     )
     logger.info("Backtest done. %d grade rows produced.", total)
 
@@ -317,7 +322,8 @@ async def cmd_calibrate(args) -> None:
     from .backtest_engine import load_backtest_results
     from .calibrator import run_all_calibrations, save_calibration_run
 
-    logger.info("Loading backtest results from DB...")
+    mode = getattr(args, "mode", "production")
+    logger.info("Loading backtest results from DB [mode=%s]...", mode)
     rows = await load_backtest_results(term=args.term)
     logger.info("Loaded %d rows for calibration", len(rows))
 
@@ -325,7 +331,7 @@ async def cmd_calibrate(args) -> None:
         logger.error("No backtest data found. Run 'backtest' first.")
         sys.exit(1)
 
-    results = run_all_calibrations(rows)
+    results = run_all_calibrations(rows, mode=mode)
 
     for result in results.values():
         await save_calibration_run(result)
@@ -447,13 +453,33 @@ async def cmd_walk_forward(args) -> None:
         logger.info("Walk-forward HTML report: %s", filepath)
 
 
+async def cmd_deepfill(args) -> None:
+    from .backtest_engine import load_instruments
+    from .config import BACKTEST_END, BACKTEST_START
+    from .historical_sentiment import deepfill_historical_sentiment
+
+    instruments = await load_instruments()
+    start = date.fromisoformat(BACKTEST_START)
+    end = date.fromisoformat(BACKTEST_END)
+
+    logger.info(
+        "Deepfill: enriching sparse coverage for %d instruments + macro + sectors (%s → %s, min=%d)",
+        len(instruments), start, end, args.min_articles,
+    )
+    await deepfill_historical_sentiment(
+        instruments, start, end, min_articles=args.min_articles,
+    )
+    logger.info("Deepfill complete.")
+
+
 async def cmd_run_all(args) -> None:
     from .backtest_engine import load_backtest_results, run_backtest
     from .calibrator import run_all_calibrations, save_calibration_run
     from .patch_weights import patch_scorer_py
 
-    logger.info("=== Step 1: Backtest (all 4 variations) ===")
-    await run_backtest(fetch_sentiment=True, skip_existing=True)
+    mode = getattr(args, "mode", "production")
+    logger.info("=== Step 1: Backtest [mode=%s] (all 4 variations) ===", mode)
+    await run_backtest(fetch_sentiment=True, skip_existing=True, mode=mode)
 
     logger.info("=== Step 2: Load results for calibration ===")
     short_rows = await load_backtest_results("short")
@@ -463,8 +489,8 @@ async def cmd_run_all(args) -> None:
         logger.error("No backtest data produced. Check instrument OHLCV coverage.")
         sys.exit(1)
 
-    logger.info("=== Step 3: Calibrate weights ===")
-    cal_results = run_all_calibrations(all_rows)
+    logger.info("=== Step 3: Calibrate weights [mode=%s] ===", mode)
+    cal_results = run_all_calibrations(all_rows, mode=mode)
     for result in cal_results.values():
         await save_calibration_run(result)
 
@@ -510,108 +536,387 @@ async def cmd_run_all(args) -> None:
                 len(all_results), " + 1 walk-forward" if wf_report else "")
 
 
+async def cmd_oos_test(args) -> None:
+    """Out-of-sample split test: train on first period, test on second.
+
+    Default split: train 2020-01-01 to 2023-12-31, test 2024-01-01 to 2026-03-15.
+    Runs every strategy on both halves and prints comparison table.
+    """
+    import numpy as np
+    import pandas as pd
+    from .report_generator import get_raw_results, compute_benchmark, VARIATIONS
+    from .strategies import STRATEGIES, StrategyParams, apply_strategy, _get_entry_dates, _holding_period
+
+    split_date = pd.Timestamp(args.split)
+    params = StrategyParams(cost_bps=args.cost_bps)
+
+    strategy_names = list(STRATEGIES.keys())
+
+    print(f"\n{'=' * 170}")
+    print(f"  OUT-OF-SAMPLE SPLIT TEST  —  Train: before {args.split}  |  Test: {args.split} onward")
+    print(f"{'=' * 170}")
+    print(
+        f"  {'Strategy':<20} {'Variation':<30} "
+        f"{'Train Ret':>10} {'Train Alpha':>12} {'Train Sharpe':>12} "
+        f"{'Test Ret':>10} {'Test Alpha':>12} {'Test Sharpe':>12} "
+        f"{'Decay':>8}"
+    )
+    print(
+        f"  {'-'*20} {'-'*30} "
+        f"{'-'*10} {'-'*12} {'-'*12} "
+        f"{'-'*10} {'-'*12} {'-'*12} "
+        f"{'-'*8}"
+    )
+
+    rows = []
+
+    for var in VARIATIONS:
+        term = var["term"]
+        smode = var["smode"]
+        label = var["label"]
+
+        df = await get_raw_results(term=term, sentiment_mode=smode)
+        if df.empty:
+            continue
+        df = df.dropna(subset=["overall_score", "return_val"])
+        df["date"] = pd.to_datetime(df["date"])
+
+        df_train = df[df["date"] < split_date].copy()
+        df_test = df[df["date"] >= split_date].copy()
+
+        if df_train.empty or df_test.empty:
+            continue
+
+        holding = _holding_period(term)
+        periods_per_year = 52.0 if term == "short" else 13.0
+
+        for strat_name in strategy_names:
+            for split_label, split_df in [("train", df_train), ("test", df_test)]:
+                strat_df = apply_strategy(split_df.copy(), strat_name, term, params)
+                period_rets = strat_df.groupby("date")["daily_strat_ret"].sum()
+                active = period_rets[period_rets != 0]
+
+                total_ret = float((1 + active).prod() - 1) if len(active) > 0 else 0.0
+
+                if len(active) > 1 and active.std() > 0:
+                    sharpe = float(active.mean() / active.std() * np.sqrt(periods_per_year))
+                else:
+                    sharpe = 0.0
+
+                # Benchmark
+                bench_rets = compute_benchmark(strat_df, term=term)
+                bench_total = float((1 + bench_rets).prod() - 1) if len(bench_rets) > 0 else 0.0
+                alpha = total_ret - bench_total
+
+                if split_label == "train":
+                    train_ret, train_alpha, train_sharpe = total_ret, alpha, sharpe
+                else:
+                    test_ret, test_alpha, test_sharpe = total_ret, alpha, sharpe
+
+            # Compute decay (how much alpha drops from train to test)
+            if abs(train_alpha) > 0.001:
+                decay = (train_alpha - test_alpha) / abs(train_alpha) * 100
+            else:
+                decay = 0.0
+
+            rows.append({
+                "strategy": strat_name, "label": label,
+                "train_ret": train_ret, "train_alpha": train_alpha, "train_sharpe": train_sharpe,
+                "test_ret": test_ret, "test_alpha": test_alpha, "test_sharpe": test_sharpe,
+                "decay": decay,
+            })
+
+            print(
+                f"  {strat_name:<20} {label:<30} "
+                f"{train_ret*100:>+9.1f}% {train_alpha*100:>+11.1f}% {train_sharpe:>11.2f} "
+                f"{test_ret*100:>+9.1f}% {test_alpha*100:>+11.1f}% {test_sharpe:>11.2f} "
+                f"{decay:>+7.0f}%"
+            )
+
+    print(f"{'=' * 170}")
+
+    # Summary: rank by test alpha
+    if rows:
+        print(f"\n  TOP 10 BY TEST-SET ALPHA (out-of-sample performance):")
+        print(f"  {'-'*100}")
+        sorted_rows = sorted(rows, key=lambda x: x["test_alpha"], reverse=True)
+        for i, r in enumerate(sorted_rows[:10], 1):
+            print(
+                f"  {i:>2}. {r['strategy']:<20} {r['label']:<30} "
+                f"Test: {r['test_ret']*100:>+7.1f}% (α {r['test_alpha']*100:>+7.1f}%) "
+                f"Train: {r['train_ret']*100:>+7.1f}% (α {r['train_alpha']*100:>+7.1f}%) "
+                f"Decay: {r['decay']:>+5.0f}%"
+            )
+        print()
+
+        # Flag strategies where test alpha is negative but train alpha was positive (overfit)
+        overfit = [r for r in rows if r["train_alpha"] > 0.05 and r["test_alpha"] < 0]
+        if overfit:
+            print(f"  ⚠ OVERFIT WARNING — positive train alpha but negative test alpha:")
+            for r in sorted(overfit, key=lambda x: x["train_alpha"], reverse=True)[:5]:
+                print(f"    {r['strategy']:<20} {r['label']:<30} Train α: {r['train_alpha']*100:>+.1f}%  Test α: {r['test_alpha']*100:>+.1f}%")
+            print()
+
+
 async def cmd_export_data(args) -> None:
-    """Export backtest-related tables to SQL dump file."""
+    """Export all backtest data to a compressed archive.
+
+    Covers:
+      DB tables  — backtest_articles, backtest_sentiment_cache, backtest_av_cache,
+                   backtest_grades, backtest_returns, calibration_runs
+                   (exported as CSV via PostgreSQL COPY for speed)
+      File cache — /cache/ohlcv/*.parquet  (price OHLCV)
+                   /cache/fundamentals/*.pkl
+                   /cache/earnings/*.pkl
+                   /cache/vix_history.pkl
+
+    Output: /reports/backtest_full_export.tar.gz + manifest JSON
+    """
+    import json
     import os
-    from .db import async_session
-    from sqlalchemy import text
+    import shutil
+    import tarfile
+    import tempfile
+    from datetime import datetime
+
+    import asyncpg
+
+    from .config import DATABASE_URL
 
     tables = [
-        "backtest_articles", "backtest_sentiment_cache", "backtest_av_cache",
-        "backtest_grades", "backtest_returns", "calibration_runs",
+        "backtest_articles",
+        "backtest_sentiment_cache",
+        "backtest_av_cache",
+        "backtest_grades",
+        "backtest_returns",
+        "calibration_runs",
     ]
+    cache_dirs = [
+        ("/cache/ohlcv",        "cache/ohlcv"),
+        ("/cache/fundamentals", "cache/fundamentals"),
+        ("/cache/earnings",     "cache/earnings"),
+    ]
+    cache_files = [("/cache/vix_history.pkl", "cache/vix_history.pkl")]
+
     out_dir = "/reports"
-    dump_path = os.path.join(out_dir, f"backtest_data_export.sql")
+    archive_path = os.path.join(out_dir, "backtest_full_export.tar.gz")
 
-    with open(dump_path, "w") as f:
-        f.write("-- TradeSignal Backtest Data Export\n")
-        f.write(f"-- Generated: {__import__('datetime').datetime.now().isoformat()}\n\n")
+    dsn = (
+        DATABASE_URL
+        .replace("postgresql+asyncpg://", "postgresql://")
+        .replace("postgres+asyncpg://", "postgresql://")
+    )
 
-        for table in tables:
-            logger.info("Exporting %s...", table)
-            async with async_session() as session:
-                cols_r = await session.execute(text(
-                    f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}' ORDER BY ordinal_position"
-                ))
-                cols = [r[0] for r in cols_r.fetchall()]
-                if not cols:
-                    logger.warning("Table %s not found, skipping", table)
-                    continue
+    manifest: dict = {
+        "generated": datetime.now().isoformat(),
+        "tables": {},
+        "cache": {},
+    }
 
-                col_list = ", ".join(cols)
-                count_r = await session.execute(text(f"SELECT COUNT(*) FROM {table}"))
-                total = count_r.scalar()
-                logger.info("  %s: %d rows", table, total)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_dir = os.path.join(tmpdir, "db")
+        os.makedirs(db_dir)
 
-                f.write(f"-- Table: {table} ({total} rows)\n")
-                f.write(f"DELETE FROM {table};\n")
+        # ── 1. Export each DB table as CSV via PostgreSQL COPY ────────────────
+        conn = await asyncpg.connect(dsn)
+        try:
+            for table in tables:
+                csv_path = os.path.join(db_dir, f"{table}.csv")
+                count = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+                logger.info("Exporting DB table %-30s  %d rows", table, count)
+                with open(csv_path, "wb") as fh:
+                    await conn.copy_from_query(
+                        f"SELECT * FROM {table}",
+                        output=fh,
+                        format="csv",
+                        header=True,
+                    )
+                size_kb = os.path.getsize(csv_path) / 1024
+                manifest["tables"][table] = {"rows": count, "size_kb": round(size_kb, 1)}
+        finally:
+            await conn.close()
 
-                batch = 500
-                for offset in range(0, total, batch):
-                    rows_r = await session.execute(text(
-                        f"SELECT {col_list} FROM {table} ORDER BY 1 OFFSET {offset} LIMIT {batch}"
-                    ))
-                    rows = rows_r.fetchall()
-                    import json as _json
-                    import uuid as _uuid
-                    from decimal import Decimal as _Decimal
-                    for row in rows:
-                        vals = []
-                        for v in row:
-                            if v is None:
-                                vals.append("NULL")
-                            elif isinstance(v, bool):
-                                vals.append("TRUE" if v else "FALSE")
-                            elif isinstance(v, str):
-                                vals.append("'" + v.replace("'", "''") + "'")
-                            elif isinstance(v, _uuid.UUID):
-                                vals.append(f"'{v}'")
-                            elif isinstance(v, dict):
-                                vals.append("'" + _json.dumps(v).replace("'", "''") + "'::jsonb")
-                            elif isinstance(v, (__import__('datetime').date, __import__('datetime').datetime)):
-                                vals.append(f"'{v}'")
-                            elif isinstance(v, _Decimal):
-                                vals.append(str(v))
-                            elif isinstance(v, (int, float)):
-                                vals.append(str(v))
-                            else:
-                                vals.append("'" + str(v).replace("'", "''") + "'")
-                        f.write(f"INSERT INTO {table} ({col_list}) VALUES ({', '.join(vals)});\n")
-                f.write("\n")
+        # ── 2. Bundle into tar.gz ─────────────────────────────────────────────
+        with tarfile.open(archive_path, "w:gz") as tar:
+            # DB CSVs
+            for table in tables:
+                csv_path = os.path.join(db_dir, f"{table}.csv")
+                if os.path.exists(csv_path):
+                    tar.add(csv_path, arcname=f"db/{table}.csv")
 
-    logger.info("Export complete: %s", dump_path)
+            # Cache directories
+            for src_dir, arc_name in cache_dirs:
+                if os.path.isdir(src_dir):
+                    files = os.listdir(src_dir)
+                    total_bytes = sum(
+                        os.path.getsize(os.path.join(src_dir, f)) for f in files
+                    )
+                    tar.add(src_dir, arcname=arc_name)
+                    manifest["cache"][arc_name] = {
+                        "files": len(files),
+                        "size_kb": round(total_bytes / 1024, 1),
+                    }
+                    logger.info("Bundled %-35s  %d files  (%.1f KB)",
+                                src_dir, len(files), total_bytes / 1024)
+                else:
+                    logger.warning("Cache dir not found, skipping: %s", src_dir)
+
+            # Single cache files
+            for src_file, arc_name in cache_files:
+                if os.path.exists(src_file):
+                    tar.add(src_file, arcname=arc_name)
+                    size_kb = os.path.getsize(src_file) / 1024
+                    manifest["cache"][arc_name] = {"files": 1, "size_kb": round(size_kb, 1)}
+                    logger.info("Bundled %-35s  (%.1f KB)", src_file, size_kb)
+                else:
+                    logger.warning("Cache file not found, skipping: %s", src_file)
+
+            # Write manifest into archive
+            manifest_bytes = json.dumps(manifest, indent=2).encode()
+            import io
+            manifest_info = tarfile.TarInfo(name="manifest.json")
+            manifest_info.size = len(manifest_bytes)
+            tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
+
+    archive_mb = os.path.getsize(archive_path) / 1024 / 1024
+
+    # Also write manifest alongside archive for quick inspection
+    manifest_path = archive_path.replace(".tar.gz", "_manifest.json")
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    logger.info("Export complete: %s  (%.1f MB)", archive_path, archive_mb)
+    logger.info("Manifest:        %s", manifest_path)
+
+    # Print summary
+    print(f"\n{'=' * 60}")
+    print(f"  Backtest Full Export — {manifest['generated']}")
+    print(f"{'=' * 60}")
+    print(f"  Archive: {archive_path}  ({archive_mb:.1f} MB compressed)")
+    print(f"\n  DB Tables:")
+    for t, info in manifest["tables"].items():
+        print(f"    {t:<30} {info['rows']:>8,} rows  ({info['size_kb']:.0f} KB)")
+    print(f"\n  Cache Files:")
+    for name, info in manifest["cache"].items():
+        print(f"    {name:<35} {info['files']:>4} files  ({info['size_kb']:.0f} KB)")
+    print(f"{'=' * 60}\n")
 
 
 async def cmd_import_data(args) -> None:
-    """Import backtest data from SQL dump file."""
-    import os
-    from .db import async_session
-    from sqlalchemy import text
+    """Import backtest data from a full export archive (.tar.gz).
 
-    dump_path = args.file
-    if not os.path.exists(dump_path):
-        logger.error("File not found: %s", dump_path)
+    Restores all DB tables (via PostgreSQL COPY) and all cache files.
+    Each table is truncated before import — existing data is replaced.
+    """
+    import io
+    import json
+    import os
+    import shutil
+    import tarfile
+    import tempfile
+
+    import asyncpg
+
+    from .config import DATABASE_URL
+
+    tables = [
+        "backtest_articles",
+        "backtest_sentiment_cache",
+        "backtest_av_cache",
+        "backtest_grades",
+        "backtest_returns",
+        "calibration_runs",
+    ]
+    # Truncation order respects FK constraints (children first)
+    truncate_order = [
+        "backtest_returns",
+        "backtest_grades",
+        "backtest_articles",
+        "backtest_sentiment_cache",
+        "backtest_av_cache",
+        "calibration_runs",
+    ]
+    cache_restore = [
+        ("cache/ohlcv",        "/cache/ohlcv"),
+        ("cache/fundamentals", "/cache/fundamentals"),
+        ("cache/earnings",     "/cache/earnings"),
+    ]
+    vix_restore = ("cache/vix_history.pkl", "/cache/vix_history.pkl")
+
+    archive_path = args.file
+    if not os.path.exists(archive_path):
+        logger.error("File not found: %s", archive_path)
         sys.exit(1)
 
-    logger.info("Importing from %s...", dump_path)
-    with open(dump_path, "r") as f:
-        sql = f.read()
+    if not archive_path.endswith(".tar.gz"):
+        logger.error("Expected a .tar.gz archive produced by export-data. Got: %s", archive_path)
+        sys.exit(1)
 
-    statements = [s.strip() for s in sql.split(";\n") if s.strip() and not s.strip().startswith("--")]
-    logger.info("Found %d SQL statements", len(statements))
+    dsn = (
+        DATABASE_URL
+        .replace("postgresql+asyncpg://", "postgresql://")
+        .replace("postgres+asyncpg://", "postgresql://")
+    )
 
-    async with async_session() as session:
-        batch_size = 100
-        for i in range(0, len(statements), batch_size):
-            batch = statements[i:i + batch_size]
-            for stmt in batch:
-                try:
-                    await session.execute(text(stmt))
-                except Exception as e:
-                    logger.warning("Statement failed: %s... — %s", stmt[:80], e)
-            await session.commit()
-            if (i + batch_size) % 1000 == 0:
-                logger.info("  Processed %d / %d statements", min(i + batch_size, len(statements)), len(statements))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logger.info("Extracting %s...", archive_path)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(tmpdir)
+
+        # Print manifest if present
+        manifest_path = os.path.join(tmpdir, "manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as fh:
+                manifest = json.load(fh)
+            logger.info("Archive generated: %s", manifest.get("generated", "?"))
+
+        # ── 1. Restore DB tables ──────────────────────────────────────────────
+        conn = await asyncpg.connect(dsn)
+        try:
+            # Truncate in safe order
+            for table in truncate_order:
+                csv_path = os.path.join(tmpdir, "db", f"{table}.csv")
+                if not os.path.exists(csv_path):
+                    continue
+                logger.info("Truncating %s...", table)
+                await conn.execute(f"TRUNCATE TABLE {table} CASCADE")
+
+            # Import via COPY
+            for table in tables:
+                csv_path = os.path.join(tmpdir, "db", f"{table}.csv")
+                if not os.path.exists(csv_path):
+                    logger.warning("No CSV for table %s in archive, skipping", table)
+                    continue
+                logger.info("Importing %s...", table)
+                with open(csv_path, "rb") as fh:
+                    result = await conn.copy_to_table(
+                        table,
+                        source=fh,
+                        format="csv",
+                        header=True,
+                    )
+                count = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+                logger.info("  %s: %s  →  %d rows now in DB", table, result, count)
+        finally:
+            await conn.close()
+
+        # ── 2. Restore cache files ────────────────────────────────────────────
+        for arc_dir, dst_dir in cache_restore:
+            src = os.path.join(tmpdir, arc_dir)
+            if not os.path.isdir(src):
+                logger.warning("Cache dir not found in archive: %s", arc_dir)
+                continue
+            os.makedirs(dst_dir, exist_ok=True)
+            n = 0
+            for fname in os.listdir(src):
+                shutil.copy2(os.path.join(src, fname), os.path.join(dst_dir, fname))
+                n += 1
+            logger.info("Restored %-30s  %d files → %s", arc_dir, n, dst_dir)
+
+        vix_src = os.path.join(tmpdir, vix_restore[0])
+        if os.path.exists(vix_src):
+            shutil.copy2(vix_src, vix_restore[1])
+            logger.info("Restored vix_history.pkl → %s", vix_restore[1])
 
     logger.info("Import complete.")
 
@@ -646,10 +951,18 @@ def main():
         "--force", action="store_true",
         help="Re-compute even if grades already exist in DB",
     )
+    p_bt.add_argument(
+        "--mode", choices=["production", "experimental"], default="production",
+        help="Scoring mode: 'production' (5-signal, matches scorer.py) or 'experimental' (8-signal with VIX/momentum/earnings)",
+    )
 
     # calibrate (keeps --term since calibration is per-term)
     p_cal = subparsers.add_parser("calibrate", help="Optimize signal weights from backtest results")
     p_cal.add_argument("--term", choices=["short", "long"], default="short")
+    p_cal.add_argument(
+        "--mode", choices=["production", "experimental"], default="production",
+        help="Scoring mode for weight optimization",
+    )
 
     # patch
     p_patch = subparsers.add_parser("patch", help="Apply optimized weights to scorer.py")
@@ -664,7 +977,7 @@ def main():
         "--strategy",
         choices=["portfolio", "top_pick", "high_conviction", "top_n",
                  "long_short", "sector_rotation", "contrarian", "risk_adjusted",
-                 "momentum", "random"],
+                 "momentum", "quant_alpha", "quant_alpha_v2", "quant_alpha_v3", "random"],
         default="portfolio",
         help="Trading strategy to evaluate (use 'list-strategies' to see descriptions)",
     )
@@ -690,16 +1003,44 @@ def main():
     p_wf.add_argument("--term", choices=["short", "long"], default="short")
 
     # run-all
-    p_runall = subparsers.add_parser("run-all", help="Full pipeline: sentiment → backtest → calibrate → patch → report-all")
+    p_runall = subparsers.add_parser("run-all", help="Full pipeline: sentiment -> backtest -> calibrate -> patch -> report-all")
     p_runall.add_argument("--walk-forward", action="store_true", help="Include walk-forward out-of-sample report")
     p_runall.add_argument("--wf-term", choices=["short", "long"], default="short", help="Term for walk-forward analysis (default short)")
+    p_runall.add_argument(
+        "--mode", choices=["production", "experimental"], default="production",
+        help="Scoring mode for backtest + calibration",
+    )
+
+    # oos-test (out-of-sample split test)
+    p_oos = subparsers.add_parser(
+        "oos-test",
+        help="Out-of-sample split test: train before split date, test after",
+    )
+    p_oos.add_argument("--split", default="2024-01-01", help="Split date (default 2024-01-01)")
+    p_oos.add_argument("--cost-bps", type=float, default=0.0, help="Round-trip transaction cost in basis points")
+
+    # deepfill
+    p_deep = subparsers.add_parser(
+        "deepfill",
+        help="Enrich sparse coverage with broader queries (assets + macro + sectors)",
+    )
+    p_deep.add_argument(
+        "--min-articles", type=int, default=3,
+        help="Target minimum articles per (type, key, date). Dates below this are re-fetched (default 3)",
+    )
 
     # export-data
-    subparsers.add_parser("export-data", help="Export backtest tables to SQL dump (saved to /reports/)")
+    subparsers.add_parser(
+        "export-data",
+        help="Export all backtest data (DB tables + OHLCV/fundamentals/earnings cache) to /reports/backtest_full_export.tar.gz",
+    )
 
     # import-data
-    p_import = subparsers.add_parser("import-data", help="Import backtest data from SQL dump")
-    p_import.add_argument("--file", default="/reports/backtest_data_export.sql", help="Path to SQL dump file")
+    p_import = subparsers.add_parser(
+        "import-data",
+        help="Import backtest data from a .tar.gz archive produced by export-data",
+    )
+    p_import.add_argument("--file", default="/reports/backtest_full_export.tar.gz", help="Path to .tar.gz archive")
 
     args = parser.parse_args()
 
@@ -714,6 +1055,8 @@ def main():
         "list-strategies":  cmd_list_strategies,
         "walk-forward":     cmd_walk_forward,
         "run-all":          cmd_run_all,
+        "oos-test":         cmd_oos_test,
+        "deepfill":         cmd_deepfill,
         "export-data":      cmd_export_data,
         "import-data":      cmd_import_data,
     }

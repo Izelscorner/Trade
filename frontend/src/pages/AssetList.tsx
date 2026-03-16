@@ -114,6 +114,20 @@ const STRATEGY_PRESETS: Record<string, StrategyPreset> = {
     hint: "Lowest long-term confidence — long-term rebound bet",
     term: "long",
   },
+  quant_alpha: {
+    label: "Quant Alpha v3",
+    sortKey: "short_grade",
+    sortDir: "desc",
+    hint: "Sector rotation + score-weighted + 25% cap — backtested best",
+    term: "short",
+  },
+  quant_alpha_long: {
+    label: "Quant Alpha v3 (Long-term)",
+    sortKey: "long_grade",
+    sortDir: "desc",
+    hint: "Sector rotation + score-weighted + 25% cap — backtested best",
+    term: "long",
+  },
 };
 
 const ITEMS_PER_PAGE = 20;
@@ -201,8 +215,13 @@ export default function AssetList() {
     });
   }, [instruments, category, sector, sortKey, sortDir, search, showSentiment]);
 
+  // Allocation weights for quant_alpha display
+  const allocWeightsRef = useMemo(() => new Map<string, number>(), []);
+
   /** Compute which instruments are "selected" by the active strategy */
   const strategyHighlights = useMemo(() => {
+    const allocWeights = allocWeightsRef;
+    allocWeights.clear();
     if (strategyPreset === "none" || !STRATEGY_PRESETS[strategyPreset]) return new Map<string, "long" | "short" | "buy">();
     const preset = STRATEGY_PRESETS[strategyPreset];
     const highlights = new Map<string, "long" | "short" | "buy">();
@@ -259,10 +278,40 @@ export default function AssetList() {
         if (score > 0) highlights.set(i.id, "long");
         else if (score < 0) highlights.set(i.id, "short");
       });
+    } else if (baseKey === "quant_alpha") {
+      // Quant Alpha v3: sector rotation → score-weighted → 25% position cap
+      // 1. Best per sector
+      const sectorBest = new Map<string, DashboardInstrument>();
+      filtered.forEach(i => {
+        const sec = i.sector || i.category || "__none__";
+        const score = (i as any)[scoreKey] ?? -999;
+        const existing = sectorBest.get(sec);
+        if (!existing || score > ((existing as any)[scoreKey] ?? -999)) {
+          sectorBest.set(sec, i);
+        }
+      });
+      // 2. Only positive-score instruments
+      const positive = Array.from(sectorBest.values()).filter(
+        i => ((i as any)[scoreKey] ?? 0) > 0
+      );
+      if (positive.length > 0) {
+        // 3. Score-weighted allocation with 25% cap
+        const MAX_WEIGHT = 0.25;
+        const totalScore = positive.reduce((s, i) => s + ((i as any)[scoreKey] ?? 0), 0);
+        let weights = positive.map(i => {
+          const raw = ((i as any)[scoreKey] ?? 0) / totalScore;
+          return { id: i.id, weight: Math.min(raw, MAX_WEIGHT) };
+        });
+        const wSum = weights.reduce((s, w) => s + w.weight, 0);
+        weights = weights.map(w => ({ ...w, weight: w.weight / wSum }));
+        weights.forEach(w => highlights.set(w.id, "buy"));
+        // Store weights for display
+        weights.forEach(w => allocWeights.set(w.id, w.weight));
+      }
     }
 
     return highlights;
-  }, [filtered, strategyPreset, showSentiment]);
+  }, [filtered, strategyPreset, showSentiment, allocWeightsRef]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
   const paginated = filtered.slice(
@@ -430,6 +479,7 @@ export default function AssetList() {
               starred={isInPortfolio(inst.id)}
               onToggleStar={() => togglePortfolio(inst.id)}
               strategyHighlight={strategyHighlights.get(inst.id)}
+              allocWeight={allocWeightsRef.get(inst.id)}
               onRemove={async () => {
                 if (
                   window.confirm(
@@ -509,6 +559,7 @@ function InstrumentRow({
   onToggleStar,
   onRemove,
   strategyHighlight,
+  allocWeight,
 }: {
   instrument: DashboardInstrument;
   index: number;
@@ -517,6 +568,7 @@ function InstrumentRow({
   onToggleStar: () => void;
   onRemove: () => void;
   strategyHighlight?: "long" | "short" | "buy";
+  allocWeight?: number;
 }) {
   const statusColor = marketStatusColors[instrument.market_status || "closed"];
 
@@ -561,7 +613,9 @@ function InstrumentRow({
               ? "bg-accent-rose/20 text-accent-rose"
               : "bg-accent-emerald/20 text-accent-emerald"
           }`}>
-            {strategyHighlight === "short" ? "S" : strategyHighlight === "long" ? "L" : "B"}
+            {allocWeight != null
+              ? `${(allocWeight * 100).toFixed(0)}%`
+              : strategyHighlight === "short" ? "S" : strategyHighlight === "long" ? "L" : "B"}
           </span>
         )}
       </div>

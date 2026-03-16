@@ -168,6 +168,37 @@ If correlation stays positive after all that, you have something
 - make sure when production app starts all instruments has all historical and last intradate prices available and there won't be any gaps between system restarts.
 
 
+Recommended New Data Sources (ranked by impact × feasibility)
+Tier 1 — High impact, free, easy to implement:
 
+VIX (Volatility Index) — ^VIX via yfinance. Our model literally breaks in high-vol. Use as: regime gate (reduce position sizes when VIX > 25), or as 6th signal. The IC jumps from -0.004 to +0.067 just by filtering out high-vol days.
+
+Price Momentum (1-month, 3-month, 12-1 month return) — We already have historical prices! Just compute trailing returns. Academic factor with IC typically +0.03 to +0.05. Specifically fixes NVDA/META/TSLA where our model is backwards.
+
+Earnings Calendar — yfinance .get_calendar(). Binary flag: "earnings within next 5 days." Our extreme-return predictions (>10% moves) are basically random (IC = 0.006). Most extreme moves are earnings-driven. Even just AVOIDING trades around earnings would improve Sharpe.
+
+Tier 2 — Moderate impact, free:
+
+Put/Call Ratio — CBOE data or via yfinance options chain. Contrarian indicator: high put/call = fear = buying opportunity. Directly addresses the macro-contrarian finding.
+
+Short Interest — yfinance get_shares_full() or Finviz free. High short interest predicts both squeezes (positive) and fundamental problems (negative). The combination with our sentiment signal would be powerful.
+
+Credit Spreads (HY-IG spread) — HYG vs LQD ETF spread via yfinance. Widens before crashes, narrows in risk-on. Better macro regime indicator than news sentiment (which we proved is contrarian).
+
+Tier 3 — High impact but harder:
+
+Insider Trading (SEC Form 4) — Free via SEC EDGAR API. Strong 3-6 month predictive signal (IC ~0.04). Requires parsing EDGAR filings.
+
+Earnings Estimate Revisions — FMP API has this. Revision momentum (analysts upgrading/downgrading) has IC +0.05 to +0.08 in academic literature. Single strongest fundamental factor.
+
+Fund Flows (ETF inflows/outflows) — Available via some free APIs. Predicts short-term momentum.
+
+Bottom Line
+The three biggest wins are all free and use data we already have or can get via yfinance:
+
+VIX regime filter — stop trading when VIX > 30 (fixes high-vol collapse)
+Momentum factor — past returns as a 6th signal (fixes NVDA/META inversion)
+Earnings avoidance — don't trade 3 days before earnings (fixes extreme-return noise)
+These three alone could plausibly double the IC from 0.03 to 0.06, based on the regime and failure mode analysis above. Want me to implement any of these?
 
 

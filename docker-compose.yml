@@ -47,6 +47,10 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      UNIFIED_PIPELINE: "true"
+      NIM_BASE_URL: https://integrate.api.nvidia.com/v1
+      NIM_MODEL: ${NIM_MODEL}
+      NIM_API_KEY: ${NIM_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -287,6 +291,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - ./services/backtester/app:/app/app:rw
       - ./services/grading/app:/scorer:rw
       - ./backtest_reports:/reports:rw
       - backtest_cache:/cache

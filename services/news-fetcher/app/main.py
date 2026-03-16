@@ -400,15 +400,27 @@ async def cleanup_loop() -> None:
 
 
 async def main() -> None:
-    logger.info("News Fetcher Service starting...")
-    await asyncio.gather(
-        main_loop(),
-        slow_loop(),
-        new_asset_news_loop(),
-        etf_constituents_loop(),
-        sector_loop(),
-        cleanup_loop(),
-    )
+    import os
+    use_unified = os.environ.get("UNIFIED_PIPELINE", "").lower() in ("1", "true", "yes")
+
+    if use_unified:
+        logger.info("News Fetcher Service starting (UNIFIED PIPELINE mode)...")
+        logger.info("Sequential RSS (1 req/sec) → concurrent NIM (40) → direct DB writes")
+        from .unified_pipeline import run_unified_pipeline
+        await asyncio.gather(
+            run_unified_pipeline(),
+            cleanup_loop(),
+        )
+    else:
+        logger.info("News Fetcher Service starting (legacy mode)...")
+        await asyncio.gather(
+            main_loop(),
+            slow_loop(),
+            new_asset_news_loop(),
+            etf_constituents_loop(),
+            sector_loop(),
+            cleanup_loop(),
+        )
 
 
 if __name__ == "__main__":

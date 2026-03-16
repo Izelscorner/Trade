@@ -335,7 +335,7 @@ async def _delete_articles(session, ids: list) -> int:
 
 
 async def cleanup_old_macro_news() -> int:
-    """Remove macro articles older than 180 days (6 months)."""
+    """Remove macro articles older than 30 days."""
     total_deleted = 0
     async with async_session() as session:
         result = await session.execute(
@@ -343,19 +343,19 @@ async def cleanup_old_macro_news() -> int:
                 SELECT id FROM news_articles
                 WHERE category IN ('macro_markets', 'macro_politics', 'macro_conflict')
                 AND is_asset_specific = false
-                AND published_at < NOW() - INTERVAL '180 days'
+                AND published_at < NOW() - INTERVAL '30 days'
             """)
         )
         old_ids = [str(r.id) for r in result.fetchall()]
         total_deleted = await _delete_articles(session, old_ids)
         if total_deleted:
-            logger.info("Cleaned up %d macro articles older than 180 days", total_deleted)
+            logger.info("Cleaned up %d macro articles older than 30 days", total_deleted)
         await session.commit()
     return total_deleted
 
 
 async def cleanup_old_asset_news() -> int:
-    """Remove asset-specific articles older than 30 days."""
+    """Remove asset-specific articles older than 30 days (scorer long-term window)."""
     total_deleted = 0
     async with async_session() as session:
         result = await session.execute(
@@ -374,19 +374,19 @@ async def cleanup_old_asset_news() -> int:
 
 
 async def cleanup_old_sector_news() -> int:
-    """Remove sector news articles older than 90 days."""
+    """Remove sector news articles older than 30 days (scorer long-term window = 720h)."""
     total_deleted = 0
     async with async_session() as session:
         result = await session.execute(
             text("""
                 SELECT id FROM news_articles
                 WHERE category LIKE 'sector_%%'
-                AND published_at < NOW() - INTERVAL '90 days'
+                AND published_at < NOW() - INTERVAL '30 days'
             """)
         )
         old_ids = [str(r.id) for r in result.fetchall()]
         total_deleted = await _delete_articles(session, old_ids)
         if total_deleted:
-            logger.info("Cleaned up %d sector articles older than 90 days", total_deleted)
+            logger.info("Cleaned up %d sector articles older than 30 days", total_deleted)
         await session.commit()
     return total_deleted

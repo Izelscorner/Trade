@@ -109,23 +109,26 @@ GROUP_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
 }
 
 # Composite (technical vs sentiment vs sector vs macro vs fundamentals) weight profiles
-# 5-signal composite: fundamentals add valuation/profitability/growth assessment.
+# Weights derived from deep IC analysis on 165K backtest observations (2020-2026):
+#   - Sector score: strongest cross-sectional predictor (IC=+0.039 long, IR=0.157)
+#   - Fundamentals: solid long-term signal (IC=+0.015, strongest in industrials/communication)
+#   - Sentiment: positive but noisy (IC=+0.012 short, momentum matters more than level)
+#   - Technical: near-zero cross-sectional IC — minimal weight
+#   - Macro: same for all instruments on a given day — minimal weight for ranking
 # Commodities get 0% fundamentals (no P/E, ROE, etc. for futures).
-# Short-term: fundamentals matter less (market moves on sentiment/technicals).
-# Long-term: fundamentals matter more (value investing, mean reversion to fair value).
 COMPOSITE_WEIGHT_PROFILES: dict[str, dict[str, dict[str, float]]] = {
     "stock": {
-        "short":  {"technical": 0.1, "sentiment": 0.23, "sector": 0.11, "macro": 0.16, "fundamentals": 0.4},
-        "long":  {"technical": 0.27, "sentiment": 0.10, "sector": 0.12, "macro": 0.24, "fundamentals": 0.27}
+        "short": {"technical": 0.05, "sentiment": 0.25, "sector": 0.30, "macro": 0.05, "fundamentals": 0.35},
+        "long":  {"technical": 0.03, "sentiment": 0.15, "sector": 0.40, "macro": 0.02, "fundamentals": 0.40},
     },
     "etf": {
-        "short":  {"technical": 0.38, "sentiment": 0.18, "sector": 0.14, "macro": 0.23, "fundamentals": 0.07},
-        "long":  {"technical": 0.20, "sentiment": 0.09, "sector": 0.15, "macro": 0.36, "fundamentals": 0.20}
+        "short": {"technical": 0.05, "sentiment": 0.20, "sector": 0.35, "macro": 0.05, "fundamentals": 0.35},
+        "long":  {"technical": 0.02, "sentiment": 0.10, "sector": 0.45, "macro": 0.03, "fundamentals": 0.40},
     },
     "commodity": {
-        "short":  {"technical": 0.42, "sentiment": 0.25, "sector": 0.10, "macro": 0.23, "fundamentals": 0.0},
-        "long":  {"technical": 0.31, "sentiment": 0.15, "sector": 0.12, "macro": 0.42, "fundamentals": 0.0}
-    }
+        "short": {"technical": 0.10, "sentiment": 0.30, "sector": 0.35, "macro": 0.25, "fundamentals": 0.0},
+        "long":  {"technical": 0.05, "sentiment": 0.25, "sector": 0.40, "macro": 0.30, "fundamentals": 0.0},
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -1069,10 +1072,19 @@ async def grade_instrument(
 
     pure_overall = round(_clip(pure_overall), 4)
 
+    # Confidence-blended score dampening (quant_alpha_v3 finding):
+    # When average signal confidence is low, dampen the overall score toward
+    # neutral.  This prevents low-data instruments from showing extreme grades.
+    # Formula: overall *= (0.7 + 0.3 * avg_conf)  →  range [0.7, 1.0]
+    avg_conf = (sent_conf + sector_conf + fund_conf) / 3.0
+    overall = overall * (0.7 + 0.3 * avg_conf)
+
+    overall = round(_clip(overall), 4)
+
     # Buy confidence via sigmoid and actionable labels
     buy_confidence = _sigmoid_confidence(overall)
     action = _action_label(buy_confidence)
-    
+
     pure_buy_confidence = _sigmoid_confidence(pure_overall)
     pure_action = _action_label(pure_buy_confidence)
 

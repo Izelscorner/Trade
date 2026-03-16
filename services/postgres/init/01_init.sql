@@ -311,6 +311,12 @@ CREATE TABLE IF NOT EXISTS backtest_grades (
     sector_conf NUMERIC(7, 4),
     fundamentals_score NUMERIC(7, 4),
     fundamentals_conf NUMERIC(7, 4),
+    vix_score NUMERIC(7, 4) DEFAULT 0,
+    vix_conf NUMERIC(7, 4) DEFAULT 0,
+    momentum_score NUMERIC(7, 4) DEFAULT 0,
+    momentum_conf NUMERIC(7, 4) DEFAULT 0,
+    earnings_score NUMERIC(7, 4) DEFAULT 0,
+    earnings_conf NUMERIC(7, 4) DEFAULT 0,
     weights JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(instrument_id, date, term, sentiment_mode)

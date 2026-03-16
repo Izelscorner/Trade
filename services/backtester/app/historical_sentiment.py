@@ -1569,6 +1569,436 @@ async def derive_sector_from_assets(
     return created
 
 
+# ─── Deepfill: broader query variants for enriching sparse coverage ──────────
+# These queries are intentionally BROADER than ASSET_QUERIES (no intitle: restriction)
+# to capture articles that mention the company/asset without ticker in headline.
+DEEPFILL_ASSET_QUERIES: dict[str, list[str]] = {
+    # ── Original 10 Stocks ──
+    "RTX":   ["RTX Raytheon defense aerospace stock", "Raytheon missiles military contract"],
+    "NVDA":  ["NVIDIA GPU AI chip earnings", "NVIDIA data center gaming revenue"],
+    "GOOGL": ["Google Alphabet search advertising", "Alphabet cloud AI antitrust"],
+    "AAPL":  ["Apple iPhone revenue earnings", "Apple services App Store Mac"],
+    "TSLA":  ["Tesla electric vehicle deliveries", "Tesla Elon Musk EV production"],
+    "PLTR":  ["Palantir government contract AI", "Palantir data analytics defense"],
+    "LLY":   ["Eli Lilly drug approval obesity", "Lilly pharmaceutical GLP-1 weight loss"],
+    "NVO":   ["Novo Nordisk Ozempic Wegovy", "Novo Nordisk diabetes obesity drug"],
+    "WMT":   ["Walmart earnings revenue retail", "Walmart e-commerce grocery stores"],
+    "XOM":   ["Exxon Mobil oil earnings production", "ExxonMobil refinery energy dividend"],
+    # ── Technology ──
+    "MSFT":  ["Microsoft Azure cloud AI", "Microsoft Windows Office enterprise"],
+    "AMD":   ["AMD processor GPU data center", "AMD chip Ryzen Instinct semiconductor"],
+    "CRM":   ["Salesforce CRM cloud enterprise", "Salesforce AI platform revenue"],
+    # ── Financials ──
+    "JPM":   ["JPMorgan Chase bank earnings", "JPMorgan investment banking trading"],
+    "GS":    ["Goldman Sachs investment bank", "Goldman Sachs trading revenue"],
+    "BAC":   ["Bank of America earnings lending", "Bank of America consumer banking"],
+    "V":     ["Visa payment network transaction", "Visa credit card digital payments"],
+    "MA":    ["Mastercard payment technology", "Mastercard transaction volume revenue"],
+    # ── Healthcare ──
+    "JNJ":   ["Johnson Johnson pharmaceutical medical", "J&J drug device litigation"],
+    "UNH":   ["UnitedHealth insurance Optum", "UnitedHealth Group healthcare plan"],
+    "PFE":   ["Pfizer drug vaccine revenue", "Pfizer pharmaceutical pipeline earnings"],
+    # ── Consumer Discretionary ──
+    "AMZN":  ["Amazon e-commerce AWS cloud", "Amazon Prime retail revenue earnings"],
+    "HD":    ["Home Depot housing renovation", "Home Depot retail earnings stores"],
+    "NKE":   ["Nike footwear athletic brand", "Nike sportswear DTC revenue"],
+    # ── Consumer Staples ──
+    "PG":    ["Procter Gamble consumer goods", "P&G household products earnings"],
+    "KO":    ["Coca-Cola beverage earnings", "Coca-Cola soda drinks revenue"],
+    "COST":  ["Costco wholesale membership", "Costco retail warehouse earnings"],
+    # ── Communication ──
+    "META":  ["Meta Facebook Instagram AI", "Meta Platforms advertising metaverse"],
+    "DIS":   ["Disney streaming parks revenue", "Disney entertainment media earnings"],
+    # ── Energy ──
+    "CVX":   ["Chevron oil production earnings", "Chevron energy refinery upstream"],
+    "COP":   ["ConocoPhillips oil gas production", "ConocoPhillips energy exploration"],
+    "SLB":   ["Schlumberger oilfield services", "SLB drilling energy services"],
+    # ── Industrials ──
+    "CAT":   ["Caterpillar construction mining", "Caterpillar machinery infrastructure"],
+    "BA":    ["Boeing airplane orders deliveries", "Boeing aircraft defense 737 787"],
+    "GE":    ["GE Aerospace jet engine", "GE aviation power turbine"],
+    # ── Materials ──
+    "LIN":   ["Linde industrial gas chemical", "Linde gases hydrogen supply"],
+    "FCX":   ["Freeport McMoRan copper mining", "Freeport copper gold production"],
+    # ── Utilities ──
+    "NEE":   ["NextEra Energy renewable wind", "NextEra utility solar power"],
+    "DUK":   ["Duke Energy utility power grid", "Duke Energy electricity generation"],
+    # ── Real Estate ──
+    "AMT":   ["American Tower cell tower REIT", "American Tower wireless infrastructure"],
+    "PLD":   ["Prologis logistics warehouse REIT", "Prologis industrial real estate"],
+    # ── ETFs ──
+    "IITU":  ["US technology stocks sector performance", "tech sector market cap leaders"],
+    "SMH":   ["semiconductor stocks chip sector", "semiconductor industry chip demand supply"],
+    "VOO":   ["S&P 500 index fund market", "S&P 500 stock market performance"],
+    "QQQ":   ["Nasdaq technology growth stocks", "Nasdaq 100 tech sector performance"],
+    "IWM":   ["Russell 2000 small cap stocks", "small cap value growth market"],
+    "XLF":   ["financial stocks bank sector", "banking sector interest rate impact"],
+    "XLE":   ["energy stocks oil sector", "energy sector oil gas production"],
+    # ── Commodities ──
+    "GOLD":   ["gold price forecast analysis", "gold bullion safe haven investment"],
+    "OIL":    ["crude oil price supply demand", "oil futures OPEC production barrel"],
+    "SILVER": ["silver price precious metal", "silver industrial demand investment"],
+    "NATGAS": ["natural gas price storage", "natural gas supply heating demand"],
+}
+
+# Additional macro queries for deepfill
+DEEPFILL_MACRO_QUERIES: list[str] = [
+    # More specific economic events
+    "FOMC meeting minutes Federal Reserve decision",
+    "US jobs report nonfarm payrolls unemployment",
+    "inflation CPI PPI PCE consumer prices",
+    "GDP economic growth contraction quarterly",
+    "retail sales consumer spending data report",
+    "housing starts building permits mortgage",
+    "ISM manufacturing PMI factory orders",
+    "trade deficit imports exports tariff",
+    # Geopolitics
+    "BRICS summit emerging market geopolitics",
+    "NATO expansion military alliance defense",
+    "US China technology decoupling semiconductor",
+    "Iran nuclear sanctions Middle East",
+    # Central banks globally
+    "ECB interest rates eurozone monetary policy",
+    "Bank of Japan yield curve control",
+    "Bank of England interest rate inflation",
+]
+
+# Additional sector queries for deepfill
+DEEPFILL_SECTOR_QUERIES: dict[str, list[str]] = {
+    "technology": [
+        "cloud computing infrastructure data center spending",
+        "semiconductor shortage chip supply demand forecast",
+    ],
+    "financials": [
+        "mortgage rates banking loans credit quality",
+        "hedge fund private equity asset management",
+    ],
+    "healthcare": [
+        "clinical trial results drug approval pipeline",
+        "health insurance Medicare Medicaid reform",
+    ],
+    "consumer_discretionary": [
+        "consumer spending retail sales holiday season",
+        "auto sales electric vehicle EV market",
+    ],
+    "consumer_staples": [
+        "food prices inflation grocery chain supply",
+        "consumer packaged goods brand pricing power",
+    ],
+    "communication": [
+        "streaming subscriber growth content spending",
+        "digital advertising social media platform",
+    ],
+    "energy": [
+        "OPEC production cut oil supply market",
+        "LNG natural gas export terminal pipeline",
+    ],
+    "industrials": [
+        "defense budget military spending procurement",
+        "infrastructure bill construction spending",
+    ],
+    "materials": [
+        "lithium cobalt rare earth mining supply",
+        "copper aluminum steel commodity prices",
+    ],
+    "utilities": [
+        "electric grid infrastructure renewable capacity",
+        "utility rate case regulatory commission",
+    ],
+    "real_estate": [
+        "commercial real estate vacancy office REIT",
+        "industrial warehouse logistics property demand",
+    ],
+}
+
+
+async def deepfill_historical_sentiment(
+    instruments: list[dict],
+    start_date: date,
+    end_date: date,
+    min_articles: int = 3,
+) -> None:
+    """Deepfill: enrich sparse coverage by fetching with broader queries.
+
+    For each (type, key) group, identifies dates with < min_articles real articles,
+    groups them into 14-day windows, and fetches with broader queries + deeper
+    recursive splitting (threshold=50, min_range=3 days).
+
+    Dedups against existing articles before NIM scoring.
+    After all asset deepfill, re-derives macro/sector from enriched asset data.
+    """
+    from curl_cffi.requests import AsyncSession
+    import time as _time
+
+    trading_days = _all_weekdays(start_date, end_date)
+    logger.info("Deepfill: %d trading days, %s → %s, min_articles=%d",
+                len(trading_days), start_date, end_date, min_articles)
+
+    # ── Load current article counts per (type, key, date) ──
+    logger.info("Loading existing article counts...")
+    async with async_session() as s:
+        r = await s.execute(text("""
+            SELECT type, key, date, COUNT(*) as cnt
+            FROM backtest_articles
+            WHERE title != '[no articles]'
+            GROUP BY type, key, date
+        """))
+        existing_counts: dict[tuple[str, str, date], int] = {
+            (row.type, row.key, row.date): row.cnt for row in r.fetchall()
+        }
+
+        # Load existing url_hashes for dedup
+        r2 = await s.execute(text("""
+            SELECT DISTINCT url_hash FROM backtest_articles
+            WHERE url_hash IS NOT NULL
+        """))
+        existing_hashes: set[str] = {row.url_hash for row in r2.fetchall()}
+
+    logger.info("Existing: %d (type,key,date) combos, %d unique hashes",
+                len(existing_counts), len(existing_hashes))
+
+    # ── Build work items: find sparse dates per group ──
+    work: list[_WorkItem] = []
+    total_sparse = 0
+
+    # Assets
+    for inst in instruments:
+        sym = inst["symbol"]
+        queries = DEEPFILL_ASSET_QUERIES.get(sym)
+        if not queries:
+            continue
+        sparse_days = [
+            d for d in trading_days
+            if existing_counts.get(("asset", sym, d), 0) < min_articles
+        ]
+        if not sparse_days:
+            continue
+        work.append(_WorkItem(
+            "asset", sym, queries, inst["name"], inst["category"], "",
+            sparse_days,
+        ))
+        total_sparse += len(sparse_days)
+
+    # Macro
+    macro_sparse = [
+        d for d in trading_days
+        if existing_counts.get(("macro", "global", d), 0) < min_articles
+    ]
+    if macro_sparse:
+        work.append(_WorkItem(
+            "macro", "global", DEEPFILL_MACRO_QUERIES, "", "", "",
+            macro_sparse,
+        ))
+        total_sparse += len(macro_sparse)
+
+    # Sectors
+    for sector_name, queries in DEEPFILL_SECTOR_QUERIES.items():
+        sector_sparse = [
+            d for d in trading_days
+            if existing_counts.get(("sector", sector_name, d), 0) < min_articles
+        ]
+        if not sector_sparse:
+            continue
+        work.append(_WorkItem(
+            "sector", sector_name, queries, "", "", sector_name,
+            sector_sparse,
+        ))
+        total_sparse += len(sector_sparse)
+
+    logger.info("Deepfill work: %d groups, %d total sparse dates",
+                len(work), total_sparse)
+    if not work:
+        logger.info("No sparse dates found. Coverage is sufficient.")
+        return
+
+    # ── Process: fetch → dedup → NIM score → store ──
+    rss_bucket = TokenBucket(rate=1.0, capacity=3.0)
+    all_nim_tasks: list[asyncio.Task] = []
+    total_new = 0
+    pipeline_start = _time.monotonic()
+
+    async with AsyncSession() as rss_session, httpx.AsyncClient(
+        headers={
+            "Authorization": f"Bearer {NIM_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        timeout=120.0,
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=40),
+    ) as nim_client:
+
+        for idx, item in enumerate(work):
+            # Group sparse days into 14-day windows for efficient fetching
+            windows = _group_into_windows(item.uncached_days, window_days=14)
+            uncached_set = set(item.uncached_days)
+
+            logger.info(
+                "[%d/%d] DEEPFILL %s %s — %d sparse days in %d windows",
+                idx + 1, len(work), item.type_.upper(), item.key,
+                len(item.uncached_days), len(windows),
+            )
+
+            # Build prompt helpers
+            if item.type_ == "asset":
+                _role = _asset_role(item.name, item.category)
+                _desc = _asset_desc(item.name, item.category)
+                _sys = _SENTIMENT_SYSTEM
+                def _build_prompt(numbered, r=_role, d=_desc):
+                    return _build_asset_prompt(r, numbered, d)
+            elif item.type_ == "macro":
+                _sys = _MACRO_SYSTEM
+                def _build_prompt(numbered):
+                    return _build_macro_prompt(numbered)
+            else:
+                _sys = _SECTOR_SYSTEM
+                _sector = item.sector
+                def _build_prompt(numbered, s=_sector):
+                    return _build_sector_prompt(numbered, s)
+
+            window_articles: list[dict] = []
+
+            for win_start, win_end in windows:
+                # Fetch with ALL query variants (rotated across sub-windows)
+                if len(item.queries) > 1:
+                    raw = await _rotated_fetch(
+                        rss_session, item.queries, win_start, win_end,
+                        rss_bucket, max_depth=7,
+                    )
+                else:
+                    raw = await _adaptive_fetch(
+                        rss_session, item.queries[0], win_start, win_end,
+                        rss_bucket, max_depth=7,
+                    )
+
+                # Filter to sparse dates + dedup against existing hashes
+                for art in raw:
+                    h = _md5_hash(art["title"])
+                    if h in existing_hashes:
+                        continue
+                    pub = art.get("published_at")
+                    if pub:
+                        art_date = _nearest_weekday(pub.date() if hasattr(pub, 'date') else pub)
+                        if art_date not in uncached_set:
+                            continue
+                    art["url_hash"] = h
+                    existing_hashes.add(h)
+                    window_articles.append(art)
+
+            # Fuzzy dedup within batch
+            window_articles = _fuzzy_dedup(window_articles)
+
+            logger.info(
+                "[%d/%d] DEEPFILL %s %s — %d new unique articles to score",
+                idx + 1, len(work), item.type_.upper(), item.key,
+                len(window_articles),
+            )
+
+            if not window_articles:
+                continue
+
+            total_new += len(window_articles)
+
+            # Fire NIM tasks
+            for chunk_start in range(0, len(window_articles), _NIM_BATCH):
+                chunk = window_articles[chunk_start:chunk_start + _NIM_BATCH]
+                _item = item
+                _prompt_fn = _build_prompt
+                _system = _sys
+
+                async def _nim_task(
+                    c=chunk, pfn=_prompt_fn, sys_=_system, it=_item,
+                ):
+                    results = await _score_one_chunk(
+                        c, pfn, sys_, nim_client, it, 0, 0,
+                    )
+                    if not results:
+                        return 0
+
+                    day_buckets: dict[date, list[dict]] = {}
+                    for art in results:
+                        pub = art.get("published_at")
+                        if pub:
+                            art_date = _nearest_weekday(
+                                pub.date() if hasattr(pub, 'date') else pub
+                            )
+                        else:
+                            art_date = it.uncached_days[0]
+                        day_buckets.setdefault(art_date, []).append(art)
+
+                    store_items = [(it.type_, it.key, d, arts)
+                                   for d, arts in day_buckets.items()]
+                    await _batch_store_articles(store_items)
+                    logger.info("[DEEPFILL %s %s] %d articles scored & stored",
+                                it.type_.upper(), it.key, len(results))
+                    return len(results)
+
+                all_nim_tasks.append(asyncio.create_task(_nim_task()))
+
+        # Wait for all NIM tasks
+        pending = sum(1 for t in all_nim_tasks if not t.done())
+        if pending:
+            logger.info("RSS complete. Waiting for %d pending NIM tasks...", pending)
+        await asyncio.gather(*all_nim_tasks)
+
+    # Re-derive macro/sector from enriched asset data
+    logger.info("Re-deriving macro/sector from enriched asset data...")
+
+    # Clear old derived entries first
+    async with async_session() as s:
+        await s.execute(text(
+            "DELETE FROM backtest_articles WHERE title LIKE '[derived]%'"
+        ))
+        await s.commit()
+
+    macro_derived = await derive_macro_from_assets(start_date, end_date)
+    sector_derived = await derive_sector_from_assets(start_date, end_date)
+
+    elapsed = _time.monotonic() - pipeline_start
+    logger.info(
+        "Deepfill complete: %d groups, %d new articles, "
+        "%d re-derived macro, %d re-derived sector — %.0fs (%.1f min)",
+        len(work), total_new, macro_derived, sector_derived,
+        elapsed, elapsed / 60,
+    )
+
+
+def _group_into_windows(
+    dates: list[date],
+    window_days: int = 14,
+) -> list[tuple[date, date]]:
+    """Group a list of dates into contiguous windows for efficient fetching.
+
+    Consecutive dates within window_days of each other are merged into
+    a single (start, end) range. Isolated dates get padded ±3 days.
+    """
+    if not dates:
+        return []
+
+    sorted_dates = sorted(dates)
+    windows: list[tuple[date, date]] = []
+    win_start = sorted_dates[0]
+    win_end = sorted_dates[0]
+
+    for d in sorted_dates[1:]:
+        if (d - win_end).days <= window_days:
+            win_end = d
+        else:
+            windows.append((win_start, win_end))
+            win_start = d
+            win_end = d
+
+    windows.append((win_start, win_end))
+
+    # Pad small windows to ±3 days for better RSS coverage
+    padded = []
+    for ws, we in windows:
+        if (we - ws).days < 7:
+            ws = ws - timedelta(days=3)
+            we = we + timedelta(days=3)
+        padded.append((ws, we))
+
+    return padded
+
+
 def _score_to_label(score: float) -> str:
     """Map a mean score in [-1, 1] back to a sentiment label."""
     if score >= 0.6:

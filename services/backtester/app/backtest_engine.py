@@ -25,10 +25,12 @@ from sqlalchemy import text
 
 from .config import BACKTEST_END, BACKTEST_START, SAMPLE_EVERY_N_DAYS
 from .db import async_session
+from .historical_earnings import calc_earnings_score, fetch_earnings_dates
 from .historical_fundamentals import (
     calc_fundamentals_score_for_date,
     fetch_fundamentals_history,
 )
+from .historical_momentum import calc_momentum_score
 from .historical_sentiment import (
     fetch_all_historical_sentiment,
     get_asset_sentiment_for_date,
@@ -37,7 +39,15 @@ from .historical_sentiment import (
     load_sentiment_cache,
 )
 from .historical_tech import calc_technical_score, get_historical_ohlcv, precompute_indicators
-from .simulator import COMPOSITE_WEIGHT_PROFILES, SubScores, simulate_grade
+from .historical_vix import calc_vix_score, fetch_vix_history
+from .simulator import (
+    PRODUCTION_WEIGHT_PROFILES,
+    EXPERIMENTAL_WEIGHT_PROFILES,
+    SimMode,
+    SubScores,
+    simulate_grade,
+    _get_profiles_and_keys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +77,9 @@ _GRADE_INSERT_SQL = text("""
        macro_score, macro_conf,
        sector_score, sector_conf,
        fundamentals_score, fundamentals_conf,
+       vix_score, vix_conf,
+       momentum_score, momentum_conf,
+       earnings_score, earnings_conf,
        weights, sentiment_mode)
     VALUES
       (:iid, :sym, :date, :term, :overall,
@@ -75,6 +88,9 @@ _GRADE_INSERT_SQL = text("""
        :macro, :macro_conf,
        :sector, :sec_conf,
        :fund, :fund_conf,
+       :vix, :vix_conf,
+       :mom, :mom_conf,
+       :earn, :earn_conf,
        CAST(:weights AS jsonb), :smode)
     ON CONFLICT (instrument_id, date, term, sentiment_mode) DO UPDATE
       SET overall_score      = EXCLUDED.overall_score,
@@ -88,6 +104,12 @@ _GRADE_INSERT_SQL = text("""
           sector_conf         = EXCLUDED.sector_conf,
           fundamentals_score = EXCLUDED.fundamentals_score,
           fundamentals_conf   = EXCLUDED.fundamentals_conf,
+          vix_score          = EXCLUDED.vix_score,
+          vix_conf            = EXCLUDED.vix_conf,
+          momentum_score     = EXCLUDED.momentum_score,
+          momentum_conf       = EXCLUDED.momentum_conf,
+          earnings_score     = EXCLUDED.earnings_score,
+          earnings_conf       = EXCLUDED.earnings_conf,
           weights            = EXCLUDED.weights
 """)
 
@@ -122,6 +144,9 @@ def make_grade_params(
     macro_score: float, macro_conf: float,
     sector_score: float, sector_conf: float,
     fundamentals_score: float, fundamentals_conf: float,
+    vix_score: float, vix_conf: float,
+    momentum_score: float, momentum_conf: float,
+    earnings_score: float, earnings_conf: float,
     weights: dict, sentiment_mode: str = "on",
 ) -> dict:
     return {
@@ -132,6 +157,9 @@ def make_grade_params(
         "macro": macro_score, "macro_conf": macro_conf,
         "sector": sector_score, "sec_conf": sector_conf,
         "fund": fundamentals_score, "fund_conf": fundamentals_conf,
+        "vix": vix_score, "vix_conf": vix_conf,
+        "mom": momentum_score, "mom_conf": momentum_conf,
+        "earn": earnings_score, "earn_conf": earnings_conf,
         "weights": str(weights).replace("'", '"'),
         "smode": sentiment_mode,
     }
@@ -181,6 +209,7 @@ def get_forward_return(ohlcv_df: pd.DataFrame, d: date, horizon_days: int) -> fl
 async def run_backtest(
     fetch_sentiment: bool = True,
     skip_existing: bool = True,
+    mode: SimMode = "production",
 ) -> int:
     """Run the full backtest over all instruments and trading days.
 
@@ -192,6 +221,8 @@ async def run_backtest(
         fetch_sentiment:  If True, fetch any missing sentiment from Google News + NIM.
                           If False, use only what's already cached.
         skip_existing:    If True, skip dates where all 4 grades already exist.
+        mode:             'production' (5-signal, matches scorer.py) or
+                          'experimental' (8-signal with VIX/momentum/earnings).
 
     Returns total number of grade rows stored.
     """
@@ -200,6 +231,9 @@ async def run_backtest(
 
     start_date = date.fromisoformat(BACKTEST_START)
     end_date = date.fromisoformat(BACKTEST_END)
+
+    profiles, weight_keys = _get_profiles_and_keys(mode)
+    logger.info("Backtest mode: %s (%d signals: %s)", mode, len(weight_keys), ", ".join(weight_keys))
 
     logger.info("Loading instruments...")
     instruments = await load_instruments()
@@ -219,6 +253,21 @@ async def run_backtest(
     # --- Load full sentiment cache into memory ---
     logger.info("Loading sentiment cache into memory...")
     sentiment_cache = await load_sentiment_cache()
+
+    # --- Tier 1: Fetch VIX history (shared across all instruments) ---
+    logger.info("Fetching VIX history for regime filtering...")
+    vix_df = fetch_vix_history()
+    logger.info("VIX data: %d rows", len(vix_df))
+
+    # --- Tier 1: Migrate backtest_grades table for new columns ---
+    async with async_session() as session:
+        for col in ["vix_score", "vix_conf", "momentum_score", "momentum_conf",
+                     "earnings_score", "earnings_conf"]:
+            await session.execute(text(
+                f"ALTER TABLE backtest_grades ADD COLUMN IF NOT EXISTS {col} NUMERIC(7, 4) DEFAULT 0"
+            ))
+        await session.commit()
+    logger.info("Tier 1 columns ensured in backtest_grades")
 
     # --- Process each instrument ---
     total_stored = 0
@@ -265,6 +314,10 @@ async def run_backtest(
                 except Exception as e:
                     logger.warning("[GOLD] Failed to fetch DXY data: %s", e)
 
+        # Tier 1: Fetch earnings dates for this instrument
+        logger.info("[%s] Fetching earnings dates...", symbol)
+        earnings_dates = fetch_earnings_dates(yf_symbol, ticker_symbol=symbol)
+
         cat_key = category.lower()
 
         # Pre-compute all technical indicators once (vectorized, ~1000x faster)
@@ -309,12 +362,12 @@ async def run_backtest(
                     continue
 
                 nominal_weights = (
-                    COMPOSITE_WEIGHT_PROFILES
-                    .get(cat_key, COMPOSITE_WEIGHT_PROFILES["stock"])
+                    profiles
+                    .get(cat_key, profiles["stock"])
                     .get(term, {})
                 )
 
-                # Compute sub-scores once per term
+                # Compute sub-scores once per term (5 original + 3 Tier 1)
                 tech_score, tech_conf = calc_technical_score(ohlcv_df, d, category, term, precomputed=precomputed)
                 sent_score, sent_conf = get_asset_sentiment_for_date(symbol, d, sentiment_cache, term)
                 macro_score, macro_conf = get_macro_sentiment_for_date(d, sentiment_cache, term)
@@ -322,6 +375,11 @@ async def run_backtest(
                 fund_score, fund_conf = calc_fundamentals_score_for_date(
                     fund_data, d, price_at_date, sector, category, ohlcv_df, term
                 )
+
+                # Tier 1 signals
+                vix_score, vix_conf = calc_vix_score(vix_df, d)
+                mom_score, mom_conf = calc_momentum_score(ohlcv_df, d, term)
+                earn_score, earn_conf = calc_earnings_score(d, earnings_dates, category)
 
                 # --- With sentiment (mode="on") ---
                 if not (skip_existing and (d, term, "on") in existing_grades):
@@ -331,23 +389,23 @@ async def run_backtest(
                         "sector": sector_score, "sector_conf": sector_conf,
                         "macro": macro_score, "macro_conf": macro_conf,
                         "fundamentals": fund_score, "fundamentals_conf": fund_conf,
+                        "vix": vix_score, "vix_conf": vix_conf,
+                        "momentum": mom_score, "momentum_conf": mom_conf,
+                        "earnings": earn_score, "earnings_conf": earn_conf,
                     }
-                    grade = simulate_grade(sub, category, term)
+                    grade = simulate_grade(sub, category, term, mode=mode)
                     grade_batch.append(make_grade_params(
                         iid, symbol, d, term, grade["overall_score"],
                         tech_score, tech_conf, sent_score, sent_conf,
                         macro_score, macro_conf, sector_score, sector_conf,
-                        fund_score, fund_conf, nominal_weights, sentiment_mode="on",
+                        fund_score, fund_conf,
+                        vix_score, vix_conf, mom_score, mom_conf,
+                        earn_score, earn_conf,
+                        nominal_weights, sentiment_mode="on",
                     ))
                     stored += 1
 
                 # --- Without sentiment (mode="off") ---
-                # Mirrors production scorer.py "pure score" branch: force
-                # sentiment/sector/macro confidence to 0.0 so their effective
-                # weight collapses to nominal × 0.1 (the floor).  This must
-                # match what mode="on" produces when the sentiment cache is
-                # empty (also conf=0.0), ensuring identical results when no
-                # sentiment data exists.
                 if not (skip_existing and (d, term, "off") in existing_grades):
                     sub_off: SubScores = {
                         "technical": tech_score, "technical_conf": tech_conf,
@@ -355,13 +413,19 @@ async def run_backtest(
                         "sector": 0.0, "sector_conf": 0.0,
                         "macro": 0.0, "macro_conf": 0.0,
                         "fundamentals": fund_score, "fundamentals_conf": fund_conf,
+                        "vix": vix_score, "vix_conf": vix_conf,
+                        "momentum": mom_score, "momentum_conf": mom_conf,
+                        "earnings": earn_score, "earnings_conf": earn_conf,
                     }
-                    grade_off = simulate_grade(sub_off, category, term)
+                    grade_off = simulate_grade(sub_off, category, term, mode=mode)
                     grade_batch.append(make_grade_params(
                         iid, symbol, d, term, grade_off["overall_score"],
                         tech_score, tech_conf, 0.0, 0.0,
                         0.0, 0.0, 0.0, 0.0,
-                        fund_score, fund_conf, nominal_weights, sentiment_mode="off",
+                        fund_score, fund_conf,
+                        vix_score, vix_conf, mom_score, mom_conf,
+                        earn_score, earn_conf,
+                        nominal_weights, sentiment_mode="off",
                     ))
                     stored += 1
 
@@ -398,6 +462,9 @@ async def load_backtest_results(term: str = "short", sentiment_mode: str = "on")
                        bg.macro_score, bg.macro_conf,
                        bg.sector_score, bg.sector_conf,
                        bg.fundamentals_score, bg.fundamentals_conf,
+                       bg.vix_score, bg.vix_conf,
+                       bg.momentum_score, bg.momentum_conf,
+                       bg.earnings_score, bg.earnings_conf,
                        br.return_5d, br.return_20d
                 FROM backtest_grades bg
                 LEFT JOIN backtest_returns br
@@ -429,6 +496,12 @@ async def load_backtest_results(term: str = "short", sentiment_mode: str = "on")
             "macro_conf":        float(r.macro_conf) if r.macro_conf is not None else 0.0,
             "fundamentals":      float(r.fundamentals_score) if r.fundamentals_score is not None else 0.0,
             "fundamentals_conf": float(r.fundamentals_conf) if r.fundamentals_conf is not None else 0.0,
+            "vix":               float(r.vix_score) if r.vix_score is not None else 0.0,
+            "vix_conf":          float(r.vix_conf) if r.vix_conf is not None else 0.0,
+            "momentum":          float(r.momentum_score) if r.momentum_score is not None else 0.0,
+            "momentum_conf":     float(r.momentum_conf) if r.momentum_conf is not None else 0.0,
+            "earnings":          float(r.earnings_score) if r.earnings_score is not None else 0.0,
+            "earnings_conf":     float(r.earnings_conf) if r.earnings_conf is not None else 1.0,
             "return_5d":         float(r.return_5d) if r.return_5d is not None else None,
             "return_20d":        float(r.return_20d) if r.return_20d is not None else None,
         })

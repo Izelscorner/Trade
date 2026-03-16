@@ -630,7 +630,13 @@ async def get_raw_results(term: str = "short", sentiment_mode: str = "on") -> pd
         ret_col = "return_5d" if term == "short" else "return_20d"
         result = await session.execute(
             text(f"""
-            SELECT bg.symbol, bg.date, bg.overall_score, br.{ret_col} as return_val
+            SELECT bg.symbol, bg.date, bg.overall_score,
+                   bg.technical_score, bg.technical_conf,
+                   bg.sentiment_score, bg.sentiment_conf,
+                   bg.macro_score, bg.macro_conf,
+                   bg.sector_score, bg.sector_conf,
+                   bg.fundamentals_score, bg.fundamentals_conf,
+                   br.{ret_col} as return_val
             FROM backtest_grades bg
             JOIN backtest_returns br ON br.instrument_id = bg.instrument_id AND br.date = bg.date
             WHERE bg.term = :term AND bg.sentiment_mode = :smode
@@ -644,8 +650,17 @@ async def get_raw_results(term: str = "short", sentiment_mode: str = "on") -> pd
     df = pd.DataFrame([dict(r._mapping) for r in rows])
     if not df.empty:
         # Ensure numeric columns are float (Postgres returns Decimal)
-        df["overall_score"] = df["overall_score"].astype(float)
-        df["return_val"] = df["return_val"].astype(float)
+        numeric_cols = [
+            "overall_score", "return_val",
+            "technical_score", "technical_conf",
+            "sentiment_score", "sentiment_conf",
+            "macro_score", "macro_conf",
+            "sector_score", "sector_conf",
+            "fundamentals_score", "fundamentals_conf",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
         # Cap returns at [-1.0, +5.0] — returns below -100% are artifacts
         # (e.g., oil futures going negative in Apr 2020)
         df["return_val"] = df["return_val"].clip(lower=-1.0, upper=5.0)
